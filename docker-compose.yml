@@ -1,0 +1,138 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: sentiment
+      POSTGRES_PASSWORD: sentiment
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./storage-service/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sentiment"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  preprocessing-service:
+    build:
+      context: .
+      dockerfile: preprocessing-service/Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  sentiment-service:
+    build:
+      context: .
+      dockerfile: sentiment-service/Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - PYTHONUNBUFFERED=1
+      - HF_HOME=/app/.cache/huggingface
+    volumes:
+      - hf_cache:/app/.cache/huggingface
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  storage-service:
+    build:
+      context: .
+      dockerfile: storage-service/Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - PYTHONUNBUFFERED=1
+      - DATABASE_DSN=postgresql://postgres:sentiment@postgres:5432/sentiment
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  bluesky-producer:
+    build:
+      context: .
+      dockerfile: bluesky-producer/Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./bluesky-producer/keywords.json:/app/keywords.json:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  stocktwits-producer:
+    build:
+      context: .
+      dockerfile: stocktwits-producer/Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  news-producer:
+    build:
+      context: .
+      dockerfile: news-producer/Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  market-producer:
+    build:
+      context: .
+      dockerfile: market-producer/Dockerfile
+    environment:
+      - DATABASE_DSN=postgresql://postgres:sentiment@postgres:5432/sentiment
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api-service:
+    build:
+      context: .
+      dockerfile: api-service/Dockerfile
+    environment:
+      - DATABASE_DSN=postgresql://postgres:sentiment@postgres:5432/sentiment
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ui-service:
+    build:
+      context: .
+      dockerfile: ui-service/Dockerfile
+    environment:
+      - API_URL=http://api-service:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api-service
+
+volumes:
+  postgres_data:
+  hf_cache:

@@ -1,0 +1,4 @@
+httpx
+pika
+pydantic
+

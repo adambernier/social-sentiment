@@ -1,0 +1,5 @@
+{
+  "ASTS": ["ASTS", "$ASTS", "SpaceMobile"],
+  "RKLB": ["RKLB", "$RKLB", "Rocket Lab"],
+  "INTC": ["INTC", "$INTC", "Intel"]
+}
