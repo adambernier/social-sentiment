@@ -7,30 +7,21 @@ performance dashboard.
 
 ```text
 [Social Media]
-      │
       ▼
  (raw-posts)
-      │
       ▼
 [Preprocessing]
-      │
       ▼
  (clean-posts)
-      │
       ▼
 [Sentiment]
-      │
       ▼
  (scored-posts)
-      │
       ▼
   [Storage]                [Market Data]
-      │                          │
       └──────▶ [(Postgres)] ◀────┘
-                    │
                     ▼
               [API Service]
-                    │
                     ▼
                [UI Service]
 ```
