@@ -22,17 +22,17 @@ performance dashboard.
       │
       ▼
  (scored-posts)
-      │                 [Market Data]
-      ▼                       │
-  [Storage]                   │
-      │                       │
-      └─────────▶ [(Postgres)] ◀─┘
-                      │
-                      ▼
-                 [API Service]
-                      │
-                      ▼
-                 [UI Service]
+      │
+      ▼
+  [Storage]                [Market Data]
+      │                          │
+      └──────▶ [(Postgres)] ◀────┘
+                    │
+                    ▼
+              [API Service]
+                    │
+                    ▼
+               [UI Service]
 ```
 
 ## Services
