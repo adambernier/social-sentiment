@@ -5,20 +5,34 @@ their sentiment with a transformer model, stores the result in Postgres, and
 integrates real-time financial metrics to provide a comprehensive stock
 performance dashboard.
 
-```mermaid
-graph TD
-    SM[Social Media] --> Q1[(raw-posts)]
-    Q1 --> PRE[Preprocessing Service]
-    PRE --> Q2[(clean-posts)]
-    Q2 --> SEN[Sentiment Service]
-    SEN --> Q3[(scored-posts)]
-    Q3 --> STO[Storage Service]
-    
-    MD[Market Data] --> DB[(PostgreSQL)]
-    STO --> DB
-    
-    DB --> API[API Service]
-    API --> UI[UI Dashboard]
+```text
+[Social Media]
+      │
+      ▼
+ (raw-posts)
+      │
+      ▼
+[Preprocessing]
+      │
+      ▼
+ (clean-posts)
+      │
+      ▼
+[Sentiment]
+      │
+      ▼
+ (scored-posts)
+      │                 [Market Data]
+      ▼                       │
+  [Storage]                   │
+      │                       │
+      └─────────▶ [(Postgres)] ◀─┘
+                      │
+                      ▼
+                 [API Service]
+                      │
+                      ▼
+                 [UI Service]
 ```
 
 ## Services
