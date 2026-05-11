@@ -37,6 +37,23 @@ Inspired by hockey stat cards, the dashboard features a **Divergent Bar Chart** 
 - Uses a **RoBERTa transformer model** fine-tuned for financial sentiment.
 - Automatically calculates **Retail vs. Institutional Divergence** by comparing social media chatter against news headlines.
 
+## Getting Started on a New Machine
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/adambernier/social-sentiment.git
+   cd social-sentiment
+   ```
+
+2. **(Optional) Local Python Environment:**
+   If you plan to run scripts or services locally outside of Docker, set up a virtual environment:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   # Install requirements for whichever service you are working on, e.g.:
+   pip install -r preprocessing-service/requirements.txt
+   ```
+
 ## Quick start (Docker Compose)
 
 The whole stack — RabbitMQ, Postgres, and all five services — is orchestrated
