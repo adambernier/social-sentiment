@@ -1,4 +1,5 @@
+onnxruntime
 transformers
-torch
 pika
 pydantic
+numpy
