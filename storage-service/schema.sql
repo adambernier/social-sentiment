@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS stock_quotes (
     timestamp   TIMESTAMPTZ NOT NULL,
     price       FLOAT NOT NULL,
     volume      BIGINT NOT NULL,
+    market_session TEXT NOT NULL DEFAULT 'closed',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

@@ -31,6 +31,7 @@ class StockQuote(BaseModel):
     timestamp: datetime
     price: float
     volume: int
+    market_session: str
 
 
 class StockMetrics(BaseModel):

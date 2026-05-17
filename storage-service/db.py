@@ -19,8 +19,8 @@ INSERT_POST_SQL = """
 """
 
 INSERT_QUOTE_SQL = """
-    INSERT INTO stock_quotes (symbol, timestamp, price, volume)
-    VALUES (%s, %s, %s, %s)
+    INSERT INTO stock_quotes (symbol, timestamp, price, volume, market_session)
+    VALUES (%s, %s, %s, %s, %s)
     RETURNING id
 """
 
@@ -111,6 +111,7 @@ class DB:
                     quote.timestamp,
                     quote.price,
                     quote.volume,
+                    quote.market_session,
                 ),
             )
             return cur.fetchone() is not None

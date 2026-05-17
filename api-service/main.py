@@ -58,6 +58,7 @@ class MarketQuote(BaseModel):
     timestamp: datetime
     price: float
     volume: int
+    market_session: str
 
 class StockMetricsResponse(BaseModel):
     symbol: str
@@ -168,7 +169,7 @@ async def get_market_stats(
     hours: int = Query(24, gt=0)
 ):
     query = """
-        SELECT symbol, timestamp, price, volume 
+        SELECT symbol, timestamp, price, volume, market_session 
         FROM stock_quotes 
         WHERE symbol = %s AND timestamp > %s
         ORDER BY timestamp ASC
@@ -183,7 +184,7 @@ async def get_market_stats(
 @app.get("/stats/market/latest", response_model=Optional[MarketQuote])
 async def get_latest_market_quote(symbol: str):
     query = """
-        SELECT symbol, timestamp, price, volume 
+        SELECT symbol, timestamp, price, volume, market_session 
         FROM stock_quotes 
         WHERE symbol = %s 
         ORDER BY timestamp DESC LIMIT 1

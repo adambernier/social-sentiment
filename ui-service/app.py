@@ -4,18 +4,52 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import pandas_market_calendars as mcal
 from datetime import datetime
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 
-st.set_page_config(page_title="Social Sentiment & Market Dashboard", layout="wide")
+# Initialize market calendar
+nyse = mcal.get_calendar('NYSE')
 
-st.title("📊 Social Sentiment & Market Data")
+st.set_page_config(page_title="Social Sentiment & Market Dashboard", layout="wide")
 
 # --- Sidebar Filters ---
 st.sidebar.header("Settings")
 live_mode = st.sidebar.toggle("Live Mode (Auto-refresh)", value=False)
-hours = st.sidebar.slider("Time Window (Hours)", 1, 48, 24)
+
+# --- Dynamic Time Window Logic ---
+now = datetime.now()
+# Fetch recent schedule to find the last close
+recent_schedule = nyse.schedule(start_date=now - pd.Timedelta(days=7), end_date=now)
+last_close = recent_schedule.iloc[-1]['market_close'].to_pydatetime()
+
+# If it's a weekend or before today's open, the 'last close' is Friday/Yesterday
+if now.astimezone(last_close.tzinfo) < last_close:
+    # If today is a trading day but we haven't reached the close yet,
+    # the 'Last Close' is actually the previous trading day.
+    if len(recent_schedule) > 1:
+        last_close = recent_schedule.iloc[-2]['market_close'].to_pydatetime()
+
+# Determine if it's currently a weekend for the 'Weekend Digest' mode
+is_weekend = now.weekday() >= 5 # 5=Saturday, 6=Sunday
+
+window_options = ["Last 24h", "Last 48h", "Since Last Close"]
+if is_weekend:
+    window_options.insert(0, "Weekend Digest")
+
+selected_window = st.sidebar.selectbox("Time Window", window_options, index=0)
+
+# Map selection to hours
+if selected_window == "Last 24h":
+    hours = 24
+elif selected_window == "Last 48h":
+    hours = 48
+else:
+    # "Since Last Close" or "Weekend Digest"
+    delta = datetime.now(last_close.tzinfo) - last_close
+    hours = max(1, int(delta.total_seconds() / 3600))
+
 symbol = st.sidebar.selectbox("Symbol", ["ASTS", "RKLB", "INTC", "NVDA"])
 platform = st.sidebar.selectbox("Platform", ["All", "bluesky", "stocktwits", "yahoo"])
 platform_param = "" if platform == "All" else f"&platform={platform}"
@@ -83,6 +117,11 @@ def dashboard_content():
     latest_quote = fetch_latest_quote(symbol)
     metrics_data = fetch_metrics(symbol)
 
+    # --- Header Row ---
+    header_left, header_right = st.columns([3, 1])
+    with header_left:
+        st.markdown("<h1 class='dashboard-title'>📊 Social Sentiment & Market Data</h1>", unsafe_allow_html=True)
+    
     # --- Data Processing ---
     df_posts = pd.DataFrame()
     if posts_data:
@@ -123,18 +162,45 @@ def dashboard_content():
 
     # Market KPIs
     if latest_quote:
-        # Use market_data if available for the change delta, else use latest_quote
         price_val = latest_quote['price']
         vol_val = latest_quote['volume']
+        session = latest_quote.get('market_session', 'closed')
+        as_of = pd.to_datetime(latest_quote['timestamp'])
+        
+        # Determine Label and Pulse
+        if session == 'regular':
+            price_label = "Live Price"
+            status_html = '<span class="pulse"></span> **Market Open**'
+        elif session == 'pre':
+            price_label = "Pre-market"
+            status_html = "🟡 **Pre-market**"
+        elif session == 'after':
+            price_label = "After-hours"
+            status_html = "🔵 **After-hours**"
+        else:
+            # Format nicely: Last Close — Fri May 15, 16:00 ET
+            # Convert UTC to ET for display (approx -4h)
+            et_time = as_of - pd.Timedelta(hours=4)
+            price_label = f"Last Close — {et_time.strftime('%a %b %d, %H:%M')} ET"
+            status_html = "⚪ **Market Closed**"
+
+        with header_right:
+            st.markdown(f"<div style='text-align: right; margin-top: 15px;'>{status_html}</div>", unsafe_allow_html=True)
         
         # Calculate change from start of window if possible
-        if market_data:
-            df_market = pd.DataFrame(market_data)
-            prev_quote_val = df_market.iloc[0]['price']
-            change = price_val - prev_quote_val
-            col5.metric(f"{symbol} Price", f"${price_val:.2f}", f"{change:+.2f}")
+        price_display = f"${price_val:.2f}"
+        if session == 'closed':
+            # Use markdown for the metric to allow styling if it's stale
+            col5.markdown(f"<p style='font-size: 14px; margin-bottom: -10px;'>{price_label}</p>", unsafe_allow_html=True)
+            col5.markdown(f"<h2 class='stale-price' style='margin-top: 0;'>{price_display}</h2>", unsafe_allow_html=True)
         else:
-            col5.metric(f"{symbol} Price", f"${price_val:.2f}")
+            if market_data:
+                df_market = pd.DataFrame(market_data)
+                prev_quote_val = df_market.iloc[0]['price']
+                change = price_val - prev_quote_val
+                col5.metric(f"{symbol} {price_label}", price_display, f"{change:+.2f}")
+            else:
+                col5.metric(f"{symbol} {price_label}", price_display)
             
         col6.metric("Volume", f"{vol_val:,}")
     else:
@@ -199,7 +265,12 @@ def dashboard_content():
     st.divider()
 
     # --- Correlation Chart ---
-    st.subheader(f"📈 {symbol} Sentiment vs. Price Correlation")
+    chart_title = f"📈 {symbol} Sentiment vs. Price Correlation"
+    if latest_quote and latest_quote.get('market_session') == 'closed':
+        chart_title = f"📈 {symbol} Sentiment Activity (Market Closed)"
+    
+    st.subheader(chart_title)
+    
     if not df_posts.empty:
         # Determine bucket frequency based on time window
         freq = '1h' if hours > 6 else '15min'
@@ -218,14 +289,89 @@ def dashboard_content():
             barmode='stack'
         )
         
+        # Add Shading for Closed Hours
+        # Get start/end of the chart's time range
+        chart_start = df_posts['timestamp'].min()
+        chart_end = df_posts['timestamp'].max()
+        
+        if chart_start and chart_end:
+            # Get NYSE schedule for this range
+            # Note: nyse.schedule expects dates, so we use chart_start.date() to chart_end.date()
+            schedule = nyse.schedule(start_date=chart_start, end_date=chart_end)
+            
+            # Draw shaded rectangles for each night/weekend
+            # We iterate through the days and shade the gaps between market_close and next market_open
+            # Plus everything before first open and after last close in the window
+            
+            # Simple approach: Find periods in ts_df where market is NOT open
+            # But even better: Use the actual NYSE schedule to be precise
+            
+            # 1. Shade from chart_start to first market_open (if it exists)
+            # 2. Iterate through schedule rows and shade gaps between market_close and next market_open
+            # 3. Shade from last market_close to chart_end
+            
+            prev_close = chart_start
+            for idx, row in schedule.iterrows():
+                m_open = row['market_open'].to_pydatetime()
+                m_close = row['market_close'].to_pydatetime()
+                
+                # Shade from prev_close to m_open (if there's a gap)
+                if m_open > prev_close:
+                    fig.add_vrect(
+                        x0=prev_close, x1=m_open,
+                        fillcolor="gray", opacity=0.1, line_width=0,
+                        layer="below"
+                    )
+                prev_close = m_close
+            
+            # Final shade from last close to end of chart
+            if chart_end > prev_close:
+                fig.add_vrect(
+                    x0=prev_close, x1=chart_end,
+                    fillcolor="gray", opacity=0.1, line_width=0,
+                    layer="below"
+                )
+
         if market_data:
             df_market = pd.DataFrame(market_data)
             df_market['timestamp'] = pd.to_datetime(df_market['timestamp'], utc=True, format='ISO8601')
             
+            # Distinguish between regular/active sessions and closed sessions for the line style
+            # Split into traces or use a list of line styles
+            # For simplicity and clear visual: draw one continuous line, but dashed during 'closed' sessions
+            # Actually, Scatter 'line' style can't be changed per-point easily.
+            # Best way: multiple traces.
+            
+            # Separate market data into contiguous segments
+            # For this MVP: draw the yellow line. We'll use a single trace but can 
+            # make it dashed if ALL points in the window are closed.
+            
+            # Advanced: Split into segments
+            last_idx = 0
+            for i in range(1, len(df_market)):
+                if df_market.iloc[i]['market_session'] != df_market.iloc[i-1]['market_session']:
+                    # Segment change
+                    segment = df_market.iloc[last_idx:i+1]
+                    is_closed = df_market.iloc[i-1]['market_session'] == 'closed'
+                    
+                    fig.add_trace(go.Scatter(
+                        x=segment['timestamp'], y=segment['price'],
+                        name='Price (Closed)' if is_closed else 'Price',
+                        yaxis='y2',
+                        line=dict(color='#F1C40F', width=4, dash='dot' if is_closed else 'solid'),
+                        showlegend=False
+                    ))
+                    last_idx = i
+            
+            # Final segment
+            segment = df_market.iloc[last_idx:]
+            is_closed = df_market.iloc[-1]['market_session'] == 'closed'
             fig.add_trace(go.Scatter(
-                x=df_market['timestamp'], y=df_market['price'], 
-                name=f'{symbol} Price', yaxis='y2',
-                line=dict(color='#F1C40F', width=4)
+                x=segment['timestamp'], y=segment['price'],
+                name='Price (Closed)' if is_closed else 'Price',
+                yaxis='y2',
+                line=dict(color='#F1C40F', width=4, dash='dot' if is_closed else 'solid'),
+                showlegend=False
             ))
             
             fig.update_layout(
@@ -268,7 +414,12 @@ def dashboard_content():
     else:
         st.info("No topic data found for this period.")
 
+    # --- Weekend Digest / Window Summary ---
     st.divider()
+    if selected_window == "Weekend Digest":
+        st.info(f"✨ **Weekend Digest**: Summarizing all chatter since {last_close.strftime('%A, %b %d at %H:%M')} ET. How should this sentiment shift expectations for Monday's open?")
+    elif selected_window == "Since Last Close":
+        st.caption(f"Showing data since last close on {last_close.strftime('%b %d, %H:%M')} ET")
 
     # --- Side-by-Side Feeds ---
     col_social, col_news = st.columns(2)

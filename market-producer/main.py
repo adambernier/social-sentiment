@@ -1,6 +1,8 @@
 import time
 import sys
-from datetime import datetime, timezone
+import pandas as pd
+import pandas_market_calendars as mcal
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import yfinance as yf
@@ -11,6 +13,9 @@ sys.path.append(str(ROOT))
 
 from shared.schemas import StockQuote, StockMetrics
 from storage_service.db import DB
+
+# Initialize market calendar
+nyse = mcal.get_calendar('NYSE')
 
 SYMBOLS = ["ASTS", "RKLB", "INTC", "NVDA"]
 # Sector proxies (using ETFs)
@@ -91,10 +96,45 @@ def fetch_and_store_metrics(db: DB):
         except Exception as e:
             print(f"Error updating metrics for {symbol}: {e}")
 
+def get_market_session(now_utc: datetime) -> str:
+    # Get schedule for current day (and tomorrow just in case of wrap-around)
+    schedule = nyse.schedule(start_date=now_utc - timedelta(days=1), end_date=now_utc + timedelta(days=1))
+    
+    # Check if today is a trading day
+    day_str = now_utc.strftime('%Y-%m-%d')
+    if day_str not in schedule.index:
+        return 'closed'
+    
+    row = schedule.loc[day_str]
+    
+    # Standard NYSE hours (UTC)
+    # Pre-market: 4:00 AM - 9:30 AM ET
+    # Regular: 9:30 AM - 4:00 PM ET
+    # After-hours: 4:00 PM - 8:00 PM ET
+    
+    market_open = row['market_open'].to_pydatetime()
+    market_close = row['market_close'].to_pydatetime()
+    
+    # Calculate pre and after offsets (standard NYSE rules)
+    # yfinance and most data providers use these windows
+    pre_market_open = market_open - timedelta(hours=5, minutes=30) # 4:00 AM ET
+    after_hours_close = market_close + timedelta(hours=4)          # 8:00 PM ET
+
+    if market_open <= now_utc <= market_close:
+        return 'regular'
+    elif pre_market_open <= now_utc < market_open:
+        return 'pre'
+    elif market_close < now_utc <= after_hours_close:
+        return 'after'
+    else:
+        return 'closed'
+
 def fetch_and_store(db: DB):
+    current_session = get_market_session(datetime.now(timezone.utc))
+    
     for symbol in SYMBOLS:
         try:
-            print(f"Fetching {symbol}...")
+            print(f"Fetching {symbol} (Session: {current_session})...")
             ticker = yf.Ticker(symbol)
             # Fetch last 1 day of 1-minute data to get the absolute latest close
             data = ticker.history(period="1d", interval="1m")
@@ -111,12 +151,13 @@ def fetch_and_store(db: DB):
                 symbol=symbol,
                 timestamp=ts,
                 price=float(latest["Close"]),
-                volume=int(latest["Volume"])
+                volume=int(latest["Volume"]),
+                market_session=current_session
             )
             
             inserted = db.insert_quote(quote)
             if inserted:
-                print(f"SUCCESS: {symbol} at {ts.strftime('%H:%M:%S')} UTC -> ${quote.price:.2f}")
+                print(f"SUCCESS: {symbol} at {ts.strftime('%H:%M:%S')} UTC -> ${quote.price:.2f} ({current_session})")
             else:
                 print(f"INFO: {symbol} quote already exists for {ts}")
                 
