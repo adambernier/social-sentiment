@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS posts (
     timestamp   TIMESTAMPTZ NOT NULL,
     sentiment   TEXT NOT NULL,
     scores      JSONB NOT NULL,
+    topic_id    INTEGER,
+    topic_label TEXT,
     scored_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

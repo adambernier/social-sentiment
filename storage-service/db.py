@@ -12,8 +12,8 @@ from shared.config import DATABASE_DSN
 SCHEMA_FILE = Path(__file__).parent / "schema.sql"
 
 INSERT_POST_SQL = """
-    INSERT INTO posts (id, symbol, platform, text, timestamp, sentiment, scores)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    INSERT INTO posts (id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (id) DO NOTHING
     RETURNING id
 """
@@ -63,29 +63,36 @@ class DB:
         with self.conn.cursor() as cur:
             cur.execute(sql)
 
-    def insert_scored(self, post: ScoredPost) -> bool:
+    def insert_scored_batch(self, posts: list[ScoredPost]) -> int:
         try:
-            return self._do_insert_post(post)
+            return self._do_insert_posts_batch(posts)
         except psycopg.OperationalError:
             print("DB connection lost, reconnecting...")
             self._connect()
-            return self._do_insert_post(post)
+            return self._do_insert_posts_batch(posts)
 
-    def _do_insert_post(self, post: ScoredPost) -> bool:
-        with self.conn.cursor() as cur:
-            cur.execute(
-                INSERT_POST_SQL,
-                (
-                    post.id,
-                    post.symbol,
-                    post.platform,
-                    post.text,
-                    post.timestamp,
-                    post.sentiment,
-                    json.dumps(post.scores),
-                ),
+    def _do_insert_posts_batch(self, posts: list[ScoredPost]) -> int:
+        data = [
+            (
+                p.id,
+                p.symbol,
+                p.platform,
+                p.text,
+                p.timestamp,
+                p.sentiment,
+                json.dumps(p.scores),
+                p.topic_id,
+                p.topic_label,
             )
-            return cur.fetchone() is not None
+            for p in posts
+        ]
+        with self.conn.cursor() as cur:
+            # executemany is efficient for small-to-medium batches
+            cur.executemany(INSERT_POST_SQL, data)
+            # Since ON CONFLICT DO NOTHING is used, we might not get 
+            # accurate row counts if we want to know how many were NEW.
+            # But the primary goal is bulk insertion.
+            return cur.rowcount
 
     def insert_quote(self, quote: StockQuote) -> bool:
         try:

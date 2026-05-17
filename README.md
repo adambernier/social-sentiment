@@ -85,6 +85,7 @@ Useful endpoints once the stack is up:
 - API docs: http://localhost:8000/docs
 - Latest posts: http://localhost:8000/posts
 - 24h sentiment stats: http://localhost:8000/stats/sentiment
+- 24h topic stats: http://localhost:8000/stats/topics
 - Financial metrics: http://localhost:8000/stats/metrics?symbol=INTC
 - RabbitMQ management UI: http://localhost:15672 (`guest` / `guest`)
 - Postgres: `localhost:5432`, db `sentiment`, user `postgres`, password `sentiment`
@@ -175,4 +176,6 @@ Once running, access the dashboard at: http://localhost:8501
   <service>` for details.
 - **Want to start clean** — `docker compose down -v` drops `postgres_data` and
   `hf_cache`. Or, less destructively, purge queues from the management UI and
+  `TRUNCATE posts;` in Postgres.
+r, less destructively, purge queues from the management UI and
   `TRUNCATE posts;` in Postgres.

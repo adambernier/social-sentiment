@@ -1,9 +1,11 @@
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 import psycopg
+from psycopg_pool import ConnectionPool
 from fastapi import FastAPI, Query
 from pydantic import BaseModel
 
@@ -12,7 +14,24 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.config import DATABASE_DSN
 
-app = FastAPI(title="Social Sentiment API")
+# Global pool instance
+db_pool: Optional[ConnectionPool] = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global db_pool
+    print("Initializing database connection pool...")
+    db_pool = ConnectionPool(
+        DATABASE_DSN,
+        min_size=5,
+        max_size=20,
+        kwargs={"row_factory": psycopg.rows.dict_row}
+    )
+    yield
+    print("Closing database connection pool...")
+    db_pool.close()
+
+app = FastAPI(title="Social Sentiment API", lifespan=lifespan)
 
 class PostResponse(BaseModel):
     id: str
@@ -22,7 +41,13 @@ class PostResponse(BaseModel):
     timestamp: datetime
     sentiment: str
     scores: dict[str, float]
+    topic_id: Optional[int]
+    topic_label: Optional[str]
     scored_at: datetime
+
+class TopicStats(BaseModel):
+    topic_label: Optional[str]
+    count: int
 
 class SentimentStats(BaseModel):
     sentiment: str
@@ -46,7 +71,9 @@ class StockMetricsResponse(BaseModel):
     updated_at: datetime
 
 def get_db_conn():
-    return psycopg.connect(DATABASE_DSN, row_factory=psycopg.rows.dict_row)
+    if db_pool is None:
+        raise RuntimeError("Database pool not initialized")
+    return db_pool.connection()
 
 @app.get("/posts", response_model=list[PostResponse])
 async def get_posts(
@@ -56,7 +83,7 @@ async def get_posts(
     limit: int = Query(20, le=1000),
     offset: int = 0
 ):
-    query = "SELECT id, symbol, platform, text, timestamp, sentiment, scores, scored_at FROM posts"
+    query = "SELECT id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, scored_at FROM posts"
     conditions = []
     params = []
 
@@ -102,6 +129,33 @@ async def get_sentiment_stats(
         params.append(platform)
 
     query += " GROUP BY sentiment"
+
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            return cur.fetchall()
+
+@app.get("/stats/topics", response_model=list[TopicStats])
+async def get_topic_stats(
+    symbol: Optional[str] = None,
+    platform: Optional[str] = None,
+    hours: int = Query(24, gt=0)
+):
+    query = """
+        SELECT topic_label, COUNT(*) as count 
+        FROM posts 
+        WHERE timestamp > %s
+    """
+    params = [datetime.now() - timedelta(hours=hours)]
+
+    if symbol:
+        query += " AND symbol = %s"
+        params.append(symbol)
+    if platform:
+        query += " AND platform = %s"
+        params.append(platform)
+
+    query += " GROUP BY topic_label ORDER BY count DESC"
 
     with get_db_conn() as conn:
         with conn.cursor() as cur:

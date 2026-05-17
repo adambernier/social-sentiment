@@ -16,7 +16,7 @@ st.title("📊 Social Sentiment & Market Data")
 st.sidebar.header("Settings")
 live_mode = st.sidebar.toggle("Live Mode (Auto-refresh)", value=False)
 hours = st.sidebar.slider("Time Window (Hours)", 1, 48, 24)
-symbol = st.sidebar.selectbox("Symbol", ["ASTS", "RKLB", "INTC"])
+symbol = st.sidebar.selectbox("Symbol", ["ASTS", "RKLB", "INTC", "NVDA"])
 platform = st.sidebar.selectbox("Platform", ["All", "bluesky", "stocktwits", "yahoo"])
 platform_param = "" if platform == "All" else f"&platform={platform}"
 
@@ -25,6 +25,15 @@ platform_param = "" if platform == "All" else f"&platform={platform}"
 def fetch_stats(hrs, sym, p_param):
     try:
         url = f"{API_URL}/stats/sentiment?hours={hrs}&symbol={sym}{p_param}"
+        res = requests.get(url, timeout=5)
+        return res.json() if res.status_code == 200 else []
+    except Exception as e:
+        return []
+
+@st.cache_data(ttl=30)
+def fetch_topic_stats(hrs, sym, p_param):
+    try:
+        url = f"{API_URL}/stats/topics?hours={hrs}&symbol={sym}{p_param}"
         res = requests.get(url, timeout=5)
         return res.json() if res.status_code == 200 else []
     except Exception as e:
@@ -68,6 +77,7 @@ def fetch_metrics(sym):
 @st.fragment(run_every="60s" if live_mode else None)
 def dashboard_content():
     stats_data = fetch_stats(hours, symbol, platform_param)
+    topic_stats = fetch_topic_stats(hours, symbol, platform_param)
     posts_data = fetch_posts(symbol, platform_param)
     market_data = fetch_market_data(symbol, hours)
     latest_quote = fetch_latest_quote(symbol)
@@ -226,6 +236,37 @@ def dashboard_content():
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Insufficient data for correlation chart.")
+
+    st.divider()
+
+    # --- Topic Distribution Chart ---
+    st.subheader("🏷️ Trending Topics")
+    if topic_stats:
+        df_topics = pd.DataFrame(topic_stats)
+        # Limit to top 10 topics for better visualization
+        df_topics = df_topics.head(10)
+        
+        fig_topics = px.bar(
+            df_topics,
+            x="count",
+            y="topic_label",
+            orientation="h",
+            color="count",
+            color_continuous_scale="Viridis",
+            labels={"count": "Mentions", "topic_label": "Topic"},
+            template="plotly_white",
+            height=400
+        )
+        
+        fig_topics.update_layout(
+            yaxis={"autorange": "reversed"},
+            coloraxis_showscale=False,
+            margin=dict(l=20, r=20, t=20, b=20)
+        )
+        
+        st.plotly_chart(fig_topics, use_container_width=True)
+    else:
+        st.info("No topic data found for this period.")
 
     st.divider()
 

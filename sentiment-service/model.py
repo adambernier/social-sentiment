@@ -14,18 +14,24 @@ class SentimentModel:
             "neutral": "neutral"
         }
 
-    def predict(self, text: str) -> tuple[str, dict[str, float]]:
-        # Truncate to 512 tokens (BERT limit)
-        results = self.pipe(text[:512])[0]
+    def predict_batch(self, texts: list[str]) -> list[tuple[str, dict[str, float]]]:
+        # Truncate all texts to 512 tokens (BERT limit)
+        truncated_texts = [text[:512] for text in texts]
         
-        # Extract and map scores (case-insensitive)
-        scores = {}
-        for r in results:
-            raw_label = r["label"]
-            mapped_label = self.label_map.get(raw_label.lower(), raw_label.lower())
-            scores[mapped_label] = r["score"]
+        # Batch process with the pipeline
+        batch_results = self.pipe(truncated_texts)
         
-        # Pick the winner
-        top_label = max(scores, key=scores.get)
-        
-        return top_label, scores
+        final_results = []
+        for results in batch_results:
+            # Extract and map scores (case-insensitive)
+            scores = {}
+            for r in results:
+                raw_label = r["label"]
+                mapped_label = self.label_map.get(raw_label.lower(), raw_label.lower())
+                scores[mapped_label] = r["score"]
+            
+            # Pick the winner
+            top_label = max(scores, key=scores.get)
+            final_results.append((top_label, scores))
+            
+        return final_results

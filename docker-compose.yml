@@ -51,6 +51,20 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  topic-service:
+    build:
+      context: .
+      dockerfile: topic-service/Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - PYTHONUNBUFFERED=1
+      - HF_HOME=/app/.cache/huggingface
+    volumes:
+      - hf_cache:/app/.cache/huggingface
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
   storage-service:
     build:
       context: .
@@ -64,6 +78,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      topic-service:
+        condition: service_started
 
   bluesky-producer:
     build:

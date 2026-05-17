@@ -12,12 +12,13 @@ sys.path.append(str(ROOT))
 from shared.schemas import StockQuote, StockMetrics
 from storage_service.db import DB
 
-SYMBOLS = ["ASTS", "RKLB", "INTC"]
+SYMBOLS = ["ASTS", "RKLB", "INTC", "NVDA"]
 # Sector proxies (using ETFs)
 SECTOR_MAP = {
     "ASTS": "XAR",  # Space/Tech
     "RKLB": "XAR",
     "INTC": "XLK",  # Semiconductors/Tech
+    "NVDA": "XLK",
 }
 POLL_INTERVAL = 60  # 1 minute
 METRICS_INTERVAL = 3600 # 1 hour

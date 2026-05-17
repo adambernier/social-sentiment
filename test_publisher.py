@@ -37,6 +37,7 @@ def main():
     for platform, post_id, text in samples:
         post = RawPost(
             id=post_id,
+            symbol="TEST",
             platform=platform,
             text=text,
             timestamp=datetime.now(timezone.utc),

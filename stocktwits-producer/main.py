@@ -1,4 +1,4 @@
-import time
+import asyncio
 import json
 import logging
 import sys
@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-import pika
+import aio_pika
 
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -39,95 +39,93 @@ def get_symbols():
                 if isinstance(data, dict):
                     return list(data.keys())
                 return data
-        return ["ASTS", "RKLB", "INTC"]
+        return ["ASTS", "RKLB", "INTC", "NVDA"]
     except Exception as e:
         logger.error(f"Error reading keywords: {e}")
-        return ["ASTS", "RKLB", "INTC"]
+        return ["ASTS", "RKLB", "INTC", "NVDA"]
 
-def main():
-    logger.info("Starting StockTwits Polling Producer...")
+async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika.Channel, last_seen_ids: dict):
+    try:
+        url = f"https://api.stocktwits.com/api/2/streams/symbol/{symbol}.json"
+        params_api = {}
+        if last_seen_ids[symbol] > 0:
+            params_api["since"] = last_seen_ids[symbol]
+
+        response = await client.get(url, params=params_api, timeout=10)
+        if response.status_code != 200:
+            logger.error(f"Error fetching {symbol} from StockTwits: {response.status_code}")
+            return
+
+        data = response.json()
+        messages = data.get("messages", [])
+        
+        new_count = 0
+        for msg in reversed(messages):  # Process oldest to newest
+            msg_id = str(msg["id"])
+            body = msg["body"]
+            created_at_str = msg["created_at"]
+            
+            try:
+                timestamp = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+            except Exception:
+                timestamp = datetime.now(timezone.utc)
+
+            raw_post = RawPost(
+                id=f"st_{msg_id}",
+                symbol=symbol,
+                platform="stocktwits",
+                text=body,
+                timestamp=timestamp,
+            )
+
+            await channel.default_exchange.publish(
+                aio_pika.Message(
+                    body=raw_post.model_dump_json().encode(),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
+                routing_key=QUEUE_RAW_POSTS,
+            )
+            
+            new_count += 1
+            if msg["id"] > last_seen_ids[symbol]:
+                last_seen_ids[symbol] = msg["id"]
+
+        if new_count > 0:
+            logger.info(f"Symbol '{symbol}': Published {new_count} new messages.")
+            
+    except Exception as e:
+        logger.error(f"Error processing symbol {symbol}: {e}")
+
+async def main():
+    logger.info("Starting StockTwits Async Polling Producer...")
     
     symbols = get_symbols()
     logger.info(f"Tracking symbols: {symbols}")
 
-    creds = pika.PlainCredentials(RABBIT_USER, RABBIT_PASS)
-    params = pika.ConnectionParameters(host=RABBIT_HOST, port=RABBIT_PORT, credentials=creds)
-    
-    # Track latest message ID per symbol to avoid duplicates
+    rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"
     last_seen_ids = {symbol: 0 for symbol in symbols}
 
     while True:
         try:
-            connection = pika.BlockingConnection(params)
-            channel = connection.channel()
-            channel.queue_declare(queue=QUEUE_RAW_POSTS, durable=True)
+            connection = await aio_pika.connect_robust(rabbit_url)
+            async with connection:
+                channel = await connection.channel()
+                await channel.declare_queue(QUEUE_RAW_POSTS, durable=True)
 
-            while True:
-                for symbol in symbols:
-                    try:
-                        url = f"https://api.stocktwits.com/api/2/streams/symbol/{symbol}.json"
-                        params_api = {}
-                        if last_seen_ids[symbol] > 0:
-                            params_api["since"] = last_seen_ids[symbol]
+                async with httpx.AsyncClient() as client:
+                    while True:
+                        tasks = [fetch_symbol(symbol, client, channel, last_seen_ids) for symbol in symbols]
+                        await asyncio.gather(*tasks)
 
-                        response = httpx.get(url, params=params_api, timeout=10)
-                        if response.status_code != 200:
-                            logger.error(f"Error fetching {symbol} from StockTwits: {response.status_code}")
-                            continue
-
-                        data = response.json()
-                        messages = data.get("messages", [])
-                        
-                        new_count = 0
-                        for msg in reversed(messages):  # Process oldest to newest
-                            msg_id = str(msg["id"])
-                            body = msg["body"]
-                            created_at_str = msg["created_at"]
-                            
-                            # Parse StockTwits timestamp (ISO8601 usually)
-                            # Example: "2026-05-09T17:00:00Z"
-                            try:
-                                timestamp = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-                            except Exception:
-                                timestamp = datetime.now(timezone.utc)
-
-                            raw_post = RawPost(
-                                id=f"st_{msg_id}",
-                                symbol=symbol,
-                                platform="stocktwits",
-                                text=body,
-                                timestamp=timestamp,
-                            )
-
-                            channel.basic_publish(
-                                exchange="",
-                                routing_key=QUEUE_RAW_POSTS,
-                                body=raw_post.model_dump_json().encode(),
-                                properties=pika.BasicProperties(delivery_mode=2),
-                            )
-                            
-                            new_count += 1
-                            if msg["id"] > last_seen_ids[symbol]:
-                                last_seen_ids[symbol] = msg["id"]
-
-                        if new_count > 0:
-                            logger.info(f"Symbol '{symbol}': Published {new_count} new messages.")
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing symbol {symbol}: {e}")
-                    
-                    # Sleep briefly between symbols to avoid aggressive bursts
-                    time.sleep(2)
-
-                logger.info(f"Batch complete. Sleeping for {POLL_INTERVAL} seconds...")
-                time.sleep(POLL_INTERVAL)
+                        logger.info(f"Batch complete. Sleeping for {POLL_INTERVAL} seconds...")
+                        await asyncio.sleep(POLL_INTERVAL)
 
         except Exception as e:
-            logger.error(f"Connection error: {e}. Retrying in 10s...")
-            time.sleep(10)
+            logger.error(f"Error in main loop: {e}. Retrying in 10s...")
+            await asyncio.sleep(10)
 
 if __name__ == "__main__":
     try:
-        main()
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Service stopped.")

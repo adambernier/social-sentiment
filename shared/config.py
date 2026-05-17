@@ -22,6 +22,7 @@ RABBIT_PASS = get_env("RABBITMQ_PASS", "guest")
 QUEUE_RAW_POSTS = get_env("QUEUE_RAW_POSTS", "raw-posts")
 QUEUE_CLEAN_POSTS = get_env("QUEUE_CLEAN_POSTS", "clean-posts")
 QUEUE_SCORED_POSTS = get_env("QUEUE_SCORED_POSTS", "scored-posts")
+QUEUE_TOPIC_POSTS = get_env("QUEUE_TOPIC_POSTS", "topic-posts")
 
 # Database Config
 DATABASE_DSN = get_env(

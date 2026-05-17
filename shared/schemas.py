@@ -22,6 +22,8 @@ class CleanPost(BaseModel):
 class ScoredPost(CleanPost):
     sentiment: str
     scores: dict[str, float]
+    topic_id: Optional[int] = None
+    topic_label: Optional[str] = None
 
 
 class StockQuote(BaseModel):

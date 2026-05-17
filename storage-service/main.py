@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 
 import pika
@@ -12,10 +13,12 @@ from shared.config import (
     RABBIT_PORT,
     RABBIT_USER,
     RABBIT_PASS,
-    QUEUE_SCORED_POSTS as INPUT_QUEUE,
+    QUEUE_TOPIC_POSTS as INPUT_QUEUE,
 )
 from db import DB
 
+BATCH_SIZE = 100
+BATCH_TIMEOUT = 1.0  # seconds
 
 def main():
     db = DB()
@@ -27,31 +30,52 @@ def main():
     channel = connection.channel()
     channel.queue_declare(queue=INPUT_QUEUE, durable=True)
 
-    def on_message(ch, method, properties, body):
-        try:
-            post = ScoredPost.model_validate_json(body)
-        except Exception as e:
-            print(f"Malformed message, dropping: {e}")
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-            return
+    # Prefetch a full batch
+    channel.basic_qos(prefetch_count=BATCH_SIZE)
 
-        try:
-            inserted = db.insert_scored(post)
-            action = "inserted" if inserted else "skipped (duplicate)"
-            print(f"{post.id}: {action}")
-            ch.basic_ack(delivery_tag=method.delivery_tag)
-        except psycopg.OperationalError as e:
-            print(f"DB unavailable, requeuing {post.id}: {e}")
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+    batch_posts = []
+    batch_methods = []
+    last_flush = time.time()
 
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(queue=INPUT_QUEUE, on_message_callback=on_message)
+    print(f"Listening on '{INPUT_QUEUE}' (Batch size: {BATCH_SIZE}, Timeout: {BATCH_TIMEOUT}s). Ctrl+C to stop.")
 
-    print(f"Listening on '{INPUT_QUEUE}'. Ctrl+C to stop.")
     try:
-        channel.start_consuming()
+        # Use consume() generator for manual batching
+        for method, properties, body in channel.consume(INPUT_QUEUE, inactivity_timeout=0.1):
+            if method:
+                try:
+                    post = ScoredPost.model_validate_json(body)
+                    batch_posts.append(post)
+                    batch_methods.append(method)
+                except Exception as e:
+                    print(f"Malformed message, dropping: {e}")
+                    channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+            # Flush batch
+            now = time.time()
+            if (len(batch_posts) >= BATCH_SIZE) or (batch_posts and now - last_flush > BATCH_TIMEOUT):
+                print(f"Inserting batch of {len(batch_posts)} posts...")
+                try:
+                    count = db.insert_scored_batch(batch_posts)
+                    print(f"Batch inserted: {count} rows affected.")
+                    
+                    # Acknowledge all in batch
+                    for m in batch_methods:
+                        channel.basic_ack(delivery_tag=m.delivery_tag)
+                except Exception as e:
+                    print(f"Database error during batch insert: {e}")
+                    # In case of error, requeue individually or handle as needed
+                    # For simplicity here, we requeue all
+                    for m in batch_methods:
+                        channel.basic_nack(delivery_tag=m.delivery_tag, requeue=True)
+
+                batch_posts = []
+                batch_methods = []
+                last_flush = now
+
     except KeyboardInterrupt:
-        channel.stop_consuming()
+        print("\nStopping...")
+        channel.cancel()
         connection.close()
 
 

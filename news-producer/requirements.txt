@@ -1,4 +1,4 @@
 feedparser
-pika
+httpx
+aio_pika
 pydantic
-
