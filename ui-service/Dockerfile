@@ -7,6 +7,7 @@ COPY ui-service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy service code
+COPY shared/ ./shared/
 COPY ui-service/ ./ui-service/
 
 EXPOSE 8501

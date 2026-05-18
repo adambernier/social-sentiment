@@ -60,6 +60,13 @@ class MarketQuote(BaseModel):
     volume: int
     market_session: str
 
+class MarketDelta(BaseModel):
+    symbol: str
+    reference_price: float
+    latest_price: float
+    pct_change: float
+    abs_change: float
+
 class StockMetricsResponse(BaseModel):
     symbol: str
     pe_ratio: Optional[float]
@@ -193,6 +200,61 @@ async def get_latest_market_quote(symbol: str):
         with conn.cursor() as cur:
             cur.execute(query, [symbol])
             return cur.fetchone()
+
+@app.get("/stats/market/delta", response_model=Optional[MarketDelta])
+async def get_market_delta(
+    symbol: str,
+    since: datetime = Query(...)
+):
+    """
+    Calculate pct_change for a symbol since a specific reference timestamp.
+    Useful for 'normalization' of futures vs. last cash close.
+    """
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            # 1. Get latest price
+            cur.execute(
+                "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
+                [symbol]
+            )
+            latest = cur.fetchone()
+            if not latest:
+                return None
+            
+            latest_price = latest['price']
+
+            # 2. Get reference price (the one closest to 'since' but not after it)
+            cur.execute(
+                "SELECT price FROM stock_quotes WHERE symbol = %s AND timestamp <= %s ORDER BY timestamp DESC LIMIT 1",
+                [symbol, since]
+            )
+            ref = cur.fetchone()
+            
+            # Fallback: if no quote exists before 'since', get the first one available
+            if not ref:
+                cur.execute(
+                    "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp ASC LIMIT 1",
+                    [symbol]
+                )
+                ref = cur.fetchone()
+
+            if not ref:
+                return None
+            
+            ref_price = ref['price']
+            
+            pct_change = 0.0
+            abs_change = latest_price - ref_price
+            if ref_price != 0:
+                pct_change = (abs_change) / ref_price * 100
+
+            return {
+                "symbol": symbol,
+                "reference_price": ref_price,
+                "latest_price": latest_price,
+                "pct_change": pct_change,
+                "abs_change": abs_change
+            }
 
 @app.get("/stats/metrics", response_model=Optional[StockMetricsResponse])
 async def get_stock_metrics(symbol: str):

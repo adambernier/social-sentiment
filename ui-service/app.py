@@ -4,8 +4,16 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import sys
+from pathlib import Path
 import pandas_market_calendars as mcal
 from datetime import datetime
+
+# Setup path for shared imports
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from shared.futures import PRIMARY_FUTURES_MAP, GLOBAL_FUTURES, VIX_STRESS_LOW, VIX_STRESS_HIGH
+from shared.config import DATABASE_DSN
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 
@@ -107,6 +115,16 @@ def fetch_metrics(sym):
     except Exception as e:
         return None
 
+@st.cache_data(ttl=30)
+def fetch_delta(sym, since: datetime):
+    try:
+        # Format ISO string
+        since_str = since.strftime('%Y-%m-%dT%H:%M:%SZ')
+        res = requests.get(f"{API_URL}/stats/market/delta?symbol={sym}&since={since_str}", timeout=5)
+        return res.json() if res.status_code == 200 else None
+    except Exception as e:
+        return None
+
 # --- Main Dashboard Fragment ---
 @st.fragment(run_every="60s" if live_mode else None)
 def dashboard_content():
@@ -116,6 +134,18 @@ def dashboard_content():
     market_data = fetch_market_data(symbol, hours)
     latest_quote = fetch_latest_quote(symbol)
     metrics_data = fetch_metrics(symbol)
+    
+    # --- Futures Data Fetch ---
+    # 1. Primary correlated future (e.g. NVDA -> NQ=F, ASTS -> RTY=F)
+    primary_future_symbol = PRIMARY_FUTURES_MAP.get(symbol)
+    p_future_quote = fetch_latest_quote(primary_future_symbol) if primary_future_symbol else None
+    p_future_delta = fetch_delta(primary_future_symbol, last_close) if primary_future_symbol else None
+    p_future_market_data = fetch_market_data(primary_future_symbol, hours) if primary_future_symbol else []
+
+    # 2. Global VIX future
+    vix_symbol = "VX=F"
+    vix_quote = fetch_latest_quote(vix_symbol)
+    vix_delta = fetch_delta(vix_symbol, last_close)
 
     # --- Header Row ---
     header_left, header_right = st.columns([3, 1])
@@ -131,9 +161,9 @@ def dashboard_content():
         df_posts = df_posts[df_posts['timestamp'] >= cutoff]
 
     # --- KPIs Row ---
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
 
-    # Sentiment KPIs
+    # Sentiment KPIs (1-4)
     if not df_posts.empty:
         total_posts = len(df_posts)
         pos_count = len(df_posts[df_posts['sentiment'] == 'positive'])
@@ -147,11 +177,13 @@ def dashboard_content():
         df_social = df_posts[df_posts['platform'].isin(['bluesky', 'stocktwits', 'simulator'])]
         df_news = df_posts[df_posts['platform'] == 'yahoo']
         
-        if not df_social.empty and not df_news.empty:
+        if not df_social.empty and len(df_news) >= 5:
             social_bull = len(df_social[df_social['sentiment'] == 'positive']) / len(df_social)
             news_bull = len(df_news[df_news['sentiment'] == 'positive']) / len(df_news)
             diff = (social_bull - news_bull) * 100
             col4.metric("Divergence", f"{diff:+.0f}%", help="Retail Bullishness minus Institutional Bullishness")
+        elif not df_news.empty and len(df_news) < 5:
+            col4.metric("Divergence", "Low Data", help="Need at least 5 news headlines for stable divergence")
         else:
             col4.metric("Divergence", "N/A")
     else:
@@ -160,7 +192,7 @@ def dashboard_content():
         col3.metric("Bearish", "0%")
         col4.metric("Divergence", "N/A")
 
-    # Market KPIs
+    # Market KPIs (5-6)
     if latest_quote:
         price_val = latest_quote['price']
         vol_val = latest_quote['volume']
@@ -170,27 +202,25 @@ def dashboard_content():
         # Determine Label and Pulse
         if session == 'regular':
             price_label = "Live Price"
-            status_html = '<span class="pulse"></span> **Market Open**'
+            status_html = '<span class="pulse"></span> <b>Market Open</b>'
         elif session == 'pre':
             price_label = "Pre-market"
-            status_html = "🟡 **Pre-market**"
+            status_html = "🟡 <b>Pre-market</b>"
         elif session == 'after':
             price_label = "After-hours"
-            status_html = "🔵 **After-hours**"
+            status_html = "🔵 <b>After-hours</b>"
         else:
-            # Format nicely: Last Close — Fri May 15, 16:00 ET
-            # Convert UTC to ET for display (approx -4h)
             et_time = as_of - pd.Timedelta(hours=4)
+            if et_time.hour == 15 and et_time.minute == 59:
+                et_time = et_time + pd.Timedelta(minutes=1)
             price_label = f"Last Close — {et_time.strftime('%a %b %d, %H:%M')} ET"
-            status_html = "⚪ **Market Closed**"
+            status_html = "⚪ <b>Market Closed</b>"
 
         with header_right:
             st.markdown(f"<div style='text-align: right; margin-top: 15px;'>{status_html}</div>", unsafe_allow_html=True)
         
-        # Calculate change from start of window if possible
         price_display = f"${price_val:.2f}"
         if session == 'closed':
-            # Use markdown for the metric to allow styling if it's stale
             col5.markdown(f"<p style='font-size: 14px; margin-bottom: -10px;'>{price_label}</p>", unsafe_allow_html=True)
             col5.markdown(f"<h2 class='stale-price' style='margin-top: 0;'>{price_display}</h2>", unsafe_allow_html=True)
         else:
@@ -202,10 +232,49 @@ def dashboard_content():
             else:
                 col5.metric(f"{symbol} {price_label}", price_display)
             
-        col6.metric("Volume", f"{vol_val:,}")
+        vol_label = "Live Volume" if session == 'regular' else "Prev Session Vol"
+        col6.metric(vol_label, f"{vol_val:,}")
     else:
         col5.metric(f"{symbol} Price", "N/A")
         col6.metric("Volume", "N/A")
+
+    # 7. Primary Future KPI Tile
+    if primary_future_symbol and p_future_quote:
+        f_price = p_future_quote['price']
+        f_session = p_future_quote.get('market_session', 'futures_closed')
+        
+        f_status = "🟢 Open" if f_session == 'futures_open' else "🟡 Break" if f_session == 'futures_break' else "⚪ Closed"
+        f_delta_str = f"{p_future_delta['pct_change']:+.2f}%" if p_future_delta else "N/A"
+        
+        fname_map = {"NQ=F": "NQ", "RTY=F": "Russell"}
+        fname = fname_map.get(primary_future_symbol, "Future")
+
+        col7.metric(
+            f"{fname} Futures", 
+            f"{f_price:,.0f}", 
+            f_delta_str,
+            help=f"Session: {f_status}"
+        )
+    else:
+        col7.metric("Futures Proxy", "N/A")
+
+    # 8. Global VIX Tile
+    if vix_quote:
+        v_level = vix_quote['price']
+        v_session = vix_quote.get('market_session', 'futures_closed')
+        v_status = "🟢" if v_session == 'futures_open' else "🟡" if v_session == 'futures_break' else "⚪"
+        
+        pip = "🟢" if v_level < VIX_STRESS_LOW else "🟡" if v_level < VIX_STRESS_HIGH else "🔴"
+        v_delta_str = f"{vix_delta['abs_change']:+.2f}" if vix_delta else "N/A"
+        
+        col8.metric(
+            "VIX Futures",
+            f"{pip} {v_level:.2f}",
+            v_delta_str,
+            help=f"Regime: {'Calm' if v_level < VIX_STRESS_LOW else 'Elevated' if v_level < VIX_STRESS_HIGH else 'Stressed'}. Session: {v_status}"
+        )
+    else:
+        col8.metric("VIX Regime", "N/A")
 
     st.divider()
 
@@ -258,16 +327,27 @@ def dashboard_content():
             st.write(f"**Beta:** {metrics_data.get('beta', 'N/A')}")
             st.write(f"**Annual Return:** {metrics_data.get('avg_return_1y', 0):.1%}")
             st.write(f"**Inflation Adjusted:** {metrics_data.get('inflation_adj_return_1y', 0):.1%}")
-            st.caption(f"Last updated: {metrics_data.get('updated_at', 'N/A')}")
+            
+            updated_at_raw = metrics_data.get('updated_at')
+            if updated_at_raw:
+                dt_updated = pd.to_datetime(updated_at_raw)
+                # Convert to ET for friendliness (approx -4h from UTC)
+                et_updated = dt_updated - pd.Timedelta(hours=4)
+                st.caption(f"Last updated: {et_updated.strftime('%H:%M')} ET")
+            else:
+                st.caption("Last updated: N/A")
     else:
         st.info("Scorecard data currently unavailable. The Market Producer will update these metrics shortly.")
 
     st.divider()
 
     # --- Correlation Chart ---
+    equity_is_closed = latest_quote and latest_quote.get('market_session') == 'closed'
+    future_is_closed = p_future_quote and p_future_quote.get('market_session', 'futures_closed') == 'futures_closed'
+    
     chart_title = f"📈 {symbol} Sentiment vs. Price Correlation"
-    if latest_quote and latest_quote.get('market_session') == 'closed':
-        chart_title = f"📈 {symbol} Sentiment Activity (Market Closed)"
+    if equity_is_closed and future_is_closed:
+        chart_title = f"📈 {symbol} Sentiment Activity (All Markets Closed)"
     
     st.subheader(chart_title)
     
@@ -336,49 +416,80 @@ def dashboard_content():
             df_market = pd.DataFrame(market_data)
             df_market['timestamp'] = pd.to_datetime(df_market['timestamp'], utc=True, format='ISO8601')
             
-            # Distinguish between regular/active sessions and closed sessions for the line style
-            # Split into traces or use a list of line styles
-            # For simplicity and clear visual: draw one continuous line, but dashed during 'closed' sessions
-            # Actually, Scatter 'line' style can't be changed per-point easily.
-            # Best way: multiple traces.
-            
-            # Separate market data into contiguous segments
-            # For this MVP: draw the yellow line. We'll use a single trace but can 
-            # make it dashed if ALL points in the window are closed.
-            
-            # Advanced: Split into segments
-            last_idx = 0
-            for i in range(1, len(df_market)):
-                if df_market.iloc[i]['market_session'] != df_market.iloc[i-1]['market_session']:
-                    # Segment change
-                    segment = df_market.iloc[last_idx:i+1]
-                    is_closed = df_market.iloc[i-1]['market_session'] == 'closed'
+            # Get reference price for primary symbol (the one closest to last_close)
+            # We can use our fetch_delta logic or just take the first point in the window 
+            # if Since Last Close is selected.
+            primary_delta = fetch_delta(symbol, last_close)
+            ref_price = primary_delta['reference_price'] if primary_delta else df_market.iloc[0]['price']
+
+            def add_price_traces(df, color, base_name, y_axis, reference):
+                if df.empty: return
+                df = df.copy()
+                # Normalize to % change from reference
+                df['display_val'] = (df['price'] - reference) / reference * 100
+                
+                last_idx = 0
+                for i in range(1, len(df)):
+                    curr_session = df.iloc[i].get('market_session', 'closed')
+                    prev_session = df.iloc[i-1].get('market_session', 'closed')
                     
-                    fig.add_trace(go.Scatter(
-                        x=segment['timestamp'], y=segment['price'],
-                        name='Price (Closed)' if is_closed else 'Price',
-                        yaxis='y2',
-                        line=dict(color='#F1C40F', width=4, dash='dot' if is_closed else 'solid'),
-                        showlegend=False
-                    ))
-                    last_idx = i
+                    # Group active sessions vs. closed/break
+                    curr_is_stale = 'closed' in curr_session or 'break' in curr_session
+                    prev_is_stale = 'closed' in prev_session or 'break' in prev_session
+                    
+                    if curr_is_stale != prev_is_stale:
+                        segment = df.iloc[last_idx:i+1]
+                        fig.add_trace(go.Scatter(
+                            x=segment['timestamp'], y=segment['display_val'],
+                            name=f"{base_name} (Stale)" if prev_is_stale else f"{base_name} (Live)",
+                            yaxis=y_axis,
+                            line=dict(color=color, width=3, dash='dot' if prev_is_stale else 'solid'),
+                            showlegend=False
+                        ))
+                        last_idx = i
+                
+                # Final segment
+                segment = df.iloc[last_idx:]
+                last_session = df.iloc[-1].get('market_session', 'closed')
+                is_stale = 'closed' in last_session or 'break' in last_session
+                fig.add_trace(go.Scatter(
+                    x=segment['timestamp'], y=segment['display_val'],
+                    name=base_name,
+                    yaxis=y_axis,
+                    line=dict(color=color, width=3, dash='dot' if is_stale else 'solid'),
+                    showlegend=True
+                ))
+
+            # Add primary symbol trace (Yellow)
+            add_price_traces(df_market, '#F1C40F', symbol, 'y2', ref_price)
             
-            # Final segment
-            segment = df_market.iloc[last_idx:]
-            is_closed = df_market.iloc[-1]['market_session'] == 'closed'
-            fig.add_trace(go.Scatter(
-                x=segment['timestamp'], y=segment['price'],
-                name='Price (Closed)' if is_closed else 'Price',
-                yaxis='y2',
-                line=dict(color='#F1C40F', width=4, dash='dot' if is_closed else 'solid'),
-                showlegend=False
-            ))
+            # Add primary future symbol trace (Orange) if available
+            if p_future_market_data and p_future_delta:
+                df_future = pd.DataFrame(p_future_market_data)
+                df_future['timestamp'] = pd.to_datetime(df_future['timestamp'], utc=True, format='ISO8601')
+                
+                # Friendly legend name
+                fname_map = {"NQ=F": "NQ", "RTY=F": "Russell"}
+                fname = fname_map.get(primary_future_symbol, "Future")
+                
+                add_price_traces(df_future, '#E67E22', f"{fname} Futures", 'y2', p_future_delta['reference_price'])
             
             fig.update_layout(
-                yaxis2=dict(title="Stock Price ($)", overlaying='y', side='right', showgrid=False)
+                yaxis2=dict(title="Price Change (%)", overlaying='y', side='right', showgrid=False, ticksuffix="%")
             )
         
-        fig.update_layout(xaxis_title="Time", yaxis_title="Post Count", legend_title="Legend", hovermode="x unified")
+        fig.update_layout(
+            xaxis_title=None, 
+            yaxis_title="Post Count", 
+            hovermode="x unified",
+            legend=dict(
+                orientation='h', 
+                yanchor='top', y=-0.18, 
+                xanchor='center', x=0.5,
+                title=None
+            ),
+            margin=dict(r=70) # Extra padding for % labels
+        )
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Insufficient data for correlation chart.")

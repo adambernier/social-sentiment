@@ -12,12 +12,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
 from shared.schemas import StockQuote, StockMetrics
+from shared.futures import get_futures_session, all_polled_futures
 from storage_service.db import DB
 
 # Initialize market calendar
 nyse = mcal.get_calendar('NYSE')
 
-SYMBOLS = ["ASTS", "RKLB", "INTC", "NVDA"]
+EQUITY_SYMBOLS = ["ASTS", "RKLB", "INTC", "NVDA"]
+SYMBOLS = EQUITY_SYMBOLS + all_polled_futures()
 # Sector proxies (using ETFs)
 SECTOR_MAP = {
     "ASTS": "XAR",  # Space/Tech
@@ -130,10 +132,16 @@ def get_market_session(now_utc: datetime) -> str:
         return 'closed'
 
 def fetch_and_store(db: DB):
-    current_session = get_market_session(datetime.now(timezone.utc))
+    now_utc = datetime.now(timezone.utc)
     
     for symbol in SYMBOLS:
         try:
+            # Determine session based on instrument type
+            if symbol.endswith("=F"):
+                current_session = get_futures_session(symbol, now_utc)
+            else:
+                current_session = get_market_session(now_utc)
+                
             print(f"Fetching {symbol} (Session: {current_session})...")
             ticker = yf.Ticker(symbol)
             # Fetch last 1 day of 1-minute data to get the absolute latest close
