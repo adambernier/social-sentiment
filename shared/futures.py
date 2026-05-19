@@ -1,17 +1,11 @@
 import pandas_market_calendars as mcal
 from datetime import datetime, timedelta
 
+from shared.symbols import primary_futures_map
+
 # Per-symbol primary index future. Used for the chart overlay + the
 # context-aware tile that shows up beside the selected equity.
-PRIMARY_FUTURES_MAP = {
-    "AMD": "NQ=F",
-    "ASTS": "RTY=F",
-    "INTC": "NQ=F",
-    "MU": "NQ=F",
-    "NVDA": "NQ=F",
-    "RKLB": "RTY=F",
-    "SMH": "NQ=F",
-}
+PRIMARY_FUTURES_MAP = primary_futures_map()
 
 # Futures shown for all symbols (different signal type, not a price proxy).
 GLOBAL_FUTURES = ["VX=F"]

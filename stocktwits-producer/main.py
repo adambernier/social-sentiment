@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import sys
 from datetime import datetime, timezone
@@ -19,6 +18,7 @@ from shared.config import (
     QUEUE_RAW_POSTS,
 )
 from shared.schemas import RawPost
+from shared.symbols import tickers
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,23 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("stocktwits-producer")
 
-# In container path
-KEYWORDS_FILE = Path("/app/keywords.json")
 POLL_INTERVAL = 60  # 1 minute
-
-def get_symbols():
-    try:
-        path = KEYWORDS_FILE if KEYWORDS_FILE.exists() else Path(__file__).parent.parent / "bluesky-producer" / "keywords.json"
-        if path.exists():
-            with open(path, 'r') as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return list(data.keys())
-                return data
-        return ["AMD", "ASTS", "INTC", "MU", "NVDA", "RKLB", "SMH"]
-    except Exception as e:
-        logger.error(f"Error reading keywords: {e}")
-        return ["AMD", "ASTS", "INTC", "MU", "NVDA", "RKLB", "SMH"]
 
 async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika.Channel, last_seen_ids: dict):
     try:
@@ -99,7 +83,7 @@ async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika
 async def main():
     logger.info("Starting StockTwits Async Polling Producer...")
     
-    symbols = get_symbols()
+    symbols = tickers()
     logger.info(f"Tracking symbols: {symbols}")
 
     rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"

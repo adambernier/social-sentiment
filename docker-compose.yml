@@ -88,8 +88,6 @@ services:
     environment:
       - RABBITMQ_HOST=rabbitmq
       - PYTHONUNBUFFERED=1
-    volumes:
-      - ./bluesky-producer/keywords.json:/app/keywords.json:ro
     depends_on:
       rabbitmq:
         condition: service_healthy

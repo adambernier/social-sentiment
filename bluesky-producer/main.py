@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import sys
 from datetime import datetime, timezone
@@ -20,6 +19,7 @@ from shared.config import (
     QUEUE_RAW_POSTS,
 )
 from shared.schemas import RawPost
+from shared.symbols import keywords_map
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,26 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bluesky-producer")
 
-# In container path
-KEYWORDS_FILE = Path("/app/keywords.json")
 POLL_INTERVAL = 60  # 1 minute
-
-def get_keywords_map():
-    try:
-        path = KEYWORDS_FILE if KEYWORDS_FILE.exists() else Path(__file__).parent / "keywords.json"
-        if path.exists():
-            with open(path, 'r') as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    # Backward compatibility for old list format
-                    return {k: [k] for k in data}
-                return data
-        else:
-            logger.warning("Keywords file not found.")
-            return {}
-    except Exception as e:
-        logger.error(f"Error reading keywords file: {e}")
-        return {}
 
 async def main():
     logger.info("Starting Bluesky Polling Producer...")
@@ -66,9 +47,9 @@ async def main():
                 await channel.declare_queue(QUEUE_RAW_POSTS, durable=True)
 
                 while True:
-                    keywords_map = get_keywords_map()
-                    
-                    for symbol, terms in keywords_map.items():
+                    kw_map = keywords_map()
+
+                    for symbol, terms in kw_map.items():
                         for term in terms:
                             try:
                                 params = {'q': term, 'limit': 25, 'sort': 'latest'}

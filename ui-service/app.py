@@ -13,6 +13,7 @@ from datetime import datetime
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.futures import PRIMARY_FUTURES_MAP, GLOBAL_FUTURES, VIX_STRESS_LOW, VIX_STRESS_HIGH
+from shared.symbols import tickers
 from shared.config import DATABASE_DSN
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
@@ -58,7 +59,7 @@ else:
     delta = datetime.now(last_close.tzinfo) - last_close
     hours = max(1, int(delta.total_seconds() / 3600))
 
-symbol = st.sidebar.selectbox("Symbol", ["AMD", "ASTS", "INTC", "MU", "NVDA", "RKLB", "SMH"])
+symbol = st.sidebar.selectbox("Symbol", tickers())
 platform = st.sidebar.selectbox("Platform", ["All", "bluesky", "stocktwits", "yahoo"])
 platform_param = "" if platform == "All" else f"&platform={platform}"
 

@@ -1,9 +1,0 @@
-{
-  "AMD": ["AMD", "$AMD", "Advanced Micro Devices", "Lisa Su"],
-  "ASTS": ["ASTS", "$ASTS", "SpaceMobile"],
-  "INTC": ["INTC", "$INTC", "Intel"],
-  "MU": ["MU", "$MU", "Micron"],
-  "NVDA": ["NVDA", "$NVDA", "Nvidia", "Jensen Huang"],
-  "RKLB": ["RKLB", "$RKLB", "Rocket Lab"],
-  "SMH": ["SMH", "$SMH", "VanEck Semiconductor"]
-}

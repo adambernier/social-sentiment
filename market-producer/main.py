@@ -13,23 +13,15 @@ sys.path.append(str(ROOT))
 
 from shared.schemas import StockQuote, StockMetrics
 from shared.futures import get_futures_session, all_polled_futures
+from shared.symbols import tickers, sector_map
 from storage_service.db import DB
 
 # Initialize market calendar
 nyse = mcal.get_calendar('NYSE')
 
-EQUITY_SYMBOLS = ["AMD", "ASTS", "INTC", "MU", "NVDA", "RKLB", "SMH"]
+EQUITY_SYMBOLS = tickers()
 SYMBOLS = EQUITY_SYMBOLS + all_polled_futures()
-# Sector proxies (using ETFs)
-SECTOR_MAP = {
-    "AMD": "XLK",
-    "ASTS": "XAR",  # Space/Tech
-    "INTC": "XLK",  # Semiconductors/Tech
-    "MU": "XLK",
-    "NVDA": "XLK",
-    "RKLB": "XAR",
-    "SMH": "XLK",  # Semiconductor ETF
-}
+SECTOR_MAP = sector_map()
 POLL_INTERVAL = 60  # 1 minute
 METRICS_INTERVAL = 3600 # 1 hour
 

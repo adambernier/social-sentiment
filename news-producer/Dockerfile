@@ -8,7 +8,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy shared code and service code
 COPY shared/ ./shared/
-COPY bluesky-producer/keywords.json ./keywords.json
 COPY news-producer/ ./news-producer/
 
 ENV PYTHONUNBUFFERED=1
