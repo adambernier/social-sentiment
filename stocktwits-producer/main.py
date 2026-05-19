@@ -39,10 +39,10 @@ def get_symbols():
                 if isinstance(data, dict):
                     return list(data.keys())
                 return data
-        return ["ASTS", "RKLB", "INTC", "NVDA"]
+        return ["AMD", "ASTS", "INTC", "MU", "NVDA", "RKLB", "SMH"]
     except Exception as e:
         logger.error(f"Error reading keywords: {e}")
-        return ["ASTS", "RKLB", "INTC", "NVDA"]
+        return ["AMD", "ASTS", "INTC", "MU", "NVDA", "RKLB", "SMH"]
 
 async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika.Channel, last_seen_ids: dict):
     try:

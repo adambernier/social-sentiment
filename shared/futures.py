@@ -10,6 +10,7 @@ PRIMARY_FUTURES_MAP = {
     "MU": "NQ=F",
     "NVDA": "NQ=F",
     "RKLB": "RTY=F",
+    "SMH": "NQ=F",
 }
 
 # Futures shown for all symbols (different signal type, not a price proxy).

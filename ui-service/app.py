@@ -58,7 +58,7 @@ else:
     delta = datetime.now(last_close.tzinfo) - last_close
     hours = max(1, int(delta.total_seconds() / 3600))
 
-symbol = st.sidebar.selectbox("Symbol", ["AMD", "ASTS", "INTC", "MU", "NVDA", "RKLB"])
+symbol = st.sidebar.selectbox("Symbol", ["AMD", "ASTS", "INTC", "MU", "NVDA", "RKLB", "SMH"])
 platform = st.sidebar.selectbox("Platform", ["All", "bluesky", "stocktwits", "yahoo"])
 platform_param = "" if platform == "All" else f"&platform={platform}"
 
