@@ -18,14 +18,16 @@ from storage_service.db import DB
 # Initialize market calendar
 nyse = mcal.get_calendar('NYSE')
 
-EQUITY_SYMBOLS = ["ASTS", "RKLB", "INTC", "NVDA"]
+EQUITY_SYMBOLS = ["AMD", "ASTS", "INTC", "MU", "NVDA", "RKLB"]
 SYMBOLS = EQUITY_SYMBOLS + all_polled_futures()
 # Sector proxies (using ETFs)
 SECTOR_MAP = {
+    "AMD": "XLK",
     "ASTS": "XAR",  # Space/Tech
-    "RKLB": "XAR",
     "INTC": "XLK",  # Semiconductors/Tech
+    "MU": "XLK",
     "NVDA": "XLK",
+    "RKLB": "XAR",
 }
 POLL_INTERVAL = 60  # 1 minute
 METRICS_INTERVAL = 3600 # 1 hour
