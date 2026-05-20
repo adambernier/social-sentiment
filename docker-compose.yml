@@ -70,6 +70,7 @@ services:
       dockerfile: topic-service/Dockerfile
     environment:
       - RABBITMQ_HOST=rabbitmq
+      - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
         condition: service_healthy

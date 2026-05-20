@@ -1,11 +1,10 @@
 import sys
 import time
+import re
 from pathlib import Path
 import pika
 import json
 import pandas as pd
-from bertopic import BERTopic
-from umap import UMAP
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
@@ -24,61 +23,72 @@ BATCH_TIMEOUT = 1.0  # seconds
 
 class TopicModel:
     def __init__(self):
-        print("Initializing BERTopic model...")
-        # In a real app, you'd load a pre-trained model:
-        # self.topic_model = BERTopic.load("my_model")
+        print("Initializing Keyword-Based Topic Classifier...")
         
-        # For this demo, we'll initialize a basic BERTopic instance.
-        # Since BERTopic needs to be 'fitted' to transform new documents,
-        # we'll fit it on a few 'seed' financial topics if we were doing this for real.
-        umap_model = UMAP(n_neighbors=2, n_components=2, min_dist=0.0, metric='cosine', random_state=42)
-        self.topic_model = BERTopic(language="english", calculate_probabilities=False, umap_model=umap_model)
+        # Define high-signal topics and their keywords
+        self.topics = {
+            "Earnings & Guidance": [
+                "earnings", "revenue", "guidance", "beat", "miss", "quarterly", 
+                "report", "profit", "eps", "results", "fiscal", "outlook"
+            ],
+            "Fed & Macro": [
+                "fed", "interest", "rates", "hike", "inflation", "cpi", "powell", 
+                "fomc", "treasury", "yields", "economic", "recession", "gdp"
+            ],
+            "Technical Analysis": [
+                "chart", "support", "resistance", "breakout", "rsi", "volume", 
+                "indicator", "bullish", "bearish", "moving average", "macd", "patterns"
+            ],
+            "AI & Compute": [
+                "ai", "llm", "compute", "gpu", "chips", "semiconductor", "nvda", 
+                "amd", "blackwell", "training", "inference", "artificial intelligence"
+            ],
+            "Space & Satellite": [
+                "space", "launch", "satellite", "rocket", "mission", "nasa", 
+                "spacex", "asts", "rklb", "orbit", "payload", "starlink"
+            ],
+            "Management & Insider": [
+                "ceo", "leadership", "insider", "buy", "sell", "board", 
+                "shareholder", "meeting", "management", "founder", "stake"
+            ],
+            "M&A & Partnerships": [
+                "merger", "acquisition", "buyout", "deal", "takeover", 
+                "partnership", "collaboration", "joint venture", "contract"
+            ],
+            "Options & Volatility": [
+                "options", "calls", "puts", "strike", "expiry", "delta", 
+                "gamma", "premium", "yolo", "gambling", "vix", "volatility"
+            ],
+        }
         
-        # Mocking a fit for the demo so transform() doesn't fail.
-        # In production, this service would load a model trained on historical data.
-        dummy_data = [
-            "Earnings report was better than expected for tech stocks",
-            "Federal Reserve announces interest rate hike to combat inflation",
-            "New product launch drives consumer interest in retail sector",
-            "Management shakeup at major semiconductor firm",
-            "Supply chain issues continue to plague automotive industry",
-            "Bitcoin and crypto market experiencing high volatility",
-            "Stock market rallies as jobs report exceeds expectations",
-            "Oil prices drop amid global economic concerns",
-            "New regulations could impact fintech growth",
-            "AI startups see surge in venture capital funding",
-            "Retail sales bounce back in latest quarterly report",
-            "Housing market remains tight as interest rates climb",
-            "Electric vehicle sales hit record highs this month",
-            "Cloud computing revenue drives growth for tech giants",
-            "Cybersecurity threats on the rise for financial institutions",
-            "Green energy transition creates new investment opportunities",
-            "Global trade tensions weigh on international markets",
-            "Consumer confidence dips slightly in recent survey",
-            "Semiconductor shortage continues to affect electronics production",
-            "Dividends increased by several major blue-chip companies",
-            "Merger and acquisition activity picks up in the healthcare sector",
-            "Biotech firms announce promising results for new treatments",
-            "Aerospace and defense stocks gain on new contracts",
-            "Sustainable investing becomes a priority for many portfolios"
-        ]
-        self.topic_model.fit(dummy_data)
-        print("BERTopic model initialized and dummy-fitted.")
+        # Pre-compile regex for performance
+        self.patterns = {
+            label: re.compile(rf"\b({'|'.join(keywords)})\b", re.IGNORECASE)
+            for label, keywords in self.topics.items()
+        }
+        
+        print("Topic Classifier initialized.")
 
     def predict_batch(self, texts: list[str]) -> list[tuple[int, str]]:
-        topics, probs = self.topic_model.transform(texts)
-        
         results = []
-        for topic_id in topics:
-            topic_id = int(topic_id)
-            if topic_id != -1:
-                info = self.topic_model.get_topic(topic_id)
-                label = " ".join([word[0] for word in info[:3]])
-            else:
-                label = "General / Outlier"
-            results.append((topic_id, label))
+        for text in texts:
+            matched_label = "General / Outlier"
+            matched_id = -1
+            
+            # Simple priority-based matching
+            # In a more advanced version, we could score multiple matches and pick the highest
+            for i, (label, pattern) in enumerate(self.patterns.items()):
+                if pattern.search(text):
+                    matched_label = label
+                    matched_id = i
+                    break
+            
+            results.append((matched_id, matched_label))
             
         return results
+
+    def predict(self, text: str):
+        return self.predict_batch([text])[0]
 
     def predict(self, text: str):
         return self.predict_batch([text])[0]
