@@ -28,3 +28,8 @@ QUEUE_TOPIC_POSTS = get_env("QUEUE_TOPIC_POSTS", "topic-posts")
 DATABASE_DSN = get_env(
     "DATABASE_DSN", "postgresql://postgres:sentiment@localhost:5432/sentiment"
 )
+
+# Reddit Config
+REDDIT_USER_AGENT = get_env(
+    "REDDIT_USER_AGENT", "social-sentiment-rss/0.1 (sentiment dashboard)"
+)

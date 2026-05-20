@@ -20,6 +20,7 @@ from shared.config import (
     RABBIT_PORT,
     RABBIT_USER,
     QUEUE_RAW_POSTS,
+    REDDIT_USER_AGENT,
 )
 from shared.schemas import RawPost
 from shared.symbols import keywords_map
@@ -37,7 +38,6 @@ SUBREDDITS = (
 )
 FEED_URL = f"https://www.reddit.com/r/{SUBREDDITS}/new/.rss?limit=100"
 POLL_INTERVAL = 120  # 2 minutes
-USER_AGENT = "social-sentiment-rss/0.1 (contact: adam.c.bernier@gmail.com)"
 
 # Regex for extracting the base36 ID from the permalink
 # Example: https://www.reddit.com/r/wallstreetbets/comments/1crk7k4/is_this_the_bottom/
@@ -151,7 +151,7 @@ async def main():
     
     # Initialize seen_ids with a "drain" fetch to avoid re-publishing old posts on startup
     # We do one quick fetch to populate the deque.
-    async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
+    async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}) as client:
         try:
             logger.info("Performing startup drain fetch to populate seen_ids...")
             resp = await client.get(FEED_URL, timeout=10)
@@ -174,7 +174,7 @@ async def main():
                 channel = await connection.channel()
                 await channel.declare_queue(QUEUE_RAW_POSTS, durable=True)
 
-                async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
+                async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}) as client:
                     while True:
                         await fetch_and_process(client, channel)
                         await asyncio.sleep(POLL_INTERVAL)

@@ -103,6 +103,7 @@ services:
     environment:
       - RABBITMQ_HOST=rabbitmq
       - PYTHONUNBUFFERED=1
+      - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-rss/0.1 (sentiment dashboard)}
     depends_on:
       rabbitmq:
         condition: service_healthy
