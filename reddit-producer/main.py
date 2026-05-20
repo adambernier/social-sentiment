@@ -23,7 +23,7 @@ from shared.config import (
     REDDIT_USER_AGENT,
 )
 from shared.schemas import RawPost
-from shared.symbols import keywords_map
+from shared.symbols import keywords_map, match_symbol
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,19 +104,9 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
             haystack = f"{title}\n{selftext}"
             
             # 4. Keyword Match
-            # We match terms one by one to tag the post with the correct symbol
-            for symbol, terms in kw_map.items():
-                match_found = False
-                for term in terms:
-                    # Case-insensitive boundary search
-                    # We use lookaround instead of \b to correctly support cashtags like $NVDA
-                    # since \b doesn't match before a '$' (non-word char)
-                    pattern = rf"(?<![a-zA-Z0-9]){re.escape(term)}(?![a-zA-Z0-9])"
-                    if re.search(pattern, haystack, re.I):
-                        match_found = True
-                        break
-                
-                if match_found:
+            # We match each symbol to see if it belongs to this post
+            for symbol in kw_map.keys():
+                if match_symbol(haystack, symbol):
                     # 5. Publish
                     # Reddit timestamps in RSS are struct_time in UTC
                     ts = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)

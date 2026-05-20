@@ -19,7 +19,7 @@ from shared.config import (
     QUEUE_RAW_POSTS,
 )
 from shared.schemas import RawPost
-from shared.symbols import keywords_map
+from shared.symbols import keywords_map, match_symbol
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,6 +63,10 @@ async def main():
                                     if term in last_seen and post.record.created_at <= last_seen[term]:
                                         continue
                                     
+                                    # Post-fetch precision filtering for ambiguous tickers (SMH, MU)
+                                    if not match_symbol(post.record.text, symbol):
+                                        continue
+
                                     try:
                                         ts_str = post.record.created_at.replace("Z", "+00:00")
                                         timestamp = datetime.fromisoformat(ts_str)
