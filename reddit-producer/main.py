@@ -75,11 +75,12 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
 
         kw_map = keywords_map()
         new_posts_count = 0
+        total_entries = len(feed.entries)
+        unseen_count = 0
         matched_symbols = set()
 
         for entry in feed.entries:
             # 1. Extract ID and Dedup
-            # Reddit RSS IDs are typically 't3_xxxxxx'
             post_id = getattr(entry, "id", "")
             if not post_id:
                 continue
@@ -87,6 +88,7 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
             if post_id in seen_ids:
                 continue
             
+            unseen_count += 1
             # Add to seen_ids immediately
             seen_ids.append(post_id)
 
@@ -139,9 +141,9 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
                     matched_symbols.add(symbol)
 
         if new_posts_count > 0:
-            logger.info(f"Cycle complete. Published {new_posts_count} new Reddit posts across {len(matched_symbols)} symbols.")
+            logger.info(f"Cycle complete. Published {new_posts_count} new Reddit posts across {len(matched_symbols)} symbols. (Feed: {total_entries}, New: {unseen_count})")
         else:
-            logger.info("Cycle complete. No new matches.")
+            logger.info(f"Cycle complete. No new matches. (Feed: {total_entries}, New: {unseen_count})")
 
     except Exception as e:
         logger.error(f"Error in fetch_and_process: {e}", exc_info=True)
