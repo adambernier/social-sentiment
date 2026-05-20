@@ -148,6 +148,9 @@ def dashboard_content():
     vix_quote = fetch_latest_quote(vix_symbol)
     vix_delta = fetch_delta(vix_symbol, last_close)
 
+    # Primary symbol's change vs previous close (used by the price KPI tile + chart)
+    primary_delta = fetch_delta(symbol, last_close)
+
     # --- Header Row ---
     header_left, header_right = st.columns([3, 1])
     with header_left:
@@ -225,7 +228,17 @@ def dashboard_content():
             col5.markdown(f"<p style='font-size: 14px; margin-bottom: -10px;'>{price_label}</p>", unsafe_allow_html=True)
             col5.markdown(f"<h2 class='stale-price' style='margin-top: 0;'>{price_display}</h2>", unsafe_allow_html=True)
         else:
-            if market_data:
+            if primary_delta:
+                abs_change = primary_delta['abs_change']
+                pct_change = primary_delta['pct_change']
+                delta_str = f"{abs_change:+.2f} ({pct_change:+.2f}%)"
+                col5.metric(
+                    f"{symbol} {price_label}",
+                    price_display,
+                    delta_str,
+                    help="Change vs previous market close",
+                )
+            elif market_data:
                 df_market = pd.DataFrame(market_data)
                 prev_quote_val = df_market.iloc[0]['price']
                 change = price_val - prev_quote_val
@@ -417,10 +430,6 @@ def dashboard_content():
             df_market = pd.DataFrame(market_data)
             df_market['timestamp'] = pd.to_datetime(df_market['timestamp'], utc=True, format='ISO8601')
             
-            # Get reference price for primary symbol (the one closest to last_close)
-            # We can use our fetch_delta logic or just take the first point in the window 
-            # if Since Last Close is selected.
-            primary_delta = fetch_delta(symbol, last_close)
             ref_price = primary_delta['reference_price'] if primary_delta else df_market.iloc[0]['price']
 
             def add_price_traces(df, color, base_name, y_axis, reference):
