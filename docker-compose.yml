@@ -4,25 +4,28 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 5s
       timeout: 5s
       retries: 5
 
   postgres:
-    image: postgres:15-alpine
+    image: postgres:15
     environment:
-      POSTGRES_DB: sentiment
-      POSTGRES_PASSWORD: sentiment
+      - POSTGRES_DB=sentiment
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=sentiment
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./storage-service/schema.sql:/docker-entrypoint-initdb.d/schema.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d sentiment"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 5
 
@@ -32,7 +35,6 @@ services:
       dockerfile: preprocessing-service/Dockerfile
     environment:
       - RABBITMQ_HOST=rabbitmq
-      - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -41,26 +43,10 @@ services:
     build:
       context: .
       dockerfile: sentiment-service/Dockerfile
+    volumes:
+      - hf_cache:/root/.cache/huggingface
     environment:
       - RABBITMQ_HOST=rabbitmq
-      - PYTHONUNBUFFERED=1
-      - HF_HOME=/app/.cache/huggingface
-    volumes:
-      - hf_cache:/app/.cache/huggingface
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-
-  topic-service:
-    build:
-      context: .
-      dockerfile: topic-service/Dockerfile
-    environment:
-      - RABBITMQ_HOST=rabbitmq
-      - PYTHONUNBUFFERED=1
-      - HF_HOME=/app/.cache/huggingface
-    volumes:
-      - hf_cache:/app/.cache/huggingface
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -71,15 +57,22 @@ services:
       dockerfile: storage-service/Dockerfile
     environment:
       - RABBITMQ_HOST=rabbitmq
-      - PYTHONUNBUFFERED=1
       - DATABASE_DSN=postgresql://postgres:sentiment@postgres:5432/sentiment
     depends_on:
       rabbitmq:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      topic-service:
-        condition: service_started
+
+  topic-service:
+    build:
+      context: .
+      dockerfile: topic-service/Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
 
   bluesky-producer:
     build:
@@ -96,6 +89,17 @@ services:
     build:
       context: .
       dockerfile: stocktwits-producer/Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  reddit-producer:
+    build:
+      context: .
+      dockerfile: reddit-producer/Dockerfile
     environment:
       - RABBITMQ_HOST=rabbitmq
       - PYTHONUNBUFFERED=1

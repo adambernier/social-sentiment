@@ -60,7 +60,7 @@ else:
     hours = max(1, int(delta.total_seconds() / 3600))
 
 symbol = st.sidebar.selectbox("Symbol", tickers())
-platform = st.sidebar.selectbox("Platform", ["All", "bluesky", "stocktwits", "yahoo"])
+platform = st.sidebar.selectbox("Platform", ["All", "bluesky", "reddit", "stocktwits", "yahoo"])
 platform_param = "" if platform == "All" else f"&platform={platform}"
 
 # --- Data Fetching Functions ---
@@ -178,16 +178,19 @@ def dashboard_content():
         col3.metric("Bearish", f"{neg_count/total_posts*100:.0f}%" if total_posts else "0%")
         
         # Divergence KPI
-        df_social = df_posts[df_posts['platform'].isin(['bluesky', 'stocktwits', 'simulator'])]
-        df_news = df_posts[df_posts['platform'] == 'yahoo']
-        
-        if not df_social.empty and len(df_news) >= 5:
-            social_bull = len(df_social[df_social['sentiment'] == 'positive']) / len(df_social)
-            news_bull = len(df_news[df_news['sentiment'] == 'positive']) / len(df_news)
-            diff = (social_bull - news_bull) * 100
-            col4.metric("Divergence", f"{diff:+.0f}%", help="Retail Bullishness minus Institutional Bullishness")
-        elif not df_news.empty and len(df_news) < 5:
-            col4.metric("Divergence", "Low Data", help="Need at least 5 news headlines for stable divergence")
+        if 'platform' in df_posts.columns:
+            df_social = df_posts[df_posts['platform'].isin(['bluesky', 'reddit', 'stocktwits', 'simulator'])]
+            df_news = df_posts[df_posts['platform'] == 'yahoo']
+            
+            if not df_social.empty and len(df_news) >= 5:
+                social_bull = len(df_social[df_social['sentiment'] == 'positive']) / len(df_social)
+                news_bull = len(df_news[df_news['sentiment'] == 'positive']) / len(df_news)
+                diff = (social_bull - news_bull) * 100
+                col4.metric("Divergence", f"{diff:+.0f}%", help="Retail Bullishness minus Institutional Bullishness")
+            elif not df_news.empty and len(df_news) < 5:
+                col4.metric("Divergence", "Low Data", help="Need at least 5 news headlines for stable divergence")
+            else:
+                col4.metric("Divergence", "N/A")
         else:
             col4.metric("Divergence", "N/A")
     else:
@@ -547,27 +550,33 @@ def dashboard_content():
 
     with col_social:
         st.subheader("💬 Retail Social Feed")
-        df_social = df_posts[df_posts['platform'].isin(['bluesky', 'stocktwits', 'simulator'])]
-        if not df_social.empty:
-            df_social_view = df_social.head(20).copy()
-            df_social_view['timestamp'] = df_social_view['timestamp'].dt.strftime('%H:%M')
-            st.dataframe(
-                df_social_view[['timestamp', 'platform', 'sentiment', 'text']],
-                use_container_width=True, hide_index=True
-            )
+        if not df_posts.empty and 'platform' in df_posts.columns:
+            df_social = df_posts[df_posts['platform'].isin(['bluesky', 'reddit', 'stocktwits', 'simulator'])]
+            if not df_social.empty:
+                df_social_view = df_social.head(20).copy()
+                df_social_view['timestamp'] = df_social_view['timestamp'].dt.strftime('%H:%M')
+                st.dataframe(
+                    df_social_view[['timestamp', 'platform', 'sentiment', 'text']],
+                    use_container_width=True, hide_index=True
+                )
+            else:
+                st.info("No social chatter found.")
         else:
             st.info("No social chatter found.")
 
     with col_news:
         st.subheader("📰 Institutional News")
-        df_news = df_posts[df_posts['platform'] == 'yahoo']
-        if not df_news.empty:
-            df_news_view = df_news.head(20).copy()
-            df_news_view['timestamp'] = df_news_view['timestamp'].dt.strftime('%H:%M')
-            st.dataframe(
-                df_news_view[['timestamp', 'sentiment', 'text']],
-                use_container_width=True, hide_index=True
-            )
+        if not df_posts.empty and 'platform' in df_posts.columns:
+            df_news = df_posts[df_posts['platform'] == 'yahoo']
+            if not df_news.empty:
+                df_news_view = df_news.head(20).copy()
+                df_news_view['timestamp'] = df_news_view['timestamp'].dt.strftime('%H:%M')
+                st.dataframe(
+                    df_news_view[['timestamp', 'sentiment', 'text']],
+                    use_container_width=True, hide_index=True
+                )
+            else:
+                st.info("No news headlines found.")
         else:
             st.info("No news headlines found.")
 
