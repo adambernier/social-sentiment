@@ -1,4 +1,5 @@
 import sys
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -6,7 +7,8 @@ from typing import Optional
 
 import psycopg
 from psycopg_pool import ConnectionPool
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # Setup path for shared imports
@@ -19,6 +21,43 @@ from shared.symbols import primary_futures_map
 # Global pool instance
 db_pool: Optional[ConnectionPool] = None
 
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except Exception:
+                pass
+
+manager = ConnectionManager()
+
+async def postgres_listener():
+    while True:
+        try:
+            conn = await psycopg.AsyncConnection.connect(DATABASE_DSN, autocommit=True)
+            async with conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("LISTEN new_posts;")
+                
+                print("Listening for new_posts channel notifications...")
+                async for notify in conn.notifies():
+                    await manager.broadcast(notify.payload)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"Postgres listener error: {e}. Reconnecting in 5s...")
+            await asyncio.sleep(5)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db_pool
@@ -29,11 +68,29 @@ async def lifespan(app: FastAPI):
         max_size=20,
         kwargs={"row_factory": psycopg.rows.dict_row}
     )
+    
+    listener_task = asyncio.create_task(postgres_listener())
+    
     yield
+    
+    listener_task.cancel()
+    try:
+        await listener_task
+    except asyncio.CancelledError:
+        pass
+        
     print("Closing database connection pool...")
     db_pool.close()
 
 app = FastAPI(title="Social Sentiment API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class PostResponse(BaseModel):
     id: str
@@ -294,9 +351,10 @@ async def get_stock_metrics(symbol: str):
 async def get_dashboard(
     symbol: str,
     hours: int = Query(24, gt=0),
-    since: datetime = Query(...),
     platform: Optional[str] = None
 ):
+    from datetime import timezone
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
     futures_map = primary_futures_map()
     primary_future_symbol = futures_map.get(symbol)
     vix_symbol = "VX=F"
@@ -461,6 +519,18 @@ async def health():
                 return {"status": "healthy", "database": "connected"}
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
+
+@app.websocket("/stats/stream")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Keep connection open and handle client disconnects
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception:
+        manager.disconnect(websocket)
 
 if __name__ == "__main__":
     import uvicorn

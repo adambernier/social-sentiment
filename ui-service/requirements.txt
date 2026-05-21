@@ -1,5 +1,0 @@
-streamlit
-requests
-pandas
-plotly
-pandas_market_calendars

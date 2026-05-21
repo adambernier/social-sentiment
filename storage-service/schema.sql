@@ -41,3 +41,31 @@ CREATE TABLE IF NOT EXISTS stock_metrics (
     return_relative_sector  FLOAT,
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Trigger to notify on new post inserts
+CREATE OR REPLACE FUNCTION notify_new_post()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_notify(
+        'new_posts',
+        json_build_object(
+            'id', NEW.id,
+            'symbol', NEW.symbol,
+            'platform', NEW.platform,
+            'text', NEW.text,
+            'timestamp', NEW.timestamp,
+            'sentiment', NEW.sentiment,
+            'scores', NEW.scores,
+            'topic_id', NEW.topic_id,
+            'topic_label', NEW.topic_label,
+            'scored_at', NEW.scored_at
+        )::text
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trigger_notify_new_post
+AFTER INSERT ON posts
+FOR EACH ROW
+EXECUTE FUNCTION notify_new_post();

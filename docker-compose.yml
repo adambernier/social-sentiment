@@ -134,12 +134,18 @@ services:
 
   ui-service:
     build:
-      context: .
-      dockerfile: ui-service/Dockerfile
+      context: ui-service
+      dockerfile: Dockerfile
+    volumes:
+      - ./ui-service:/app
+      - /app/node_modules
+      - /app/.next
     environment:
       - API_URL=http://api-service:8000
+      - WATCHPACK_POLLING=true
+    command: npm run dev
     ports:
-      - "8501:8501"
+      - "3000:3000"
     depends_on:
       - api-service
 

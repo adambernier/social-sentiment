@@ -1,15 +1,18 @@
-FROM python:3.11-slim
-
+FROM node:20-alpine AS builder
 WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
 
-# Copy requirements and install
-COPY ui-service/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
 
-# Copy service code
-COPY shared/ ./shared/
-COPY ui-service/ ./ui-service/
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/node_modules ./node_modules
 
-EXPOSE 8501
-
-CMD ["streamlit", "run", "ui-service/app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.enableCORS=false"]
+EXPOSE 3000
+CMD ["npm", "start"]
