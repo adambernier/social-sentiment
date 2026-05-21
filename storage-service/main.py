@@ -13,7 +13,7 @@ from shared.config import (
     RABBIT_PORT,
     RABBIT_USER,
     RABBIT_PASS,
-    QUEUE_TOPIC_POSTS as INPUT_QUEUE,
+    QUEUE_SCORED_POSTS as INPUT_QUEUE,
 )
 from db import DB
 

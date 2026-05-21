@@ -13,6 +13,8 @@ from pydantic import BaseModel
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.config import DATABASE_DSN
+from shared.symbols import primary_futures_map
+
 
 # Global pool instance
 db_pool: Optional[ConnectionPool] = None
@@ -77,6 +79,25 @@ class StockMetricsResponse(BaseModel):
     beta_relative_sector: Optional[float]
     return_relative_sector: Optional[float]
     updated_at: datetime
+
+
+class DashboardResponse(BaseModel):
+    sentiment_stats: list[SentimentStats]
+    topic_stats: list[TopicStats]
+    posts: list[PostResponse]
+    market_data: list[MarketQuote]
+    latest_quote: Optional[MarketQuote]
+    metrics_data: Optional[StockMetricsResponse]
+    primary_delta: Optional[MarketDelta]
+    
+    primary_future_symbol: Optional[str]
+    primary_future_quote: Optional[MarketQuote]
+    primary_future_delta: Optional[MarketDelta]
+    primary_future_market_data: list[MarketQuote]
+    
+    vix_quote: Optional[MarketQuote]
+    vix_delta: Optional[MarketDelta]
+
 
 def get_db_conn():
     if db_pool is None:
@@ -268,6 +289,168 @@ async def get_stock_metrics(symbol: str):
         with conn.cursor() as cur:
             cur.execute(query, [symbol])
             return cur.fetchone()
+
+@app.get("/stats/dashboard", response_model=DashboardResponse)
+async def get_dashboard(
+    symbol: str,
+    hours: int = Query(24, gt=0),
+    since: datetime = Query(...),
+    platform: Optional[str] = None
+):
+    futures_map = primary_futures_map()
+    primary_future_symbol = futures_map.get(symbol)
+    vix_symbol = "VX=F"
+    
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            # Helper to run query and fetch all rows
+            def run_query(q, p):
+                cur.execute(q, p)
+                return cur.fetchall()
+
+            # Helper to run query and fetch one row
+            def run_query_one(q, p):
+                cur.execute(q, p)
+                return cur.fetchone()
+
+            # Time threshold for hourly stats and graphs
+            cutoff = datetime.now() - timedelta(hours=hours)
+
+            # 1. Fetch posts matching symbol and optional platform, ordered by timestamp
+            posts_query = (
+                "SELECT id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, scored_at "
+                "FROM posts "
+                "WHERE symbol = %s AND timestamp >= %s"
+            )
+            posts_params = [symbol, cutoff]
+            if platform:
+                posts_query += " AND platform = %s"
+                posts_params.append(platform)
+            posts_query += " ORDER BY timestamp DESC LIMIT 1000"
+            posts = run_query(posts_query, posts_params)
+
+            # 2. Fetch sentiment stats
+            sent_query = (
+                "SELECT sentiment, COUNT(*) as count "
+                "FROM posts "
+                "WHERE timestamp > %s AND symbol = %s"
+            )
+            sent_params = [cutoff, symbol]
+            if platform:
+                sent_query += " AND platform = %s"
+                sent_params.append(platform)
+            sent_query += " GROUP BY sentiment"
+            sentiment_stats = run_query(sent_query, sent_params)
+
+            # 3. Fetch topic stats
+            topic_query = (
+                "SELECT topic_label, COUNT(*) as count "
+                "FROM posts "
+                "WHERE timestamp > %s AND symbol = %s"
+            )
+            topic_params = [cutoff, symbol]
+            if platform:
+                topic_query += " AND platform = %s"
+                topic_params.append(platform)
+            topic_query += " GROUP BY topic_label ORDER BY count DESC"
+            topic_stats = run_query(topic_query, topic_params)
+
+            # 4. Fetch market data (quotes)
+            market_query = (
+                "SELECT symbol, timestamp, price, volume, market_session "
+                "FROM stock_quotes "
+                "WHERE symbol = %s AND timestamp > %s "
+                "ORDER BY timestamp ASC"
+            )
+            market_data = run_query(market_query, [symbol, cutoff])
+
+            # 5. Fetch latest quote for target
+            latest_quote = run_query_one(
+                "SELECT symbol, timestamp, price, volume, market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
+                [symbol]
+            )
+
+            # 6. Fetch target metrics
+            metrics_data = run_query_one(
+                "SELECT symbol, pe_ratio, beta, avg_return_1y, inflation_adj_return_1y, "
+                "       pe_relative_sector, beta_relative_sector, return_relative_sector, updated_at "
+                "FROM stock_metrics WHERE symbol = %s",
+                [symbol]
+            )
+
+            # Delta helper
+            def get_delta_data(sym, ref_time):
+                cur.execute(
+                    "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
+                    [sym]
+                )
+                latest = cur.fetchone()
+                if not latest:
+                    return None
+                latest_price = latest['price']
+
+                cur.execute(
+                    "SELECT price FROM stock_quotes WHERE symbol = %s AND timestamp <= %s ORDER BY timestamp DESC LIMIT 1",
+                    [sym, ref_time]
+                )
+                ref = cur.fetchone()
+                if not ref:
+                    cur.execute(
+                        "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp ASC LIMIT 1",
+                        [sym]
+                    )
+                    ref = cur.fetchone()
+
+                if not ref:
+                    return None
+                ref_price = ref['price']
+                
+                abs_change = latest_price - ref_price
+                pct_change = (abs_change / ref_price * 100) if ref_price != 0 else 0.0
+                return {
+                    "symbol": sym,
+                    "reference_price": ref_price,
+                    "latest_price": latest_price,
+                    "pct_change": pct_change,
+                    "abs_change": abs_change
+                }
+
+            primary_delta = get_delta_data(symbol, since)
+
+            # 7. Fetch primary future details if available
+            p_future_quote = None
+            p_future_delta = None
+            p_future_market_data = []
+            if primary_future_symbol:
+                p_future_quote = run_query_one(
+                    "SELECT symbol, timestamp, price, volume, market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
+                    [primary_future_symbol]
+                )
+                p_future_delta = get_delta_data(primary_future_symbol, since)
+                p_future_market_data = run_query(market_query, [primary_future_symbol, cutoff])
+
+            # 8. Fetch VIX details
+            vix_quote = run_query_one(
+                "SELECT symbol, timestamp, price, volume, market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
+                [vix_symbol]
+            )
+            vix_delta = get_delta_data(vix_symbol, since)
+
+            return {
+                "sentiment_stats": sentiment_stats,
+                "topic_stats": topic_stats,
+                "posts": posts,
+                "market_data": market_data,
+                "latest_quote": latest_quote,
+                "metrics_data": metrics_data,
+                "primary_delta": primary_delta,
+                "primary_future_symbol": primary_future_symbol,
+                "primary_future_quote": p_future_quote,
+                "primary_future_delta": p_future_delta,
+                "primary_future_market_data": p_future_market_data,
+                "vix_quote": vix_quote,
+                "vix_delta": vix_delta
+            }
 
 @app.get("/health")
 async def health():

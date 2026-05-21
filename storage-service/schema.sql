@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE INDEX IF NOT EXISTS posts_symbol_idx ON posts (symbol);
 CREATE INDEX IF NOT EXISTS posts_sentiment_idx ON posts (sentiment);
 CREATE INDEX IF NOT EXISTS posts_platform_idx ON posts (platform);
+CREATE INDEX IF NOT EXISTS posts_symbol_timestamp_idx ON posts (symbol, timestamp DESC);
+
 
 CREATE TABLE IF NOT EXISTS stock_quotes (
     id          SERIAL PRIMARY KEY,

@@ -1,6 +1,0 @@
-bertopic
-sentence-transformers
-umap-learn
-pika
-pydantic
-pandas

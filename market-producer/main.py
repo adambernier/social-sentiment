@@ -1,5 +1,7 @@
 import time
+import threading
 import sys
+
 import pandas as pd
 import pandas_market_calendars as mcal
 from datetime import datetime, timezone, timedelta
@@ -34,6 +36,8 @@ def calculate_relative(value, baseline, invert=False):
 
 def fetch_and_store_metrics(db: DB):
     print("Updating financial metrics...")
+    sector_cache = {}
+    
     for symbol in SYMBOLS:
         try:
             ticker = yf.Ticker(symbol)
@@ -55,19 +59,40 @@ def fetch_and_store_metrics(db: DB):
             pe = info.get("trailingPE")
             beta = info.get("beta")
             
-            # Fetch sector baseline
+            # Fetch sector baseline (with local execution caching)
             sector_etf = SECTOR_MAP.get(symbol, "SPY")
-            s_ticker = yf.Ticker(sector_etf)
-            s_info = s_ticker.info
-            s_hist = s_ticker.history(period="1y")
+            if sector_etf not in sector_cache:
+                try:
+                    print(f"Fetching sector baseline metrics for {sector_etf}...")
+                    s_ticker = yf.Ticker(sector_etf)
+                    s_info = s_ticker.info
+                    s_hist = s_ticker.history(period="1y")
+                    
+                    if s_hist.empty:
+                        sector_cache[sector_etf] = None
+                    else:
+                        s_start = s_hist.iloc[0]["Close"]
+                        s_end = s_hist.iloc[-1]["Close"]
+                        s_return = (s_end - s_start) / s_start
+                        sector_cache[sector_etf] = {
+                            "pe": s_info.get("trailingPE"),
+                            "beta": s_info.get("beta") or 1.0,
+                            "return": s_return
+                        }
+                except Exception as s_err:
+                    print(f"Error fetching baseline sector {sector_etf}: {s_err}")
+                    sector_cache[sector_etf] = None
             
-            s_pe = s_info.get("trailingPE")
-            # If sector beta is missing, use 1.0 as a sane baseline for market beta
-            s_beta = s_info.get("beta") or 1.0
-            
-            s_start = s_hist.iloc[0]["Close"]
-            s_end = s_hist.iloc[-1]["Close"]
-            s_return = (s_end - s_start) / s_start
+            s_data = sector_cache.get(sector_etf)
+            if not s_data:
+                print(f"Warning: No sector baseline data available for {sector_etf}, using defaults.")
+                s_pe = None
+                s_beta = 1.0
+                s_return = 0.0
+            else:
+                s_pe = s_data["pe"]
+                s_beta = s_data["beta"]
+                s_return = s_data["return"]
             
             # Relative scores
             # For P/E, lower is better, so invert=True
@@ -92,6 +117,7 @@ def fetch_and_store_metrics(db: DB):
             
         except Exception as e:
             print(f"Error updating metrics for {symbol}: {e}")
+
 
 def get_market_session(now_utc: datetime) -> str:
     # Get schedule for current day (and tomorrow just in case of wrap-around)
@@ -167,6 +193,21 @@ def fetch_and_store(db: DB):
         except Exception as e:
             print(f"ERROR fetching {symbol}: {e}")
 
+def run_metrics_in_background():
+    def worker():
+        try:
+            print("Starting background metrics update thread...")
+            db_thread = DB()
+            fetch_and_store_metrics(db_thread)
+            db_thread.conn.close()
+            print("Background metrics update completed successfully.")
+        except Exception as e:
+            print(f"Error in background metrics update thread: {e}")
+            
+    t = threading.Thread(target=worker)
+    t.daemon = True
+    t.start()
+
 def main():
     try:
         db = DB()
@@ -183,7 +224,7 @@ def main():
     while True:
         now = time.time()
         if now - last_metrics_update > METRICS_INTERVAL:
-            fetch_and_store_metrics(db)
+            run_metrics_in_background()
             last_metrics_update = now
             
         fetch_and_store(db)

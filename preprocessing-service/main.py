@@ -6,6 +6,7 @@ import pika
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.schemas import RawPost, CleanPost
+from shared.topics import TopicModel
 from shared.config import (
     RABBIT_HOST,
     RABBIT_PORT,
@@ -18,6 +19,8 @@ from preprocess import clean_text, is_valid
 
 
 def main():
+    topic_model = TopicModel()
+    
     creds = pika.PlainCredentials(RABBIT_USER, RABBIT_PASS)
     params = pika.ConnectionParameters(host=RABBIT_HOST, port=RABBIT_PORT, credentials=creds)
     connection = pika.BlockingConnection(params)
@@ -40,13 +43,18 @@ def main():
             ch.basic_ack(delivery_tag=method.delivery_tag)
             return
 
-        # Explicitly pass all fields including the new 'symbol' field
+        # Classify topic
+        topic_id, topic_label = topic_model.predict(cleaned)
+
+        # Explicitly pass all fields including the new 'symbol' and topic fields
         clean = CleanPost(
             id=raw.id,
             symbol=raw.symbol,
             platform=raw.platform,
             text=cleaned,
             timestamp=raw.timestamp,
+            topic_id=topic_id,
+            topic_label=topic_label,
         )
         ch.basic_publish(
             exchange="",
@@ -54,8 +62,9 @@ def main():
             body=clean.model_dump_json().encode(),
             properties=pika.BasicProperties(delivery_mode=2),
         )
-        print(f"{raw.id} ({raw.symbol}): '{cleaned[:70]}'")
+        print(f"{raw.id} ({raw.symbol}): topic='{topic_label}', text='{cleaned[:70]}'")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+
 
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=INPUT_QUEUE, on_message_callback=on_message)

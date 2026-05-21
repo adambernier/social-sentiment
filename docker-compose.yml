@@ -64,16 +64,6 @@ services:
       postgres:
         condition: service_healthy
 
-  topic-service:
-    build:
-      context: .
-      dockerfile: topic-service/Dockerfile
-    environment:
-      - RABBITMQ_HOST=rabbitmq
-      - PYTHONUNBUFFERED=1
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
 
   bluesky-producer:
     build:

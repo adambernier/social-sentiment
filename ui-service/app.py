@@ -65,63 +65,11 @@ platform_param = "" if platform == "All" else f"&platform={platform}"
 
 # --- Data Fetching Functions ---
 @st.cache_data(ttl=30)
-def fetch_stats(hrs, sym, p_param):
+def fetch_dashboard_data(hrs, sym, p_param, since: datetime):
     try:
-        url = f"{API_URL}/stats/sentiment?hours={hrs}&symbol={sym}{p_param}"
-        res = requests.get(url, timeout=5)
-        return res.json() if res.status_code == 200 else []
-    except Exception as e:
-        return []
-
-@st.cache_data(ttl=30)
-def fetch_topic_stats(hrs, sym, p_param):
-    try:
-        url = f"{API_URL}/stats/topics?hours={hrs}&symbol={sym}{p_param}"
-        res = requests.get(url, timeout=5)
-        return res.json() if res.status_code == 200 else []
-    except Exception as e:
-        return []
-
-@st.cache_data(ttl=30)
-def fetch_posts(sym, p_param):
-    try:
-        # Use a larger limit to ensure we have enough for both news and social
-        url = f"{API_URL}/posts?limit=1000&symbol={sym}{p_param}"
-        res = requests.get(url, timeout=5)
-        return res.json() if res.status_code == 200 else []
-    except Exception as e:
-        return []
-
-@st.cache_data(ttl=30)
-def fetch_market_data(sym, hrs):
-    try:
-        res = requests.get(f"{API_URL}/stats/market?symbol={sym}&hours={hrs}", timeout=5)
-        return res.json() if res.status_code == 200 else []
-    except Exception as e:
-        return []
-
-@st.cache_data(ttl=30)
-def fetch_latest_quote(sym):
-    try:
-        res = requests.get(f"{API_URL}/stats/market/latest?symbol={sym}", timeout=5)
-        return res.json() if res.status_code == 200 else None
-    except Exception as e:
-        return None
-
-@st.cache_data(ttl=300) # Metrics change slowly
-def fetch_metrics(sym):
-    try:
-        res = requests.get(f"{API_URL}/stats/metrics?symbol={sym}", timeout=5)
-        return res.json() if res.status_code == 200 else None
-    except Exception as e:
-        return None
-
-@st.cache_data(ttl=30)
-def fetch_delta(sym, since: datetime):
-    try:
-        # Format ISO string
         since_str = since.strftime('%Y-%m-%dT%H:%M:%SZ')
-        res = requests.get(f"{API_URL}/stats/market/delta?symbol={sym}&since={since_str}", timeout=5)
+        url = f"{API_URL}/stats/dashboard?symbol={sym}&hours={hrs}&since={since_str}{p_param}"
+        res = requests.get(url, timeout=10)
         return res.json() if res.status_code == 200 else None
     except Exception as e:
         return None
@@ -129,27 +77,26 @@ def fetch_delta(sym, since: datetime):
 # --- Main Dashboard Fragment ---
 @st.fragment(run_every="60s" if live_mode else None)
 def dashboard_content():
-    stats_data = fetch_stats(hours, symbol, platform_param)
-    topic_stats = fetch_topic_stats(hours, symbol, platform_param)
-    posts_data = fetch_posts(symbol, platform_param)
-    market_data = fetch_market_data(symbol, hours)
-    latest_quote = fetch_latest_quote(symbol)
-    metrics_data = fetch_metrics(symbol)
+    dashboard_data = fetch_dashboard_data(hours, symbol, platform_param, last_close)
+    if not dashboard_data:
+        st.error("Error loading dashboard data. Please try again.")
+        return
+
+    stats_data = dashboard_data["sentiment_stats"]
+    topic_stats = dashboard_data["topic_stats"]
+    posts_data = dashboard_data["posts"]
+    market_data = dashboard_data["market_data"]
+    latest_quote = dashboard_data["latest_quote"]
+    metrics_data = dashboard_data["metrics_data"]
     
-    # --- Futures Data Fetch ---
-    # 1. Primary correlated future (e.g. NVDA -> NQ=F, ASTS -> RTY=F)
-    primary_future_symbol = PRIMARY_FUTURES_MAP.get(symbol)
-    p_future_quote = fetch_latest_quote(primary_future_symbol) if primary_future_symbol else None
-    p_future_delta = fetch_delta(primary_future_symbol, last_close) if primary_future_symbol else None
-    p_future_market_data = fetch_market_data(primary_future_symbol, hours) if primary_future_symbol else []
-
-    # 2. Global VIX future
-    vix_symbol = "VX=F"
-    vix_quote = fetch_latest_quote(vix_symbol)
-    vix_delta = fetch_delta(vix_symbol, last_close)
-
-    # Primary symbol's change vs previous close (used by the price KPI tile + chart)
-    primary_delta = fetch_delta(symbol, last_close)
+    primary_future_symbol = dashboard_data["primary_future_symbol"]
+    p_future_quote = dashboard_data["primary_future_quote"]
+    p_future_delta = dashboard_data["primary_future_delta"]
+    p_future_market_data = dashboard_data["primary_future_market_data"]
+    
+    vix_quote = dashboard_data["vix_quote"]
+    vix_delta = dashboard_data["vix_delta"]
+    primary_delta = dashboard_data["primary_delta"]
 
     # --- Header Row ---
     header_left, header_right = st.columns([3, 1])

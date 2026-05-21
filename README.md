@@ -28,16 +28,20 @@ performance dashboard.
 
 ## Services
 
-| Service                 | Role                                                                  |
-| ----------------------- | --------------------------------------------------------------------- |
-| `bluesky-producer`      | Polls the public Bluesky search API for keywords, publishes raw posts |
-| `market-producer`       | Fetches live price/volume and hourly relative-to-sector metrics       |
-| `preprocessing-service` | Cleans text, drops too-short posts                                    |
-| `sentiment-service`     | Scores posts with a RoBERTa sentiment model                           |
-| `storage-service`       | Idempotent insert into Postgres (`posts.id` is the primary key)       |
-| `api-service`           | FastAPI read API for posts, sentiment stats, and financial metrics    |
+| Service                 | Role                                                                    |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `bluesky-producer`      | Polls public Bluesky search API for keywords, publishes raw posts       |
+| `reddit-producer`       | Polls Reddit API for symbol mentions, publishes raw posts               |
+| `stocktwits-producer`   | Polls Stocktwits streaming/search API, publishes raw posts              |
+| `news-producer`         | Polls market news RSS/API feeds, publishes raw posts                    |
+| `market-producer`       | Fetches live quotes (price/vol) and background relative-to-sector metrics|
+| `preprocessing-service` | Cleans text, runs keyword-based topic classification, drops short posts |
+| `sentiment-service`     | Scores clean posts with a RoBERTa sentiment model                       |
+| `storage-service`       | Consumes scored posts and performs idempotent database writes           |
+| `api-service`           | FastAPI backend exposing aggregated endpoints like `/stats/dashboard`   |
+| `ui-service`            | Streamlit web frontend displaying real-time charts and scorecards       |
 
-Keywords for the producers live in `bluesky-producer/keywords.json`.
+Keywords for the social producers are centralized in `shared/symbols.py`.
 
 ## Features
 
@@ -83,6 +87,7 @@ First boot of `sentiment-service` downloads the RoBERTa model (~500MB) into the
 
 Useful endpoints once the stack is up:
 - API docs: http://localhost:8000/docs
+- Consolidated dashboard stats: http://localhost:8000/stats/dashboard?symbol=INTC&hours=24
 - Latest posts: http://localhost:8000/posts
 - 24h sentiment stats: http://localhost:8000/stats/sentiment
 - 24h topic stats: http://localhost:8000/stats/topics
@@ -177,5 +182,4 @@ Once running, access the dashboard at: http://localhost:8501
 - **Want to start clean** — `docker compose down -v` drops `postgres_data` and
   `hf_cache`. Or, less destructively, purge queues from the management UI and
   `TRUNCATE posts;` in Postgres.
-r, less destructively, purge queues from the management UI and
-  `TRUNCATE posts;` in Postgres.
+
