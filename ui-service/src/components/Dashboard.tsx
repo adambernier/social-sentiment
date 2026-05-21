@@ -50,7 +50,7 @@ export default function Dashboard() {
   const [futureMarketData, setFutureMarketData] = useState<MarketQuote[]>([]);
   const [vixQuote, setVixQuote] = useState<MarketQuote | null>(null);
 
-  // Initial Fetch
+  // Initial Fetch & Polling
   useEffect(() => {
     const fetchData = async () => {
       try {
@@ -58,6 +58,9 @@ export default function Dashboard() {
         const res = await fetch(`http://localhost:8000/stats/dashboard?symbol=${symbol}&hours=${hours}${platformParam}`);
         if (res.ok) {
           const data = await res.json();
+          // To prevent the WebSocket feed from being completely overwritten and losing fresh un-polled posts,
+          // we only update posts if we don't have any, or we can just let the API overwrite them. 
+          // Actually, since the API returns the 500 most recent, overwriting is fine and keeps things synced.
           setPosts(data.posts || []);
           setSentimentStats(data.sentiment_stats || []);
           setMarketData(data.market_data || []);
@@ -74,7 +77,13 @@ export default function Dashboard() {
         console.error("Failed to fetch dashboard data", err);
       }
     };
+    
+    // Fetch immediately on mount or dependency change
     fetchData();
+    
+    // Poll every 60 seconds to keep pricing and market session status fresh
+    const intervalId = setInterval(fetchData, 60000);
+    return () => clearInterval(intervalId);
   }, [symbol, hours, platform]);
 
   // WebSocket Live Updates
@@ -186,7 +195,14 @@ export default function Dashboard() {
       }
     }
 
-    return { data: sortedData, closedRegions };
+    // Filter out "closed" regions that are less than 8 hours long.
+    // Overnight gaps are ~17.5 hours. Anything smaller is a missing data gap.
+    const actualClosedRegions = closedRegions.filter(r => {
+      const diffMs = new Date(r.end).getTime() - new Date(r.start).getTime();
+      return diffMs >= 8 * 60 * 60 * 1000;
+    });
+
+    return { data: sortedData, closedRegions: actualClosedRegions };
   }, [marketData, futureMarketData, posts, hours, latestQuote]);
 
   const formatXAxis = (t: string) => {
@@ -208,7 +224,7 @@ export default function Dashboard() {
               <div className="w-1.5 h-5 bg-rose-500 rounded-full"></div>
             </div>
             <h1 className="text-2xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400">
-              Social Sentiment Terminal
+              Social Sentiment vs Market Price
             </h1>
           </div>
           <div className="flex items-center gap-4 mt-4 md:mt-0">
@@ -431,6 +447,40 @@ export default function Dashboard() {
                     />
                   </ComposedChart>
                 </ResponsiveContainer>
+              </div>
+            </section>
+
+            {/* Live Social Feed Terminal */}
+            <section className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl p-6 shadow-2xl flex flex-col h-[400px]">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-bold flex items-center gap-2 text-white">
+                  <MessageSquare className="w-5 h-5 text-sky-400" />
+                  Live Social Feed
+                </h2>
+                <div className="text-xs text-slate-400">Showing last {posts.length} posts</div>
+              </div>
+              <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+                {posts.map((post, idx) => (
+                  <div key={idx} className="bg-white/5 border border-white/5 rounded-xl p-3 text-sm hover:bg-white/10 transition-colors">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className={cn("text-[10px] uppercase font-bold px-1.5 py-0.5 rounded", post.platform === 'twitter' ? 'bg-sky-500/20 text-sky-400' : post.platform === 'reddit' ? 'bg-orange-500/20 text-orange-400' : 'bg-blue-500/20 text-blue-400')}>
+                          {post.platform}
+                        </span>
+                        <span className={cn("text-[10px] uppercase font-bold px-1.5 py-0.5 rounded", post.sentiment === 'positive' ? 'bg-emerald-500/20 text-emerald-400' : post.sentiment === 'negative' ? 'bg-rose-500/20 text-rose-400' : 'bg-slate-500/20 text-slate-400')}>
+                          {post.sentiment}
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-slate-500">
+                        {format(new Date(post.timestamp), "MMM d, h:mm:ss a")}
+                      </span>
+                    </div>
+                    <p className="text-slate-300 leading-relaxed">{post.text}</p>
+                  </div>
+                ))}
+                {posts.length === 0 && (
+                  <div className="text-center text-slate-500 mt-10">No posts found for this time window.</div>
+                )}
               </div>
             </section>
           </div>

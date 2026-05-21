@@ -8,7 +8,6 @@ from collections import deque
 from pathlib import Path
 
 import httpx
-import feedparser
 import aio_pika
 
 # Setup path for shared imports
@@ -31,19 +30,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("reddit-producer")
 
-# Reddit RSS multireddit feed
+# Reddit JSON multireddit comments feed
 SUBREDDITS = (
     "wallstreetbets+stocks+investing+SecurityAnalysis"
     "+options+StockMarket+semiconductors+Spacestocks"
 )
-FEED_URL = f"https://www.reddit.com/r/{SUBREDDITS}/new/.rss?limit=100"
-POLL_INTERVAL = 120  # 2 minutes
-
-# Regex for extracting the base36 ID from the permalink
-# Example: https://www.reddit.com/r/wallstreetbets/comments/1crk7k4/is_this_the_bottom/
-ID_RE = re.compile(r"/comments/([a-z0-9]+)/")
-# Regex for stripping HTML tags
-TAG_RE = re.compile(r"<[^>]+>")
+FEED_URL = f"https://www.reddit.com/r/{SUBREDDITS}/comments.json?limit=100"
+POLL_INTERVAL = 300  # 5 minutes
 
 # Global deque for ID-based deduplication
 seen_ids = deque(maxlen=2000)
@@ -63,25 +56,23 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
             await asyncio.sleep(retry_after)
             return
         elif resp.status_code != 200:
-            logger.error(f"Reddit RSS error: HTTP {resp.status_code}")
+            logger.error(f"Reddit JSON error: HTTP {resp.status_code}")
             return
 
-        # Parse feed in a thread to avoid blocking the event loop
-        feed = await asyncio.to_thread(feedparser.parse, resp.text)
+        data = resp.json()
+        children = data.get("data", {}).get("children", [])
         
-        if feed.bozo and not feed.entries:
-            logger.warning("Feedparser reported bozo error with no entries.")
-            return
-
         kw_map = keywords_map()
         new_posts_count = 0
-        total_entries = len(feed.entries)
+        total_entries = len(children)
         unseen_count = 0
         matched_symbols = set()
 
-        for entry in feed.entries:
+        for child in children:
+            comment = child.get("data", {})
+            
             # 1. Extract ID and Dedup
-            post_id = getattr(entry, "id", "")
+            post_id = comment.get("id", "")
             if not post_id:
                 continue
             
@@ -92,30 +83,25 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
             # Add to seen_ids immediately
             seen_ids.append(post_id)
 
-            # 2. NSFW Filter
-            is_nsfw = any(tag.get("term") == "nsfw" for tag in getattr(entry, "tags", []))
-            if is_nsfw:
+            # 2. Build Searchable Text
+            body = comment.get("body", "")
+            if not body:
                 continue
-
-            # 3. Build Searchable Text
-            title = entry.title
-            content_html = entry.content[0].value if hasattr(entry, "content") and entry.content else ""
-            selftext = html.unescape(TAG_RE.sub(" ", content_html)).strip()[:2000]
-            haystack = f"{title}\n{selftext}"
+                
+            haystack = body
             
-            # 4. Keyword Match
-            # We match each symbol to see if it belongs to this post
+            # 3. Keyword Match
             for symbol in kw_map.keys():
                 if match_symbol(haystack, symbol):
-                    # 5. Publish
-                    # Reddit timestamps in RSS are struct_time in UTC
-                    ts = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
+                    # 4. Publish
+                    created_utc = comment.get("created_utc")
+                    ts = datetime.fromtimestamp(created_utc, tz=timezone.utc) if created_utc else datetime.now(timezone.utc)
                     
                     raw_post = RawPost(
                         id=f"rd_{post_id}",
                         symbol=symbol,
                         platform="reddit",
-                        text=f"{title}\n{selftext}".strip(),
+                        text=body.strip()[:2000],
                         timestamp=ts,
                     )
 
@@ -131,7 +117,7 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
                     matched_symbols.add(symbol)
 
         if new_posts_count > 0:
-            logger.info(f"Cycle complete. Published {new_posts_count} new Reddit posts across {len(matched_symbols)} symbols. (Feed: {total_entries}, New: {unseen_count})")
+            logger.info(f"Cycle complete. Published {new_posts_count} new Reddit comments across {len(matched_symbols)} symbols. (Feed: {total_entries}, New: {unseen_count})")
         else:
             logger.info(f"Cycle complete. No new matches. (Feed: {total_entries}, New: {unseen_count})")
 
@@ -148,9 +134,10 @@ async def main():
             logger.info("Performing startup drain fetch to populate seen_ids...")
             resp = await client.get(FEED_URL, timeout=10)
             if resp.status_code == 200:
-                feed = await asyncio.to_thread(feedparser.parse, resp.text)
-                for entry in feed.entries:
-                    pid = getattr(entry, "id", "")
+                data = resp.json()
+                children = data.get("data", {}).get("children", [])
+                for child in children:
+                    pid = child.get("data", {}).get("id", "")
                     if pid:
                         seen_ids.append(pid)
             logger.info(f"Startup drain complete. Seeded {len(seen_ids)} IDs.")
