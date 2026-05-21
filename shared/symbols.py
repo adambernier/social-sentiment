@@ -9,6 +9,7 @@ and the UI picks it up on next start.
 SYMBOLS: dict[str, dict] = {
     "AMD":  {"keywords": ["Advanced Micro Devices", "Lisa Su"], "future": "NQ=F",  "sector": "XLK"},
     "ASTS": {"keywords": ["SpaceMobile"],                       "future": "RTY=F", "sector": "XAR"},
+    "CRWV": {"keywords": ["CoreWeave"],                         "future": "NQ=F",  "sector": "XLK"},
     "INTC": {"keywords": ["Intel"],                             "future": "NQ=F",  "sector": "XLK"},
     "MU":   {
         "keywords": ["Micron"],

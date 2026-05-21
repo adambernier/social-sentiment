@@ -229,6 +229,7 @@ export default function Dashboard() {
             >
               <option value="AMD">AMD</option>
               <option value="ASTS">ASTS</option>
+              <option value="CRWV">CRWV</option>
               <option value="INTC">INTC</option>
               <option value="NVDA">NVDA</option>
               <option value="RKLB">RKLB</option>
