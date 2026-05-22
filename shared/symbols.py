@@ -19,6 +19,7 @@ SYMBOLS: dict[str, dict] = {
     },
     "NVDA": {"keywords": ["Nvidia", "Jensen Huang"],            "future": "NQ=F",  "sector": "XLK"},
     "RKLB": {"keywords": ["Rocket Lab"],                        "future": "RTY=F", "sector": "XAR"},
+    "SMCI": {"keywords": ["Super Micro Computer", "Supermicro", "Charles Liang"], "future": "NQ=F",  "sector": "XLK"},
     "SMH":  {
         "keywords": ["VanEck Semiconductor"],
         "future": "NQ=F", "sector": "XLK",

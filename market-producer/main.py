@@ -176,11 +176,16 @@ def fetch_and_store(db: DB):
             # Convert pandas Timestamp to UTC datetime
             ts = data.index[-1].to_pydatetime().astimezone(timezone.utc)
             
+            try:
+                daily_volume = int(ticker.fast_info.get("lastVolume") or latest["Volume"])
+            except Exception:
+                daily_volume = int(latest["Volume"])
+
             quote = StockQuote(
                 symbol=symbol,
                 timestamp=ts,
                 price=float(latest["Close"]),
-                volume=int(latest["Volume"]),
+                volume=daily_volume,
                 market_session=current_session
             )
             

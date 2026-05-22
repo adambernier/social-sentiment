@@ -436,33 +436,44 @@ async def get_dashboard(
                 [symbol]
             )
 
-            # Delta helper
-            def get_delta_data(sym, ref_time):
+            # Delta helper - change since previous close
+            def get_delta_data(sym, ref_time=None):
                 cur.execute(
-                    "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
+                    "SELECT timestamp, price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
                     [sym]
                 )
                 latest = cur.fetchone()
                 if not latest:
                     return None
                 latest_price = latest['price']
+                latest_ts = latest['timestamp']
 
+                session_type = 'futures_open' if sym.endswith("=F") else 'regular'
+
+                # Get the last regular/open session quote
                 cur.execute(
-                    "SELECT price FROM stock_quotes WHERE symbol = %s AND timestamp <= %s ORDER BY timestamp DESC LIMIT 1",
-                    [sym, ref_time]
+                    "SELECT timestamp, price FROM stock_quotes WHERE symbol = %s AND market_session = %s ORDER BY timestamp DESC LIMIT 1",
+                    [sym, session_type]
                 )
-                ref = cur.fetchone()
-                if not ref:
+                latest_reg = cur.fetchone()
+                if not latest_reg:
+                    # Fallback to oldest overall quote
                     cur.execute(
                         "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp ASC LIMIT 1",
                         [sym]
                     )
                     ref = cur.fetchone()
+                    ref_price = ref['price'] if ref else latest_price
+                else:
+                    latest_reg_ts = latest_reg['timestamp']
+                    # Previous close is the last regular/open session quote before the current trading session day started (at least 12 hours prior)
+                    cur.execute(
+                        "SELECT price FROM stock_quotes WHERE symbol = %s AND market_session = %s AND timestamp < %s - %s::interval ORDER BY timestamp DESC LIMIT 1",
+                        [sym, session_type, latest_reg_ts, timedelta(hours=12)]
+                    )
+                    ref = cur.fetchone()
+                    ref_price = ref['price'] if ref else latest_reg['price']
 
-                if not ref:
-                    return None
-                ref_price = ref['price']
-                
                 abs_change = latest_price - ref_price
                 pct_change = (abs_change / ref_price * 100) if ref_price != 0 else 0.0
                 return {

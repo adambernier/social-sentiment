@@ -6,12 +6,23 @@ import {
   BarChart, Bar, Cell, ComposedChart, ReferenceLine, Legend, ReferenceArea
 } from "recharts";
 import { format, parseISO, startOfHour } from "date-fns";
-import { Activity, MessageSquare, TrendingUp, TrendingDown, Clock, Hash, Zap, HelpCircle, AlertCircle, BarChart2 } from "lucide-react";
+import { Activity, MessageSquare, TrendingUp, TrendingDown, Clock, Hash, Zap, HelpCircle, AlertCircle, BarChart2, Newspaper } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+function formatLargeNumber(num: number | undefined | null): string {
+  if (num === undefined || num === null) return '---';
+  if (num >= 1_000_000) {
+    return (num / 1_000_000).toFixed(1) + 'M';
+  }
+  if (num >= 1_000) {
+    return (num / 1_000).toFixed(1) + 'K';
+  }
+  return num.toLocaleString();
 }
 
 // Data Interfaces
@@ -51,7 +62,8 @@ export default function Dashboard() {
   const [hours, setHours] = useState(24);
   const [platform, setPlatform] = useState("all");
   const [isConnected, setIsConnected] = useState(false);
-  const [showSR, setShowSR] = useState(false);
+  const [showSR, setShowSR] = useState(true);
+  const [feedTab, setFeedTab] = useState<"social" | "news">("social");
   
   // States
   const [posts, setPosts] = useState<Post[]>([]);
@@ -67,12 +79,21 @@ export default function Dashboard() {
   const [futureMarketData, setFutureMarketData] = useState<MarketQuote[]>([]);
   const [vixQuote, setVixQuote] = useState<MarketQuote | null>(null);
 
+  // Dynamic host determination for API and WebSocket
+  const apiBase = typeof window !== 'undefined' 
+    ? `${window.location.protocol}//${window.location.hostname}:8000` 
+    : 'http://localhost:8000';
+
+  const wsBase = typeof window !== 'undefined' 
+    ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8000` 
+    : 'ws://localhost:8000';
+
   // Initial Fetch & Polling
   useEffect(() => {
     const fetchData = async () => {
       try {
         const platformParam = platform !== 'all' ? `&platform=${platform}` : '';
-        const res = await fetch(`http://localhost:8000/stats/dashboard?symbol=${symbol}&hours=${hours}${platformParam}`);
+        const res = await fetch(`${apiBase}/stats/dashboard?symbol=${symbol}&hours=${hours}${platformParam}`);
         if (res.ok) {
           const data = await res.json();
           // To prevent the WebSocket feed from being completely overwritten and losing fresh un-polled posts,
@@ -101,11 +122,11 @@ export default function Dashboard() {
     // Poll every 60 seconds to keep pricing and market session status fresh
     const intervalId = setInterval(fetchData, 60000);
     return () => clearInterval(intervalId);
-  }, [symbol, hours, platform]);
+  }, [symbol, hours, platform, apiBase]);
 
   // WebSocket Live Updates
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:8000/stats/stream");
+    const ws = new WebSocket(`${wsBase}/stats/stream`);
     ws.onopen = () => setIsConnected(true);
     ws.onclose = () => setIsConnected(false);
     
@@ -123,7 +144,7 @@ export default function Dashboard() {
       } catch (err) {}
     };
     return () => ws.close();
-  }, [symbol]);
+  }, [symbol, platform, wsBase]);
 
   // Calculations for Telemetry
   const totalMentions = sentimentStats.reduce((sum, s) => sum + s.count, 0);
@@ -135,6 +156,51 @@ export default function Dashboard() {
   
   const marketSession = latestQuote?.market_session || "closed";
 
+  // Divergence calculation comparing social vs news sentiment
+  const divergenceStatus = useMemo(() => {
+    const socialPosts = posts.filter(p => p.platform !== 'yahoo');
+    const newsPosts = posts.filter(p => p.platform === 'yahoo');
+
+    if (socialPosts.length < 5 || newsPosts.length < 2) {
+      return { label: "Aligned", color: "text-slate-400" };
+    }
+
+    const getScore = (sentiment: string) => {
+      if (sentiment === 'positive') return 1;
+      if (sentiment === 'negative') return -1;
+      return 0;
+    };
+
+    const socialScore = socialPosts.reduce((sum, p) => sum + getScore(p.sentiment), 0) / socialPosts.length;
+    const newsScore = newsPosts.reduce((sum, p) => sum + getScore(p.sentiment), 0) / newsPosts.length;
+
+    const diff = socialScore - newsScore;
+    if (diff > 0.15) {
+      return { label: "Retail Lead", color: "text-emerald-400" };
+    } else if (diff < -0.15) {
+      return { label: "Inst. Lead", color: "text-blue-400" };
+    } else {
+      return { label: "Aligned", color: "text-slate-400" };
+    }
+  }, [posts]);
+
+  // VIX Regime categorization from vixQuote
+  const vixRegime = useMemo(() => {
+    if (!vixQuote || !vixQuote.price) {
+      return { label: "Quiet", color: "text-emerald-400" };
+    }
+    const val = vixQuote.price;
+    if (val < 15) {
+      return { label: `${val.toFixed(1)} Low`, color: "text-emerald-400" };
+    } else if (val <= 20) {
+      return { label: `${val.toFixed(1)} Norm`, color: "text-slate-300" };
+    } else if (val <= 30) {
+      return { label: `${val.toFixed(1)} Elev`, color: "text-amber-400" };
+    } else {
+      return { label: `${val.toFixed(1)} High`, color: "text-rose-400" };
+    }
+  }, [vixQuote]);
+
   // Scorecard Data
   const scorecardData = useMemo(() => {
     if (!metrics) return [];
@@ -144,6 +210,11 @@ export default function Dashboard() {
       { name: "Returns", value: metrics.return_relative_sector ? metrics.return_relative_sector * 100 : 0 }
     ];
   }, [metrics]);
+
+  // Filter posts based on Social Stream vs News Desk tab
+  const filteredFeedPosts = useMemo(() => {
+    return posts.filter(p => feedTab === 'news' ? p.platform === 'yahoo' : p.platform !== 'yahoo');
+  }, [posts, feedTab]);
 
   // Correlation Chart Data (Binning posts by hour)
   const correlationData = useMemo(() => {
@@ -320,6 +391,7 @@ export default function Dashboard() {
               <option value="INTC">INTC</option>
               <option value="NVDA">NVDA</option>
               <option value="RKLB">RKLB</option>
+              <option value="SMCI">SMCI</option>
               <option value="SMH">SMH</option>
             </select>
             <select 
@@ -341,7 +413,6 @@ export default function Dashboard() {
               <option value="bluesky">Bluesky</option>
               <option value="reddit">Reddit</option>
               <option value="stocktwits">Stocktwits</option>
-              <option value="twitter">X (Twitter)</option>
               <option value="yahoo">Yahoo Finance News</option>
             </select>
             <button
@@ -359,14 +430,8 @@ export default function Dashboard() {
           </div>
         </header>
 
-        {/* Bento Grid Layout */}
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
-          
-          {/* LEFT COLUMN - MAIN STAGE */}
-          <div className="xl:col-span-8 space-y-6">
-            
-            {/* Telemetry Bento Grid */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {/* Telemetry Bento Grid */}
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
               <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors">
                 <div className="flex items-center gap-2 text-slate-400 mb-2">
                   <MessageSquare className="w-4 h-4" />
@@ -393,12 +458,13 @@ export default function Dashboard() {
                   <AlertCircle className="w-4 h-4" />
                   <span className="text-xs font-medium">Divergence</span>
                 </div>
-                <div className="text-2xl font-bold text-slate-500">N/A</div>
+                <div className={cn("text-2xl font-bold", divergenceStatus.color)}>{divergenceStatus.label}</div>
               </div>
               
               <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors">
-                <div className="flex items-center gap-2 text-slate-400 mb-1">
+                <div className="flex flex-col text-slate-400 mb-1">
                   <span className="text-xs font-medium">{symbol} Price</span>
+                  <span className="text-[9px] text-slate-500 font-normal lowercase leading-none mt-0.5">(since last close)</span>
                 </div>
                 <div className="flex items-end justify-between">
                   <div className="text-2xl font-bold">${latestQuote?.price?.toFixed(2) || '---'}</div>
@@ -414,14 +480,19 @@ export default function Dashboard() {
                   <Activity className="w-4 h-4" />
                   <span className="text-xs font-medium">Live Volume</span>
                 </div>
-                <div className="text-2xl font-bold">{latestQuote?.volume?.toLocaleString() || 0}</div>
+                <div className="text-2xl font-bold">{formatLargeNumber(latestQuote?.volume)}</div>
               </div>
               <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors">
-                <div className="flex items-center gap-2 text-slate-400 mb-1">
+                <div className="flex flex-col text-slate-400 mb-1">
                   <span className="text-xs font-medium">{futureSymbol || "NQ Futures"}</span>
+                  <span className="text-[9px] text-slate-500 font-normal lowercase leading-none mt-0.5">(since last close)</span>
                 </div>
                 <div className="flex items-end justify-between">
-                  <div className="text-2xl font-bold">{futureQuote?.price?.toLocaleString() || '---'}</div>
+                  <div className="text-2xl font-bold">
+                    {futureQuote?.price !== undefined && futureQuote?.price !== null 
+                      ? Math.round(futureQuote.price).toLocaleString() 
+                      : '---'}
+                  </div>
                   {futureDelta && (
                     <div className={cn("text-xs font-semibold px-2 py-0.5 rounded-md mb-1", futureDelta.pct_change >= 0 ? "bg-emerald-500/20 text-emerald-400" : "bg-rose-500/20 text-rose-400")}>
                       {futureDelta.pct_change >= 0 ? '↑' : '↓'} {Math.abs(futureDelta.pct_change).toFixed(2)}%
@@ -434,7 +505,7 @@ export default function Dashboard() {
                   <Zap className="w-4 h-4" />
                   <span className="text-xs font-medium">VIX Regime</span>
                 </div>
-                <div className="text-2xl font-bold text-slate-500">N/A</div>
+                <div className={cn("text-2xl font-bold", vixRegime.color)}>{vixRegime.label}</div>
               </div>
             </div>
 
@@ -557,17 +628,50 @@ export default function Dashboard() {
               </div>
             </section>
 
-            {/* Live Social Feed Terminal */}
-            <section className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl p-6 shadow-2xl flex flex-col h-[400px]">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-bold flex items-center gap-2 text-white">
-                  <MessageSquare className="w-5 h-5 text-sky-400" />
-                  Live Social Feed
-                </h2>
-                <div className="text-xs text-slate-400">Showing last {posts.length} posts</div>
+            {/* Bottom Grid Split */}
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
+              
+              {/* LEFT COLUMN - Feed */}
+              <div className="xl:col-span-8">
+                {/* Live Social Feed Terminal */}
+                <section className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl p-6 shadow-2xl flex flex-col h-[800px]">
+              <div className="flex items-center justify-between mb-4 pb-2 border-b border-white/5">
+                <div className="flex items-center gap-6">
+                  <button
+                    onClick={() => setFeedTab("social")}
+                    className={cn(
+                      "text-base font-bold flex items-center gap-2 pb-2 transition-all relative cursor-pointer outline-none",
+                      feedTab === "social" 
+                        ? "text-white" 
+                        : "text-slate-400 hover:text-slate-200"
+                    )}
+                  >
+                    <MessageSquare className="w-4 h-4 text-sky-400" />
+                    Social Stream
+                    {feedTab === "social" && (
+                      <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 rounded-full"></div>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setFeedTab("news")}
+                    className={cn(
+                      "text-base font-bold flex items-center gap-2 pb-2 transition-all relative cursor-pointer outline-none",
+                      feedTab === "news" 
+                        ? "text-white" 
+                        : "text-slate-400 hover:text-slate-200"
+                    )}
+                  >
+                    <Newspaper className="w-4 h-4 text-purple-400" />
+                    News Desk
+                    {feedTab === "news" && (
+                      <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 rounded-full"></div>
+                    )}
+                  </button>
+                </div>
+                <div className="text-xs text-slate-400">Showing last {filteredFeedPosts.length} items</div>
               </div>
               <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
-                {posts.map((post, idx) => (
+                {filteredFeedPosts.map((post, idx) => (
                   <div key={idx} className="bg-white/5 border border-white/5 rounded-xl p-3 text-sm hover:bg-white/10 transition-colors">
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
@@ -585,8 +689,8 @@ export default function Dashboard() {
                     <p className="text-slate-300 leading-relaxed">{post.text}</p>
                   </div>
                 ))}
-                {posts.length === 0 && (
-                  <div className="text-center text-slate-500 mt-10">No posts found for this time window.</div>
+                {filteredFeedPosts.length === 0 && (
+                  <div className="text-center text-slate-500 mt-10">No items found for this time window.</div>
                 )}
               </div>
             </section>
