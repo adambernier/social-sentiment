@@ -30,11 +30,28 @@ interface MetricsData {
   updated_at: string;
 }
 
+const platformColors: Record<string, string> = {
+  twitter: 'bg-sky-500/20 text-sky-400 border border-sky-500/10',
+  bluesky: 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/10',
+  reddit: 'bg-orange-500/20 text-orange-400 border border-orange-500/10',
+  yahoo: 'bg-purple-500/20 text-purple-400 border border-purple-500/10',
+  stocktwits: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/10',
+};
+
+const platformLabels: Record<string, string> = {
+  twitter: 'X/Twitter',
+  reddit: 'Reddit',
+  bluesky: 'Bluesky',
+  yahoo: 'News Article',
+  stocktwits: 'Stocktwits',
+};
+
 export default function Dashboard() {
   const [symbol, setSymbol] = useState("SMH");
   const [hours, setHours] = useState(24);
   const [platform, setPlatform] = useState("all");
   const [isConnected, setIsConnected] = useState(false);
+  const [showSR, setShowSR] = useState(false);
   
   // States
   const [posts, setPosts] = useState<Post[]>([]);
@@ -130,7 +147,7 @@ export default function Dashboard() {
 
   // Correlation Chart Data (Binning posts by hour)
   const correlationData = useMemo(() => {
-    if (!marketData.length) return { data: [], closedRegions: [] };
+    if (!marketData.length) return { data: [], closedRegions: [], supportPrice: 0, supportPct: 0, resistancePrice: 0, resistancePct: 0 };
     
     const buckets: Record<string, any> = {};
     const refPrice = marketData[0].price;
@@ -202,13 +219,67 @@ export default function Dashboard() {
       return diffMs >= 8 * 60 * 60 * 1000;
     });
 
-    return { data: sortedData, closedRegions: actualClosedRegions };
+    // Support & Resistance (5th and 95th percentiles of prices)
+    const prices = marketData.map(q => q.price).filter(p => p !== undefined && p !== null);
+    let supportPrice = 0;
+    let resistancePrice = 0;
+    let supportPct = 0;
+    let resistancePct = 0;
+
+    if (prices.length > 0) {
+      const sortedPrices = [...prices].sort((a, b) => a - b);
+      const idx5 = Math.floor((sortedPrices.length - 1) * 0.05);
+      const idx95 = Math.floor((sortedPrices.length - 1) * 0.95);
+      supportPrice = sortedPrices[idx5];
+      resistancePrice = sortedPrices[idx95];
+      supportPct = ((supportPrice - refPrice) / refPrice) * 100;
+      resistancePct = ((resistancePrice - refPrice) / refPrice) * 100;
+    }
+
+    return { 
+      data: sortedData, 
+      closedRegions: actualClosedRegions,
+      supportPrice,
+      supportPct,
+      resistancePrice,
+      resistancePct
+    };
   }, [marketData, futureMarketData, posts, hours, latestQuote]);
 
   const formatXAxis = (t: string) => {
     if (hours <= 24) return format(new Date(t), "h:mm a");
     if (hours <= 168) return format(new Date(t), "MMM d, h a");
     return format(new Date(t), "MMM d");
+  };
+
+  const renderSupportLabel = (props: any) => {
+    const { viewBox } = props;
+    if (!viewBox) return null;
+    const x = viewBox.x + viewBox.width - 130;
+    const y = viewBox.y;
+    return (
+      <g transform={`translate(${x}, ${y - 18})`}>
+        <rect width={125} height={16} rx={4} fill="#090d16" fillOpacity={0.9} stroke="#10b981" strokeWidth={1} strokeOpacity={0.3} />
+        <text x={6} y={11} fill="#10b981" fontSize={9} fontWeight="bold" letterSpacing="0.05em">
+          SUPPORT: ${correlationData.supportPrice.toFixed(2)}
+        </text>
+      </g>
+    );
+  };
+
+  const renderResistanceLabel = (props: any) => {
+    const { viewBox } = props;
+    if (!viewBox) return null;
+    const x = viewBox.x + viewBox.width - 145;
+    const y = viewBox.y;
+    return (
+      <g transform={`translate(${x}, ${y + 2})`}>
+        <rect width={140} height={16} rx={4} fill="#090d16" fillOpacity={0.9} stroke="#f43f5e" strokeWidth={1} strokeOpacity={0.3} />
+        <text x={6} y={11} fill="#f43f5e" fontSize={9} fontWeight="bold" letterSpacing="0.05em">
+          RESISTANCE: ${correlationData.resistancePrice.toFixed(2)}
+        </text>
+      </g>
+    );
   };
 
   return (
@@ -267,10 +338,24 @@ export default function Dashboard() {
               className="bg-slate-900/80 border border-white/10 text-white text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block px-4 py-2 outline-none backdrop-blur-md cursor-pointer transition-colors hover:bg-slate-800"
             >
               <option value="all">All Sources</option>
-              <option value="twitter">X (Twitter)</option>
-              <option value="reddit">Reddit</option>
               <option value="bluesky">Bluesky</option>
+              <option value="reddit">Reddit</option>
+              <option value="stocktwits">Stocktwits</option>
+              <option value="twitter">X (Twitter)</option>
+              <option value="yahoo">Yahoo Finance News</option>
             </select>
+            <button
+              onClick={() => setShowSR(!showSR)}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-lg border transition-all backdrop-blur-md cursor-pointer",
+                showSR 
+                  ? "bg-indigo-500/20 text-indigo-300 border-indigo-500/30 shadow-[0_0_15px_rgba(99,102,241,0.2)]" 
+                  : "bg-slate-900/80 text-slate-400 border-white/10 hover:bg-slate-800 hover:text-slate-300"
+              )}
+            >
+              <BarChart2 className="w-4 h-4" />
+              S&R Lines
+            </button>
           </div>
         </header>
 
@@ -445,6 +530,28 @@ export default function Dashboard() {
                       dot={false} 
                       connectNulls={true}
                     />
+                    {showSR && correlationData.supportPrice > 0 && (
+                      <ReferenceLine
+                        yAxisId="right"
+                        y={correlationData.supportPct}
+                        stroke="#10b981"
+                        strokeDasharray="3 3"
+                        strokeWidth={1.5}
+                        strokeOpacity={0.5}
+                        label={renderSupportLabel}
+                      />
+                    )}
+                    {showSR && correlationData.resistancePrice > 0 && (
+                      <ReferenceLine
+                        yAxisId="right"
+                        y={correlationData.resistancePct}
+                        stroke="#f43f5e"
+                        strokeDasharray="3 3"
+                        strokeWidth={1.5}
+                        strokeOpacity={0.5}
+                        label={renderResistanceLabel}
+                      />
+                    )}
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
@@ -464,8 +571,8 @@ export default function Dashboard() {
                   <div key={idx} className="bg-white/5 border border-white/5 rounded-xl p-3 text-sm hover:bg-white/10 transition-colors">
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
-                        <span className={cn("text-[10px] uppercase font-bold px-1.5 py-0.5 rounded", post.platform === 'twitter' ? 'bg-sky-500/20 text-sky-400' : post.platform === 'reddit' ? 'bg-orange-500/20 text-orange-400' : 'bg-blue-500/20 text-blue-400')}>
-                          {post.platform}
+                        <span className={cn("text-[10px] uppercase font-bold px-1.5 py-0.5 rounded", platformColors[post.platform] || 'bg-slate-500/20 text-slate-400 border border-white/5')}>
+                          {platformLabels[post.platform] || post.platform}
                         </span>
                         <span className={cn("text-[10px] uppercase font-bold px-1.5 py-0.5 rounded", post.sentiment === 'positive' ? 'bg-emerald-500/20 text-emerald-400' : post.sentiment === 'negative' ? 'bg-rose-500/20 text-rose-400' : 'bg-slate-500/20 text-slate-400')}>
                           {post.sentiment}
@@ -529,7 +636,7 @@ export default function Dashboard() {
                     <XAxis 
                       type="number" 
                       domain={[-150, 150]} 
-                      tickFormatter={(v) => `${v}%`} 
+                      tickFormatter={(v) => `${Math.round(v)}%`} 
                       stroke="#475569" 
                       tickLine={false} 
                       axisLine={{ stroke: '#334155' }}
