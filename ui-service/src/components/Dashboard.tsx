@@ -389,6 +389,7 @@ export default function Dashboard() {
               <option value="ASTS">ASTS</option>
               <option value="CRWV">CRWV</option>
               <option value="INTC">INTC</option>
+              <option value="IREN">IREN</option>
               <option value="NVDA">NVDA</option>
               <option value="RKLB">RKLB</option>
               <option value="SMCI">SMCI</option>

@@ -11,6 +11,13 @@ SYMBOLS: dict[str, dict] = {
     "ASTS": {"keywords": ["SpaceMobile"],                       "future": "RTY=F", "sector": "XAR"},
     "CRWV": {"keywords": ["CoreWeave"],                         "future": "NQ=F",  "sector": "XLK"},
     "INTC": {"keywords": ["Intel"],                             "future": "NQ=F",  "sector": "XLK"},
+    "IREN": {
+        "keywords": ["Iris Energy", "Daniel Johnston"],
+        "future": "NQ=F",
+        "sector": "XLK",
+        "require_uppercase": True,
+        "block_phrases": ["irene", "hurricane irene", "iron"]
+    },
     "MU":   {
         "keywords": ["Micron"],
         "future": "NQ=F", "sector": "XLK",
