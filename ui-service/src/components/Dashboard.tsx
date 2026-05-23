@@ -5,7 +5,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
   BarChart, Bar, Cell, ComposedChart, ReferenceLine, Legend, ReferenceArea, Area
 } from "recharts";
-import { format, parseISO, startOfHour } from "date-fns";
+import { format, parseISO } from "date-fns";
 import { Activity, MessageSquare, TrendingUp, TrendingDown, Clock, Hash, Zap, HelpCircle, AlertCircle, BarChart2, Newspaper } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -41,6 +41,17 @@ interface MetricsData {
   inflation_adj_return_1y: number | null; pe_relative_sector: number | null;
   beta_relative_sector: number | null; return_relative_sector: number | null;
   updated_at: string;
+}
+interface CorrelationBucket {
+  timestamp: string; positive: number; neutral: number; negative: number;
+  priceChange: number | null; futureChange: number | null;
+  isMarketOpen: boolean; sentimentIndex: number; sentimentSMA: number;
+}
+interface ClosedRegion { start: string; end: string; }
+interface CorrelationData {
+  data: CorrelationBucket[]; closedRegions: ClosedRegion[];
+  supportPrice: number; supportPct: number; resistancePrice: number; resistancePct: number;
+  maxR: number; bestLag: number; correlationText: string; correlationStrength: string;
 }
 
 const platformColors: Record<string, string> = {
@@ -108,6 +119,11 @@ export default function Dashboard() {
   const [futureDelta, setFutureDelta] = useState<DeltaData | null>(null);
   const [futureMarketData, setFutureMarketData] = useState<MarketQuote[]>([]);
   const [vixQuote, setVixQuote] = useState<MarketQuote | null>(null);
+  const [correlationData, setCorrelationData] = useState<CorrelationData>({
+    data: [], closedRegions: [], supportPrice: 0, supportPct: 0,
+    resistancePrice: 0, resistancePct: 0, maxR: 0, bestLag: 0,
+    correlationText: "Insufficient data for correlation", correlationStrength: "weak"
+  });
 
   // Dynamic host determination for API and WebSocket
   const apiBase = typeof window !== 'undefined' 
@@ -123,12 +139,13 @@ export default function Dashboard() {
     const fetchData = async () => {
       try {
         const platformParam = platform !== 'all' ? `&platform=${platform}` : '';
-        const res = await fetch(`${apiBase}/stats/dashboard?symbol=${symbol}&hours=${hours}${platformParam}`);
-        if (res.ok) {
-          const data = await res.json();
-          // To prevent the WebSocket feed from being completely overwritten and losing fresh un-polled posts,
-          // we only update posts if we don't have any, or we can just let the API overwrite them. 
-          // Actually, since the API returns the 500 most recent, overwriting is fine and keeps things synced.
+        const topicParam = selectedTopic !== 'all' ? `&topic=${encodeURIComponent(selectedTopic)}` : '';
+        const [dashRes, corrRes] = await Promise.all([
+          fetch(`${apiBase}/stats/dashboard?symbol=${symbol}&hours=${hours}${platformParam}`),
+          fetch(`${apiBase}/stats/correlation?symbol=${symbol}&hours=${hours}${platformParam}${topicParam}`)
+        ]);
+        if (dashRes.ok) {
+          const data = await dashRes.json();
           setPosts(data.posts || []);
           setSentimentStats(data.sentiment_stats || []);
           setTopicStats(data.topic_stats || []);
@@ -142,6 +159,10 @@ export default function Dashboard() {
           setFutureMarketData(data.primary_future_market_data || []);
           setVixQuote(data.vix_quote || null);
         }
+        if (corrRes.ok) {
+          const corrData = await corrRes.json();
+          setCorrelationData(corrData);
+        }
       } catch (err) {
         console.error("Failed to fetch dashboard data", err);
       }
@@ -153,7 +174,7 @@ export default function Dashboard() {
     // Poll every 60 seconds to keep pricing and market session status fresh
     const intervalId = setInterval(fetchData, 60000);
     return () => clearInterval(intervalId);
-  }, [symbol, hours, platform, apiBase]);
+  }, [symbol, hours, platform, selectedTopic, apiBase]);
 
   // WebSocket Live Updates
   useEffect(() => {
@@ -268,239 +289,7 @@ export default function Dashboard() {
     return [...topicStats].sort((a, b) => b.count - a.count);
   }, [topicStats]);
 
-  // Correlation Chart Data (Binning posts by hour and computing analytics)
-  const correlationData = useMemo(() => {
-    const defaultRes = { 
-      data: [], 
-      closedRegions: [], 
-      supportPrice: 0, 
-      supportPct: 0, 
-      resistancePrice: 0, 
-      resistancePct: 0,
-      maxR: 0,
-      bestLag: 0,
-      correlationText: "Insufficient data for correlation",
-      correlationStrength: "weak"
-    };
-
-    if (!marketData.length) return defaultRes;
-    
-    const buckets: Record<string, any> = {};
-    const refPrice = marketData[0].price;
-    const refFuturePrice = futureMarketData.length > 0 ? futureMarketData[0].price : 1;
-
-    // Pre-fill buckets for every hour in the window to prevent dropping overnight posts
-    const now = new Date();
-    for (let i = hours; i >= 0; i--) {
-      const d = new Date(now.getTime() - i * 60 * 60 * 1000);
-      const ts = startOfHour(d).toISOString();
-      buckets[ts] = { 
-        timestamp: ts, 
-        positive: 0, 
-        neutral: 0, 
-        negative: 0, 
-        priceChange: null, 
-        futureChange: null, 
-        isMarketOpen: false,
-        positiveWeighted: 0,
-        neutralWeighted: 0,
-        negativeWeighted: 0,
-        totalWeighted: 0,
-        sentimentIndex: 0,
-        sentimentSMA: 0
-      };
-    }
-
-    marketData.forEach(q => {
-      const ts = startOfHour(new Date(q.timestamp)).toISOString();
-      if (buckets[ts]) {
-        buckets[ts].priceChange = ((q.price - refPrice) / refPrice) * 100;
-        buckets[ts].isMarketOpen = true;
-      }
-    });
-
-    futureMarketData.forEach(q => {
-      const ts = startOfHour(new Date(q.timestamp)).toISOString();
-      if (buckets[ts]) {
-        buckets[ts].futureChange = ((q.price - refFuturePrice) / refFuturePrice) * 100;
-      }
-    });
-
-    posts.forEach(p => {
-      const ts = startOfHour(new Date(p.timestamp)).toISOString();
-      if (buckets[ts]) {
-        const weight = p.engagement || 1;
-        if (p.sentiment === 'positive') {
-          buckets[ts].positive += 1;
-          buckets[ts].positiveWeighted += weight;
-        } else if (p.sentiment === 'negative') {
-          buckets[ts].negative += 1;
-          buckets[ts].negativeWeighted += weight;
-        } else {
-          buckets[ts].neutral += 1;
-          buckets[ts].neutralWeighted += weight;
-        }
-        buckets[ts].totalWeighted += weight;
-      }
-    });
-
-    // Post-process buckets to calculate volume-weighted sentimentIndex
-    Object.values(buckets).forEach((b: any) => {
-      if (b.totalWeighted > 0) {
-        b.sentimentIndex = (b.positiveWeighted - b.negativeWeighted) / b.totalWeighted;
-      } else {
-        b.sentimentIndex = 0;
-      }
-    });
-
-    const sortedData = Object.values(buckets).sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-    
-    // Calculate Sentiment Index SMA (Simple Moving Average)
-    let smaPeriod = 5;
-    if (hours === 1) smaPeriod = 3;
-    else if (hours === 24) smaPeriod = 5;
-    else if (hours === 168) smaPeriod = 12;
-    else if (hours === 720) smaPeriod = 24;
-
-    for (let i = 0; i < sortedData.length; i++) {
-      let sum = 0;
-      let count = 0;
-      for (let j = Math.max(0, i - smaPeriod + 1); j <= i; j++) {
-        sum += sortedData[j].sentimentIndex;
-        count++;
-      }
-      sortedData[i].sentimentSMA = count > 0 ? sum / count : 0;
-    }
-
-    // Pearson Correlation Coefficient calculation at hourly lags
-    // L > 0 means sentiment leads price (sentiment at t aligns with price at t+L)
-    // L < 0 means price leads sentiment
-    let maxR = 0;
-    let bestLag = 0;
-    
-    for (let lag = -5; lag <= 5; lag++) {
-      const sentimentVals: number[] = [];
-      const priceVals: number[] = [];
-      
-      for (let i = 0; i < sortedData.length; i++) {
-        const priceIdx = i + lag;
-        if (priceIdx >= 0 && priceIdx < sortedData.length) {
-          const sVal = sortedData[i].sentimentIndex;
-          const pVal = sortedData[priceIdx].priceChange;
-          if (sVal !== null && pVal !== null) {
-            sentimentVals.push(sVal);
-            priceVals.push(pVal);
-          }
-        }
-      }
-      
-      if (sentimentVals.length >= 4) {
-        const n = sentimentVals.length;
-        const sumS = sentimentVals.reduce((a, b) => a + b, 0);
-        const sumP = priceVals.reduce((a, b) => a + b, 0);
-        const meanS = sumS / n;
-        const meanP = sumP / n;
-        
-        let num = 0;
-        let denS = 0;
-        let denP = 0;
-        for (let j = 0; j < n; j++) {
-          const diffS = sentimentVals[j] - meanS;
-          const diffP = priceVals[j] - meanP;
-          num += diffS * diffP;
-          denS += diffS * diffS;
-          denP += diffP * diffP;
-        }
-        
-        const r = (denS * denP > 0) ? num / Math.sqrt(denS * denP) : 0;
-        if (Math.abs(r) > Math.abs(maxR)) {
-          maxR = r;
-          bestLag = lag;
-        }
-      }
-    }
-
-    let correlationText = "No correlation detected";
-    let correlationStrength = "weak";
-    if (Math.abs(maxR) >= 0.15) {
-      if (Math.abs(maxR) > 0.6) correlationStrength = "strong";
-      else if (Math.abs(maxR) > 0.35) correlationStrength = "moderate";
-      
-      const relationship = maxR >= 0 ? "positive" : "negative";
-      
-      if (bestLag > 0) {
-        correlationText = `Sentiment leads price by ${bestLag}h (${relationship}, r = ${maxR >= 0 ? '+' : ''}${maxR.toFixed(2)})`;
-      } else if (bestLag < 0) {
-        correlationText = `Price leads sentiment by ${Math.abs(bestLag)}h (${relationship}, r = ${maxR >= 0 ? '+' : ''}${maxR.toFixed(2)})`;
-      } else {
-        correlationText = `Coincident correlation (${relationship}, r = ${maxR >= 0 ? '+' : ''}${maxR.toFixed(2)})`;
-      }
-    } else {
-      correlationText = `Weak or no correlation (r = ${maxR >= 0 ? '+' : ''}${maxR.toFixed(2)})`;
-    }
-
-    const closedRegions: { start: string, end: string }[] = [];
-    let currentStart: string | null = null;
-    
-    sortedData.forEach((d: any, idx) => {
-      if (!d.isMarketOpen) {
-        if (!currentStart) currentStart = d.timestamp;
-      } else {
-        if (currentStart) {
-          closedRegions.push({ start: currentStart, end: sortedData[idx - 1].timestamp });
-          currentStart = null;
-        }
-      }
-    });
-    if (currentStart) {
-      closedRegions.push({ start: currentStart, end: sortedData[sortedData.length - 1].timestamp });
-    }
-
-    // If the market is currently open, do not shade the leading edge of the chart (false positives due to data lag)
-    if (latestQuote?.market_session === 'regular' && closedRegions.length > 0) {
-      const lastRegion = closedRegions[closedRegions.length - 1];
-      if (lastRegion.end === sortedData[sortedData.length - 1].timestamp) {
-        closedRegions.pop();
-      }
-    }
-
-    // Filter out "closed" regions that are less than 8 hours long.
-    // Overnight gaps are ~17.5 hours. Anything smaller is a missing data gap.
-    const actualClosedRegions = closedRegions.filter(r => {
-      const diffMs = new Date(r.end).getTime() - new Date(r.start).getTime();
-      return diffMs >= 8 * 60 * 60 * 1000;
-    });
-
-    // Support & Resistance (5th and 95th percentiles of prices)
-    const prices = marketData.map(q => q.price).filter(p => p !== undefined && p !== null);
-    let supportPrice = 0;
-    let resistancePrice = 0;
-    let supportPct = 0;
-    let resistancePct = 0;
-
-    if (prices.length > 0) {
-      const sortedPrices = [...prices].sort((a, b) => a - b);
-      const idx5 = Math.floor((sortedPrices.length - 1) * 0.05);
-      const idx95 = Math.floor((sortedPrices.length - 1) * 0.95);
-      supportPrice = sortedPrices[idx5];
-      resistancePrice = sortedPrices[idx95];
-      supportPct = ((supportPrice - refPrice) / refPrice) * 100;
-      resistancePct = ((resistancePrice - refPrice) / refPrice) * 100;
-    }
-
-    return { 
-      data: sortedData, 
-      closedRegions: actualClosedRegions,
-      supportPrice,
-      supportPct,
-      resistancePrice,
-      resistancePct,
-      maxR,
-      bestLag,
-      correlationText,
-      correlationStrength
-    };
-  }, [marketData, futureMarketData, posts, hours, latestQuote]);
+  // Correlation data is now fetched from the backend via /stats/correlation
 
   const formatXAxis = (t: string) => {
     if (hours <= 24) return format(new Date(t), "h:mm a");

@@ -159,6 +159,36 @@ class DashboardResponse(BaseModel):
     vix_delta: Optional[MarketDelta]
 
 
+class CorrelationBucket(BaseModel):
+    timestamp: str
+    positive: int
+    neutral: int
+    negative: int
+    priceChange: Optional[float] = None
+    futureChange: Optional[float] = None
+    isMarketOpen: bool
+    sentimentIndex: float
+    sentimentSMA: float
+
+
+class ClosedRegion(BaseModel):
+    start: str
+    end: str
+
+
+class CorrelationResponse(BaseModel):
+    data: list[CorrelationBucket]
+    closedRegions: list[ClosedRegion]
+    supportPrice: float
+    supportPct: float
+    resistancePrice: float
+    resistancePct: float
+    maxR: float
+    bestLag: int
+    correlationText: str
+    correlationStrength: str
+
+
 def get_db_conn():
     if db_pool is None:
         raise RuntimeError("Database pool not initialized")
@@ -523,6 +553,259 @@ async def get_dashboard(
                 "vix_quote": vix_quote,
                 "vix_delta": vix_delta
             }
+
+@app.get("/stats/correlation", response_model=CorrelationResponse)
+async def get_correlation(
+    symbol: str,
+    hours: int = Query(24, gt=0),
+    platform: Optional[str] = None,
+    topic: Optional[str] = None
+):
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(hours=hours)).replace(minute=0, second=0, microsecond=0)
+    futures_map = primary_futures_map()
+    primary_future_symbol = futures_map.get(symbol)
+    
+    # Pre-fill hourly buckets to avoid missing hours
+    buckets = {}
+    for i in range(hours, -1, -1):
+        bucket_time = (now - timedelta(hours=i)).replace(minute=0, second=0, microsecond=0)
+        ts_str = bucket_time.isoformat().replace("+00:00", "Z")
+        buckets[ts_str] = {
+            "timestamp": ts_str,
+            "positive": 0,
+            "neutral": 0,
+            "negative": 0,
+            "priceChange": None,
+            "futureChange": None,
+            "isMarketOpen": False,
+            "positiveWeighted": 0.0,
+            "neutralWeighted": 0.0,
+            "negativeWeighted": 0.0,
+            "totalWeighted": 0.0,
+            "sentimentIndex": 0.0,
+            "sentimentSMA": 0.0
+        }
+
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            # 1. Fetch market quotes for target
+            market_query = """
+                SELECT timestamp, price, volume, market_session 
+                FROM stock_quotes 
+                WHERE symbol = %s AND timestamp >= %s
+                ORDER BY timestamp ASC
+            """
+            await cur.execute(market_query, [symbol, cutoff])
+            market_data = await cur.fetchall()
+            
+            ref_price = market_data[0]['price'] if market_data else None
+            for q in market_data:
+                q_ts = q['timestamp'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                q_ts_str = q_ts.isoformat().replace("+00:00", "Z")
+                if q_ts_str in buckets:
+                    if ref_price and ref_price != 0:
+                        buckets[q_ts_str]['priceChange'] = ((q['price'] - ref_price) / ref_price) * 100
+                    else:
+                        buckets[q_ts_str]['priceChange'] = 0.0
+                    buckets[q_ts_str]['isMarketOpen'] = True
+
+            # 2. Fetch market quotes for primary future
+            if primary_future_symbol:
+                await cur.execute(market_query, [primary_future_symbol, cutoff])
+                future_market_data = await cur.fetchall()
+                ref_future_price = future_market_data[0]['price'] if future_market_data else None
+                for q in future_market_data:
+                    q_ts = q['timestamp'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                    q_ts_str = q_ts.isoformat().replace("+00:00", "Z")
+                    if q_ts_str in buckets:
+                        if ref_future_price and ref_future_price != 0:
+                            buckets[q_ts_str]['futureChange'] = ((q['price'] - ref_future_price) / ref_future_price) * 100
+                        else:
+                            buckets[q_ts_str]['futureChange'] = 0.0
+
+            # 3. Fetch posts data
+            posts_query = """
+                SELECT sentiment, timestamp, engagement
+                FROM posts
+                WHERE symbol = %s AND timestamp >= %s
+            """
+            posts_params = [symbol, cutoff]
+            if platform:
+                posts_query += " AND platform = %s"
+                posts_params.append(platform)
+            if topic and topic != "all":
+                posts_query += " AND topic_label = %s"
+                posts_params.append(topic)
+                
+            await cur.execute(posts_query, posts_params)
+            posts_data = await cur.fetchall()
+            
+            for p in posts_data:
+                p_ts = p['timestamp'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                p_ts_str = p_ts.isoformat().replace("+00:00", "Z")
+                if p_ts_str in buckets:
+                    weight = p['engagement'] if p['engagement'] is not None else 1
+                    sent = p['sentiment']
+                    if sent == 'positive':
+                        buckets[p_ts_str]['positive'] += 1
+                        buckets[p_ts_str]['positiveWeighted'] += weight
+                    elif sent == 'negative':
+                        buckets[p_ts_str]['negative'] += 1
+                        buckets[p_ts_str]['negativeWeighted'] += weight
+                    else:
+                        buckets[p_ts_str]['neutral'] += 1
+                        buckets[p_ts_str]['neutralWeighted'] += weight
+                    buckets[p_ts_str]['totalWeighted'] += weight
+
+            # 4. Fetch latest quote for regular session check
+            await cur.execute(
+                "SELECT market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
+                [symbol]
+            )
+            latest_quote = await cur.fetchone()
+
+    # Post-process sentiment indices
+    for b in buckets.values():
+        if b['totalWeighted'] > 0:
+            b['sentimentIndex'] = (b['positiveWeighted'] - b['negativeWeighted']) / b['totalWeighted']
+        else:
+            b['sentimentIndex'] = 0.0
+
+    sorted_data = sorted(buckets.values(), key=lambda x: x['timestamp'])
+
+    # 5. Calculate SMA
+    sma_period = 5
+    if hours <= 1:
+        sma_period = 3
+    elif hours <= 24:
+        sma_period = 5
+    elif hours <= 168:
+        sma_period = 12
+    elif hours <= 720:
+        sma_period = 24
+
+    for i in range(len(sorted_data)):
+        sum_sma = 0.0
+        count_sma = 0
+        start_idx = max(0, i - sma_period + 1)
+        for j in range(start_idx, i + 1):
+            sum_sma += sorted_data[j]['sentimentIndex']
+            count_sma += 1
+        sorted_data[i]['sentimentSMA'] = sum_sma / count_sma if count_sma > 0 else 0.0
+
+    # 6. Calculate Pearson Correlation
+    def pearson_r(s_list, p_list):
+        n = len(s_list)
+        if n < 4:
+            return 0.0
+        mean_s = sum(s_list) / n
+        mean_p = sum(p_list) / n
+        num = sum((s - mean_s) * (p - mean_p) for s, p in zip(s_list, p_list))
+        den_s = sum((s - mean_s) ** 2 for s in s_list)
+        den_p = sum((p - mean_p) ** 2 for p in p_list)
+        den = (den_s * den_p) ** 0.5
+        return num / den if den > 0 else 0.0
+
+    max_r = 0.0
+    best_lag = 0
+    for lag in range(-5, 6):
+        s_vals = []
+        p_vals = []
+        for i in range(len(sorted_data)):
+            p_idx = i + lag
+            if 0 <= p_idx < len(sorted_data):
+                s_val = sorted_data[i]['sentimentIndex']
+                p_val = sorted_data[p_idx]['priceChange']
+                if s_val is not None and p_val is not None:
+                    s_vals.append(s_val)
+                    p_vals.append(p_val)
+        r = pearson_r(s_vals, p_vals)
+        if abs(r) > abs(max_r):
+            max_r = r
+            best_lag = lag
+
+    # Correlation Strength & Text
+    correlation_strength = "weak"
+    correlation_text = "No correlation detected"
+    if abs(max_r) >= 0.15:
+        if abs(max_r) > 0.6:
+            correlation_strength = "strong"
+        elif abs(max_r) > 0.35:
+            correlation_strength = "moderate"
+        
+        relationship = "positive" if max_r >= 0 else "negative"
+        sign = "+" if max_r >= 0 else ""
+        if best_lag > 0:
+            correlation_text = f"Sentiment leads price by {best_lag}h ({relationship}, r = {sign}{max_r:.2f})"
+        elif best_lag < 0:
+            correlation_text = f"Price leads sentiment by {abs(best_lag)}h ({relationship}, r = {sign}{max_r:.2f})"
+        else:
+            correlation_text = f"Coincident correlation ({relationship}, r = {sign}{max_r:.2f})"
+    else:
+        sign = "+" if max_r >= 0 else ""
+        correlation_text = f"Weak or no correlation (r = {sign}{max_r:.2f})"
+
+    # 7. Closed regions
+    closed_regions = []
+    current_start = None
+    for idx, d in enumerate(sorted_data):
+        if not d['isMarketOpen']:
+            if not current_start:
+                current_start = d['timestamp']
+        else:
+            if current_start:
+                closed_regions.append({
+                    "start": current_start,
+                    "end": sorted_data[idx - 1]['timestamp']
+                })
+                current_start = None
+    if current_start:
+        closed_regions.append({
+            "start": current_start,
+            "end": sorted_data[-1]['timestamp']
+        })
+
+    if latest_quote and latest_quote.get('market_session') == 'regular' and len(closed_regions) > 0:
+        if closed_regions[-1]['end'] == sorted_data[-1]['timestamp']:
+            closed_regions.pop()
+
+    actual_closed_regions = []
+    for r in closed_regions:
+        t_start = datetime.fromisoformat(r['start'].replace('Z', '+00:00'))
+        t_end = datetime.fromisoformat(r['end'].replace('Z', '+00:00'))
+        if (t_end - t_start) >= timedelta(hours=8):
+            actual_closed_regions.append(r)
+
+    # 8. Support & Resistance
+    prices = [q['price'] for q in market_data if q['price'] is not None]
+    support_price = 0.0
+    resistance_price = 0.0
+    support_pct = 0.0
+    resistance_pct = 0.0
+    if len(prices) > 0:
+        sorted_prices = sorted(prices)
+        idx5 = int((len(sorted_prices) - 1) * 0.05)
+        idx95 = int((len(sorted_prices) - 1) * 0.95)
+        support_price = sorted_prices[idx5]
+        resistance_price = sorted_prices[idx95]
+        if ref_price and ref_price != 0:
+            support_pct = ((support_price - ref_price) / ref_price) * 100
+            resistance_pct = ((resistance_price - ref_price) / ref_price) * 100
+
+    return {
+        "data": sorted_data,
+        "closedRegions": actual_closed_regions,
+        "supportPrice": support_price,
+        "supportPct": support_pct,
+        "resistancePrice": resistance_price,
+        "resistancePct": resistance_pct,
+        "maxR": max_r,
+        "bestLag": best_lag,
+        "correlationText": correlation_text,
+        "correlationStrength": correlation_strength
+    }
 
 @app.get("/health")
 async def health():
