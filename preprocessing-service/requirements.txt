@@ -1,4 +1,4 @@
-pika
+aio-pika>=9.0
 pydantic
 onnxruntime
 transformers
