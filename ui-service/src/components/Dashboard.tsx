@@ -32,6 +32,7 @@ interface Post {
   scores: Record<string, number>; topic_label: string | null;
 }
 interface SentimentStat { sentiment: string; count: number; }
+interface TopicStat { topic_label: string | null; count: number; }
 interface MarketQuote { timestamp: string; price: number; volume: number; market_session: string; }
 interface DeltaData { reference_price: number; latest_price: number; pct_change: number; abs_change: number; }
 interface MetricsData {
@@ -57,10 +58,36 @@ const platformLabels: Record<string, string> = {
   stocktwits: 'Stocktwits',
 };
 
+const topicColors: Record<string, string> = {
+  "Earnings & Guidance": "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30",
+  "Fed & Macro": "bg-amber-500/20 text-amber-300 border border-amber-500/30",
+  "Technical Analysis": "bg-blue-500/20 text-blue-300 border border-blue-500/30",
+  "AI & Compute": "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30",
+  "Space & Satellite": "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30",
+  "Management & Insider": "bg-purple-500/20 text-purple-300 border border-purple-500/30",
+  "M&A & Partnerships": "bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30",
+  "Options & Volatility": "bg-rose-500/20 text-rose-300 border border-rose-500/30",
+  "General / Outlier": "bg-slate-500/20 text-slate-300 border border-slate-500/30",
+};
+
+const topicProgressColors: Record<string, string> = {
+  "Earnings & Guidance": "bg-emerald-500",
+  "Fed & Macro": "bg-amber-500",
+  "Technical Analysis": "bg-blue-500",
+  "AI & Compute": "bg-indigo-500",
+  "Space & Satellite": "bg-cyan-500",
+  "Management & Insider": "bg-purple-500",
+  "M&A & Partnerships": "bg-fuchsia-500",
+  "Options & Volatility": "bg-rose-500",
+  "General / Outlier": "bg-slate-600",
+  "General Chat": "bg-slate-600",
+};
+
 export default function Dashboard() {
   const [symbol, setSymbol] = useState("SMH");
   const [hours, setHours] = useState(24);
   const [platform, setPlatform] = useState("all");
+  const [selectedTopic, setSelectedTopic] = useState("all");
   const [isConnected, setIsConnected] = useState(false);
   const [showSR, setShowSR] = useState(true);
   const [feedTab, setFeedTab] = useState<"social" | "news">("social");
@@ -68,6 +95,7 @@ export default function Dashboard() {
   // States
   const [posts, setPosts] = useState<Post[]>([]);
   const [sentimentStats, setSentimentStats] = useState<SentimentStat[]>([]);
+  const [topicStats, setTopicStats] = useState<TopicStat[]>([]);
   const [marketData, setMarketData] = useState<MarketQuote[]>([]);
   const [metrics, setMetrics] = useState<MetricsData | null>(null);
   
@@ -101,6 +129,7 @@ export default function Dashboard() {
           // Actually, since the API returns the 500 most recent, overwriting is fine and keeps things synced.
           setPosts(data.posts || []);
           setSentimentStats(data.sentiment_stats || []);
+          setTopicStats(data.topic_stats || []);
           setMarketData(data.market_data || []);
           setMetrics(data.metrics_data || null);
           setLatestQuote(data.latest_quote || null);
@@ -140,6 +169,13 @@ export default function Dashboard() {
             if (exists) return prev.map(s => s.sentiment === newPost.sentiment ? { ...s, count: s.count + 1 } : s);
             return [...prev, { sentiment: newPost.sentiment, count: 1 }];
           });
+          if (newPost.topic_label) {
+            setTopicStats((prev) => {
+              const exists = prev.find(t => t.topic_label === newPost.topic_label);
+              if (exists) return prev.map(t => t.topic_label === newPost.topic_label ? { ...t, count: t.count + 1 } : t);
+              return [...prev, { topic_label: newPost.topic_label, count: 1 }];
+            });
+          }
         }
       } catch (err) {}
     };
@@ -211,10 +247,24 @@ export default function Dashboard() {
     ];
   }, [metrics]);
 
-  // Filter posts based on Social Stream vs News Desk tab
+  // Filter posts based on Social Stream vs News Desk tab and Topic
   const filteredFeedPosts = useMemo(() => {
-    return posts.filter(p => feedTab === 'news' ? p.platform === 'yahoo' : p.platform !== 'yahoo');
-  }, [posts, feedTab]);
+    let list = posts.filter(p => feedTab === 'news' ? p.platform === 'yahoo' : p.platform !== 'yahoo');
+    if (selectedTopic !== "all") {
+      if (selectedTopic === "General / Outlier") {
+        list = list.filter(p => p.topic_label === "General / Outlier" || !p.topic_label);
+      } else {
+        list = list.filter(p => p.topic_label === selectedTopic);
+      }
+    }
+    return list;
+  }, [posts, feedTab, selectedTopic]);
+
+  // Topic calculations
+  const totalTopicCount = topicStats.reduce((sum, t) => sum + t.count, 0);
+  const sortedTopics = useMemo(() => {
+    return [...topicStats].sort((a, b) => b.count - a.count);
+  }, [topicStats]);
 
   // Correlation Chart Data (Binning posts by hour)
   const correlationData = useMemo(() => {
@@ -415,6 +465,22 @@ export default function Dashboard() {
               <option value="reddit">Reddit</option>
               <option value="stocktwits">Stocktwits</option>
               <option value="yahoo">Yahoo Finance News</option>
+            </select>
+            <select 
+              value={selectedTopic}
+              onChange={(e) => setSelectedTopic(e.target.value)}
+              className="bg-slate-900/80 border border-white/10 text-white text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block px-4 py-2 outline-none backdrop-blur-md cursor-pointer transition-colors hover:bg-slate-800"
+            >
+              <option value="all">All Topics</option>
+              <option value="Earnings & Guidance">Earnings & Guidance</option>
+              <option value="Fed & Macro">Fed & Macro</option>
+              <option value="Technical Analysis">Technical Analysis</option>
+              <option value="AI & Compute">AI & Compute</option>
+              <option value="Space & Satellite">Space & Satellite</option>
+              <option value="Management & Insider">Management & Insider</option>
+              <option value="M&A & Partnerships">M&A & Partnerships</option>
+              <option value="Options & Volatility">Options & Volatility</option>
+              <option value="General / Outlier">General Chat</option>
             </select>
             <button
               onClick={() => setShowSR(!showSR)}
@@ -675,15 +741,20 @@ export default function Dashboard() {
                 {filteredFeedPosts.map((post, idx) => (
                   <div key={idx} className="bg-white/5 border border-white/5 rounded-xl p-3 text-sm hover:bg-white/10 transition-colors">
                     <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className={cn("text-[10px] uppercase font-bold px-1.5 py-0.5 rounded", platformColors[post.platform] || 'bg-slate-500/20 text-slate-400 border border-white/5')}>
                           {platformLabels[post.platform] || post.platform}
                         </span>
                         <span className={cn("text-[10px] uppercase font-bold px-1.5 py-0.5 rounded", post.sentiment === 'positive' ? 'bg-emerald-500/20 text-emerald-400' : post.sentiment === 'negative' ? 'bg-rose-500/20 text-rose-400' : 'bg-slate-500/20 text-slate-400')}>
                           {post.sentiment}
                         </span>
+                        {post.topic_label && post.topic_label !== "General / Outlier" && (
+                          <span className={cn("text-[10px] font-bold px-1.5 py-0.5 rounded", topicColors[post.topic_label] || 'bg-slate-500/20 text-slate-400 border border-white/5')}>
+                            {post.topic_label}
+                          </span>
+                        )}
                       </div>
-                      <span className="text-[10px] text-slate-500">
+                      <span className="text-[10px] text-slate-500 shrink-0">
                         {format(new Date(post.timestamp), "MMM d, h:mm:ss a")}
                       </span>
                     </div>
@@ -770,6 +841,36 @@ export default function Dashboard() {
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
+              </div>
+            </section>
+
+            {/* Topic Distribution */}
+            <section className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl p-6 shadow-2xl flex flex-col">
+              <h3 className="text-lg font-bold mb-1 text-white">Topic Distribution</h3>
+              <p className="text-xs text-slate-400 mb-4">NLP zero-shot classification of social volume</p>
+              
+              <div className="space-y-3 max-h-[220px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
+                {sortedTopics.map((topic, idx) => {
+                  const label = topic.topic_label || "General Chat";
+                  const count = topic.count;
+                  const pct = totalTopicCount ? Math.round((count / totalTopicCount) * 100) : 0;
+                  const colorClass = topicProgressColors[label] || "bg-slate-500";
+                  
+                  return (
+                    <div key={idx} className="space-y-1">
+                      <div className="flex items-center justify-between text-xs font-semibold">
+                        <span className="text-slate-300">{label}</span>
+                        <span className="text-slate-400">{count} ({pct}%)</span>
+                      </div>
+                      <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                        <div className={cn("h-full rounded-full transition-all duration-500", colorClass)} style={{ width: `${pct}%` }}></div>
+                      </div>
+                    </div>
+                  );
+                })}
+                {sortedTopics.length === 0 && (
+                  <div className="text-center text-slate-500 text-xs py-4">No topic data available.</div>
+                )}
               </div>
             </section>
 

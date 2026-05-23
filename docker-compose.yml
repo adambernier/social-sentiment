@@ -33,10 +33,17 @@ services:
     build:
       context: .
       dockerfile: preprocessing-service/Dockerfile
+    volumes:
+      - hf_cache:/root/.cache/huggingface
     environment:
       - RABBITMQ_HOST=rabbitmq
+      - HF_HOME=/root/.cache/huggingface
+      - DATABASE_DSN=postgresql://postgres:sentiment@postgres:5432/sentiment
+      - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   sentiment-service:

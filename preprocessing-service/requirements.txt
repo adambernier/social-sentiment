@@ -1,2 +1,6 @@
 pika
 pydantic
+onnxruntime
+transformers
+numpy
+psycopg[binary]
