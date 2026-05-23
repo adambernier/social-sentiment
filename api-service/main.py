@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 import psycopg
-from psycopg_pool import ConnectionPool
+from psycopg_pool import AsyncConnectionPool
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -19,7 +19,7 @@ from shared.symbols import primary_futures_map
 
 
 # Global pool instance
-db_pool: Optional[ConnectionPool] = None
+db_pool: Optional[AsyncConnectionPool] = None
 
 class ConnectionManager:
     def __init__(self):
@@ -61,13 +61,15 @@ async def postgres_listener():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db_pool
-    print("Initializing database connection pool...")
-    db_pool = ConnectionPool(
+    print("Initializing async database connection pool...")
+    db_pool = AsyncConnectionPool(
         DATABASE_DSN,
         min_size=5,
         max_size=20,
+        open=False,
         kwargs={"row_factory": psycopg.rows.dict_row}
     )
+    await db_pool.open()
     
     listener_task = asyncio.create_task(postgres_listener())
     
@@ -79,8 +81,8 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
         
-    print("Closing database connection pool...")
-    db_pool.close()
+    print("Closing async database connection pool...")
+    await db_pool.close()
 
 app = FastAPI(title="Social Sentiment API", lifespan=lifespan)
 
@@ -189,10 +191,10 @@ async def get_posts(
     query += " ORDER BY timestamp DESC LIMIT %s OFFSET %s"
     params.extend([limit, offset])
 
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            return cur.fetchall()
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, params)
+            return await cur.fetchall()
 
 @app.get("/stats/sentiment", response_model=list[SentimentStats])
 async def get_sentiment_stats(
@@ -216,10 +218,10 @@ async def get_sentiment_stats(
 
     query += " GROUP BY sentiment"
 
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            return cur.fetchall()
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, params)
+            return await cur.fetchall()
 
 @app.get("/stats/topics", response_model=list[TopicStats])
 async def get_topic_stats(
@@ -243,10 +245,10 @@ async def get_topic_stats(
 
     query += " GROUP BY topic_label ORDER BY count DESC"
 
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            return cur.fetchall()
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, params)
+            return await cur.fetchall()
 
 @app.get("/stats/market", response_model=list[MarketQuote])
 async def get_market_stats(
@@ -261,10 +263,10 @@ async def get_market_stats(
     """
     params = [symbol, datetime.now() - timedelta(hours=hours)]
 
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            return cur.fetchall()
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, params)
+            return await cur.fetchall()
 
 @app.get("/stats/market/latest", response_model=Optional[MarketQuote])
 async def get_latest_market_quote(symbol: str):
@@ -274,10 +276,10 @@ async def get_latest_market_quote(symbol: str):
         WHERE symbol = %s 
         ORDER BY timestamp DESC LIMIT 1
     """
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, [symbol])
-            return cur.fetchone()
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, [symbol])
+            return await cur.fetchone()
 
 @app.get("/stats/market/delta", response_model=Optional[MarketDelta])
 async def get_market_delta(
@@ -288,33 +290,33 @@ async def get_market_delta(
     Calculate pct_change for a symbol since a specific reference timestamp.
     Useful for 'normalization' of futures vs. last cash close.
     """
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
             # 1. Get latest price
-            cur.execute(
+            await cur.execute(
                 "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
                 [symbol]
             )
-            latest = cur.fetchone()
+            latest = await cur.fetchone()
             if not latest:
                 return None
             
             latest_price = latest['price']
 
             # 2. Get reference price (the one closest to 'since' but not after it)
-            cur.execute(
+            await cur.execute(
                 "SELECT price FROM stock_quotes WHERE symbol = %s AND timestamp <= %s ORDER BY timestamp DESC LIMIT 1",
                 [symbol, since]
             )
-            ref = cur.fetchone()
+            ref = await cur.fetchone()
             
             # Fallback: if no quote exists before 'since', get the first one available
             if not ref:
-                cur.execute(
+                await cur.execute(
                     "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp ASC LIMIT 1",
                     [symbol]
                 )
-                ref = cur.fetchone()
+                ref = await cur.fetchone()
 
             if not ref:
                 return None
@@ -342,10 +344,10 @@ async def get_stock_metrics(symbol: str):
         FROM stock_metrics 
         WHERE symbol = %s
     """
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, [symbol])
-            return cur.fetchone()
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, [symbol])
+            return await cur.fetchone()
 
 @app.get("/stats/dashboard", response_model=DashboardResponse)
 async def get_dashboard(
@@ -359,17 +361,17 @@ async def get_dashboard(
     primary_future_symbol = futures_map.get(symbol)
     vix_symbol = "VX=F"
     
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
             # Helper to run query and fetch all rows
-            def run_query(q, p):
-                cur.execute(q, p)
-                return cur.fetchall()
+            async def run_query(q, p):
+                await cur.execute(q, p)
+                return await cur.fetchall()
 
             # Helper to run query and fetch one row
-            def run_query_one(q, p):
-                cur.execute(q, p)
-                return cur.fetchone()
+            async def run_query_one(q, p):
+                await cur.execute(q, p)
+                return await cur.fetchone()
 
             # Time threshold for hourly stats and graphs
             cutoff = datetime.now() - timedelta(hours=hours)
@@ -385,7 +387,7 @@ async def get_dashboard(
                 posts_query += " AND platform = %s"
                 posts_params.append(platform)
             posts_query += " ORDER BY timestamp DESC LIMIT 1000"
-            posts = run_query(posts_query, posts_params)
+            posts = await run_query(posts_query, posts_params)
 
             # 2. Fetch sentiment stats
             sent_query = (
@@ -398,7 +400,7 @@ async def get_dashboard(
                 sent_query += " AND platform = %s"
                 sent_params.append(platform)
             sent_query += " GROUP BY sentiment"
-            sentiment_stats = run_query(sent_query, sent_params)
+            sentiment_stats = await run_query(sent_query, sent_params)
 
             # 3. Fetch topic stats
             topic_query = (
@@ -411,7 +413,7 @@ async def get_dashboard(
                 topic_query += " AND platform = %s"
                 topic_params.append(platform)
             topic_query += " GROUP BY topic_label ORDER BY count DESC"
-            topic_stats = run_query(topic_query, topic_params)
+            topic_stats = await run_query(topic_query, topic_params)
 
             # 4. Fetch market data (quotes)
             market_query = (
@@ -420,16 +422,16 @@ async def get_dashboard(
                 "WHERE symbol = %s AND timestamp > %s "
                 "ORDER BY timestamp ASC"
             )
-            market_data = run_query(market_query, [symbol, cutoff])
+            market_data = await run_query(market_query, [symbol, cutoff])
 
             # 5. Fetch latest quote for target
-            latest_quote = run_query_one(
+            latest_quote = await run_query_one(
                 "SELECT symbol, timestamp, price, volume, market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
                 [symbol]
             )
 
             # 6. Fetch target metrics
-            metrics_data = run_query_one(
+            metrics_data = await run_query_one(
                 "SELECT symbol, pe_ratio, beta, avg_return_1y, inflation_adj_return_1y, "
                 "       pe_relative_sector, beta_relative_sector, return_relative_sector, updated_at "
                 "FROM stock_metrics WHERE symbol = %s",
@@ -437,12 +439,12 @@ async def get_dashboard(
             )
 
             # Delta helper - change since previous close
-            def get_delta_data(sym, ref_time=None):
-                cur.execute(
+            async def get_delta_data(sym, ref_time=None):
+                await cur.execute(
                     "SELECT timestamp, price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
                     [sym]
                 )
-                latest = cur.fetchone()
+                latest = await cur.fetchone()
                 if not latest:
                     return None
                 latest_price = latest['price']
@@ -451,27 +453,27 @@ async def get_dashboard(
                 session_type = 'futures_open' if sym.endswith("=F") else 'regular'
 
                 # Get the last regular/open session quote
-                cur.execute(
+                await cur.execute(
                     "SELECT timestamp, price FROM stock_quotes WHERE symbol = %s AND market_session = %s ORDER BY timestamp DESC LIMIT 1",
                     [sym, session_type]
                 )
-                latest_reg = cur.fetchone()
+                latest_reg = await cur.fetchone()
                 if not latest_reg:
                     # Fallback to oldest overall quote
-                    cur.execute(
+                    await cur.execute(
                         "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp ASC LIMIT 1",
                         [sym]
                     )
-                    ref = cur.fetchone()
+                    ref = await cur.fetchone()
                     ref_price = ref['price'] if ref else latest_price
                 else:
                     latest_reg_ts = latest_reg['timestamp']
                     # Previous close is the last regular/open session quote before the current trading session day started (at least 12 hours prior)
-                    cur.execute(
+                    await cur.execute(
                         "SELECT price FROM stock_quotes WHERE symbol = %s AND market_session = %s AND timestamp < %s - %s::interval ORDER BY timestamp DESC LIMIT 1",
                         [sym, session_type, latest_reg_ts, timedelta(hours=12)]
                     )
-                    ref = cur.fetchone()
+                    ref = await cur.fetchone()
                     ref_price = ref['price'] if ref else latest_reg['price']
 
                 abs_change = latest_price - ref_price
@@ -484,26 +486,26 @@ async def get_dashboard(
                     "abs_change": abs_change
                 }
 
-            primary_delta = get_delta_data(symbol, since)
+            primary_delta = await get_delta_data(symbol, since)
 
             # 7. Fetch primary future details if available
             p_future_quote = None
             p_future_delta = None
             p_future_market_data = []
             if primary_future_symbol:
-                p_future_quote = run_query_one(
+                p_future_quote = await run_query_one(
                     "SELECT symbol, timestamp, price, volume, market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
                     [primary_future_symbol]
                 )
-                p_future_delta = get_delta_data(primary_future_symbol, since)
-                p_future_market_data = run_query(market_query, [primary_future_symbol, cutoff])
+                p_future_delta = await get_delta_data(primary_future_symbol, since)
+                p_future_market_data = await run_query(market_query, [primary_future_symbol, cutoff])
 
             # 8. Fetch VIX details
-            vix_quote = run_query_one(
+            vix_quote = await run_query_one(
                 "SELECT symbol, timestamp, price, volume, market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
                 [vix_symbol]
             )
-            vix_delta = get_delta_data(vix_symbol, since)
+            vix_delta = await get_delta_data(vix_symbol, since)
 
             return {
                 "sentiment_stats": sentiment_stats,
@@ -524,9 +526,9 @@ async def get_dashboard(
 @app.get("/health")
 async def health():
     try:
-        with get_db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
+        async with get_db_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
                 return {"status": "healthy", "database": "connected"}
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}

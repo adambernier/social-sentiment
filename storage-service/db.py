@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import psycopg
+from psycopg_pool import AsyncConnectionPool
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
@@ -47,7 +48,7 @@ class DB:
     def __init__(self, dsn: str = DATABASE_DSN):
         self.dsn = dsn
         self.conn: psycopg.Connection | None = None
-        self.async_conn: psycopg.AsyncConnection | None = None
+        self.async_pool: AsyncConnectionPool | None = None
         self._connect()
         self._apply_schema()
 
@@ -59,10 +60,16 @@ class DB:
                 pass
         self.conn = psycopg.connect(self.dsn, autocommit=True)
 
-    async def get_async_conn(self) -> psycopg.AsyncConnection:
-        if self.async_conn is None or self.async_conn.closed:
-            self.async_conn = await psycopg.AsyncConnection.connect(self.dsn, autocommit=True)
-        return self.async_conn
+    async def get_async_pool(self) -> AsyncConnectionPool:
+        if self.async_pool is None:
+            self.async_pool = AsyncConnectionPool(
+                self.dsn,
+                min_size=2,
+                max_size=10,
+                open=False
+            )
+            await self.async_pool.open()
+        return self.async_pool
 
     async def insert_scored_batch_async(self, posts: list[ScoredPost]) -> int:
         data = [
@@ -79,23 +86,11 @@ class DB:
             )
             for p in posts
         ]
-        try:
-            return await self._do_insert_posts_batch_async(data)
-        except psycopg.OperationalError:
-            print("DB async connection lost, reconnecting...")
-            if self.async_conn:
-                try:
-                    await self.async_conn.close()
-                except Exception:
-                    pass
-            self.async_conn = await psycopg.AsyncConnection.connect(self.dsn, autocommit=True)
-            return await self._do_insert_posts_batch_async(data)
-
-    async def _do_insert_posts_batch_async(self, data: list) -> int:
-        conn = await self.get_async_conn()
-        async with conn.cursor() as cur:
-            await cur.executemany(INSERT_POST_SQL, data)
-            return cur.rowcount
+        pool = await self.get_async_pool()
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.executemany(INSERT_POST_SQL, data)
+                return cur.rowcount
 
     def _apply_schema(self) -> None:
         sql = SCHEMA_FILE.read_text()
