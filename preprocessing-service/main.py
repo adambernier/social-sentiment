@@ -53,6 +53,7 @@ async def process_message(message: aio_pika.IncomingMessage, topic_model: TopicM
             timestamp=raw.timestamp,
             topic_id=topic_id,
             topic_label=topic_label,
+            engagement=raw.engagement,
         )
 
         # Publish asynchronously

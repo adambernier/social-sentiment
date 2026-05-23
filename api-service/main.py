@@ -105,6 +105,7 @@ class PostResponse(BaseModel):
     topic_id: Optional[int]
     topic_label: Optional[str]
     scored_at: datetime
+    engagement: int = 1
 
 class TopicStats(BaseModel):
     topic_label: Optional[str]
@@ -171,7 +172,7 @@ async def get_posts(
     limit: int = Query(20, le=1000),
     offset: int = 0
 ):
-    query = "SELECT id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, scored_at FROM posts"
+    query = "SELECT id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, scored_at, engagement FROM posts"
     conditions = []
     params = []
 
@@ -378,7 +379,7 @@ async def get_dashboard(
 
             # 1. Fetch posts matching symbol and optional platform, ordered by timestamp
             posts_query = (
-                "SELECT id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, scored_at "
+                "SELECT id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, scored_at, engagement "
                 "FROM posts "
                 "WHERE symbol = %s AND timestamp >= %s"
             )

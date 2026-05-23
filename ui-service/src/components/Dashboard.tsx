@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
-  BarChart, Bar, Cell, ComposedChart, ReferenceLine, Legend, ReferenceArea
+  BarChart, Bar, Cell, ComposedChart, ReferenceLine, Legend, ReferenceArea, Area
 } from "recharts";
 import { format, parseISO, startOfHour } from "date-fns";
 import { Activity, MessageSquare, TrendingUp, TrendingDown, Clock, Hash, Zap, HelpCircle, AlertCircle, BarChart2, Newspaper } from "lucide-react";
@@ -30,6 +30,7 @@ interface Post {
   id: string; symbol: string; platform: string; text: string;
   timestamp: string; sentiment: string;
   scores: Record<string, number>; topic_label: string | null;
+  engagement: number;
 }
 interface SentimentStat { sentiment: string; count: number; }
 interface TopicStat { topic_label: string | null; count: number; }
@@ -91,6 +92,7 @@ export default function Dashboard() {
   const [isConnected, setIsConnected] = useState(false);
   const [showSR, setShowSR] = useState(true);
   const [feedTab, setFeedTab] = useState<"social" | "news">("social");
+  const [chartView, setChartView] = useState<"volume" | "sentiment">("volume");
   
   // States
   const [posts, setPosts] = useState<Post[]>([]);
@@ -266,9 +268,22 @@ export default function Dashboard() {
     return [...topicStats].sort((a, b) => b.count - a.count);
   }, [topicStats]);
 
-  // Correlation Chart Data (Binning posts by hour)
+  // Correlation Chart Data (Binning posts by hour and computing analytics)
   const correlationData = useMemo(() => {
-    if (!marketData.length) return { data: [], closedRegions: [], supportPrice: 0, supportPct: 0, resistancePrice: 0, resistancePct: 0 };
+    const defaultRes = { 
+      data: [], 
+      closedRegions: [], 
+      supportPrice: 0, 
+      supportPct: 0, 
+      resistancePrice: 0, 
+      resistancePct: 0,
+      maxR: 0,
+      bestLag: 0,
+      correlationText: "Insufficient data for correlation",
+      correlationStrength: "weak"
+    };
+
+    if (!marketData.length) return defaultRes;
     
     const buckets: Record<string, any> = {};
     const refPrice = marketData[0].price;
@@ -279,7 +294,21 @@ export default function Dashboard() {
     for (let i = hours; i >= 0; i--) {
       const d = new Date(now.getTime() - i * 60 * 60 * 1000);
       const ts = startOfHour(d).toISOString();
-      buckets[ts] = { timestamp: ts, positive: 0, neutral: 0, negative: 0, priceChange: null, futureChange: null, isMarketOpen: false };
+      buckets[ts] = { 
+        timestamp: ts, 
+        positive: 0, 
+        neutral: 0, 
+        negative: 0, 
+        priceChange: null, 
+        futureChange: null, 
+        isMarketOpen: false,
+        positiveWeighted: 0,
+        neutralWeighted: 0,
+        negativeWeighted: 0,
+        totalWeighted: 0,
+        sentimentIndex: 0,
+        sentimentSMA: 0
+      };
     }
 
     marketData.forEach(q => {
@@ -300,14 +329,116 @@ export default function Dashboard() {
     posts.forEach(p => {
       const ts = startOfHour(new Date(p.timestamp)).toISOString();
       if (buckets[ts]) {
-        if (p.sentiment === 'positive') buckets[ts].positive += 1;
-        else if (p.sentiment === 'negative') buckets[ts].negative += 1;
-        else buckets[ts].neutral += 1;
+        const weight = p.engagement || 1;
+        if (p.sentiment === 'positive') {
+          buckets[ts].positive += 1;
+          buckets[ts].positiveWeighted += weight;
+        } else if (p.sentiment === 'negative') {
+          buckets[ts].negative += 1;
+          buckets[ts].negativeWeighted += weight;
+        } else {
+          buckets[ts].neutral += 1;
+          buckets[ts].neutralWeighted += weight;
+        }
+        buckets[ts].totalWeighted += weight;
+      }
+    });
+
+    // Post-process buckets to calculate volume-weighted sentimentIndex
+    Object.values(buckets).forEach((b: any) => {
+      if (b.totalWeighted > 0) {
+        b.sentimentIndex = (b.positiveWeighted - b.negativeWeighted) / b.totalWeighted;
+      } else {
+        b.sentimentIndex = 0;
       }
     });
 
     const sortedData = Object.values(buckets).sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
     
+    // Calculate Sentiment Index SMA (Simple Moving Average)
+    let smaPeriod = 5;
+    if (hours === 1) smaPeriod = 3;
+    else if (hours === 24) smaPeriod = 5;
+    else if (hours === 168) smaPeriod = 12;
+    else if (hours === 720) smaPeriod = 24;
+
+    for (let i = 0; i < sortedData.length; i++) {
+      let sum = 0;
+      let count = 0;
+      for (let j = Math.max(0, i - smaPeriod + 1); j <= i; j++) {
+        sum += sortedData[j].sentimentIndex;
+        count++;
+      }
+      sortedData[i].sentimentSMA = count > 0 ? sum / count : 0;
+    }
+
+    // Pearson Correlation Coefficient calculation at hourly lags
+    // L > 0 means sentiment leads price (sentiment at t aligns with price at t+L)
+    // L < 0 means price leads sentiment
+    let maxR = 0;
+    let bestLag = 0;
+    
+    for (let lag = -5; lag <= 5; lag++) {
+      const sentimentVals: number[] = [];
+      const priceVals: number[] = [];
+      
+      for (let i = 0; i < sortedData.length; i++) {
+        const priceIdx = i + lag;
+        if (priceIdx >= 0 && priceIdx < sortedData.length) {
+          const sVal = sortedData[i].sentimentIndex;
+          const pVal = sortedData[priceIdx].priceChange;
+          if (sVal !== null && pVal !== null) {
+            sentimentVals.push(sVal);
+            priceVals.push(pVal);
+          }
+        }
+      }
+      
+      if (sentimentVals.length >= 4) {
+        const n = sentimentVals.length;
+        const sumS = sentimentVals.reduce((a, b) => a + b, 0);
+        const sumP = priceVals.reduce((a, b) => a + b, 0);
+        const meanS = sumS / n;
+        const meanP = sumP / n;
+        
+        let num = 0;
+        let denS = 0;
+        let denP = 0;
+        for (let j = 0; j < n; j++) {
+          const diffS = sentimentVals[j] - meanS;
+          const diffP = priceVals[j] - meanP;
+          num += diffS * diffP;
+          denS += diffS * diffS;
+          denP += diffP * diffP;
+        }
+        
+        const r = (denS * denP > 0) ? num / Math.sqrt(denS * denP) : 0;
+        if (Math.abs(r) > Math.abs(maxR)) {
+          maxR = r;
+          bestLag = lag;
+        }
+      }
+    }
+
+    let correlationText = "No correlation detected";
+    let correlationStrength = "weak";
+    if (Math.abs(maxR) >= 0.15) {
+      if (Math.abs(maxR) > 0.6) correlationStrength = "strong";
+      else if (Math.abs(maxR) > 0.35) correlationStrength = "moderate";
+      
+      const relationship = maxR >= 0 ? "positive" : "negative";
+      
+      if (bestLag > 0) {
+        correlationText = `Sentiment leads price by ${bestLag}h (${relationship}, r = ${maxR >= 0 ? '+' : ''}${maxR.toFixed(2)})`;
+      } else if (bestLag < 0) {
+        correlationText = `Price leads sentiment by ${Math.abs(bestLag)}h (${relationship}, r = ${maxR >= 0 ? '+' : ''}${maxR.toFixed(2)})`;
+      } else {
+        correlationText = `Coincident correlation (${relationship}, r = ${maxR >= 0 ? '+' : ''}${maxR.toFixed(2)})`;
+      }
+    } else {
+      correlationText = `Weak or no correlation (r = ${maxR >= 0 ? '+' : ''}${maxR.toFixed(2)})`;
+    }
+
     const closedRegions: { start: string, end: string }[] = [];
     let currentStart: string | null = null;
     
@@ -363,7 +494,11 @@ export default function Dashboard() {
       supportPrice,
       supportPct,
       resistancePrice,
-      resistancePct
+      resistancePct,
+      maxR,
+      bestLag,
+      correlationText,
+      correlationStrength
     };
   }, [marketData, futureMarketData, posts, hours, latestQuote]);
 
@@ -498,29 +633,29 @@ export default function Dashboard() {
         </header>
 
         {/* Telemetry Bento Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
-              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-10 gap-4">
+              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors col-span-1">
                 <div className="flex items-center gap-2 text-slate-400 mb-2">
                   <MessageSquare className="w-4 h-4" />
                   <span className="text-xs font-medium">Mentions</span>
                 </div>
                 <div className="text-2xl font-bold">{totalMentions.toLocaleString()}</div>
               </div>
-              <div className="bg-white/5 backdrop-blur-md border border-emerald-500/20 rounded-2xl p-4 hover:bg-white/10 transition-colors relative overflow-hidden">
+              <div className="bg-white/5 backdrop-blur-md border border-emerald-500/20 rounded-2xl p-4 hover:bg-white/10 transition-colors relative overflow-hidden col-span-1">
                 <div className="absolute top-0 right-0 p-4 opacity-10"><TrendingUp className="w-12 h-12 text-emerald-500" /></div>
                 <div className="flex items-center gap-2 text-emerald-400 mb-2">
                   <span className="text-xs font-medium">Bullish</span>
                 </div>
                 <div className="text-2xl font-bold text-white">{bullishPct}%</div>
               </div>
-              <div className="bg-white/5 backdrop-blur-md border border-rose-500/20 rounded-2xl p-4 hover:bg-white/10 transition-colors relative overflow-hidden">
+              <div className="bg-white/5 backdrop-blur-md border border-rose-500/20 rounded-2xl p-4 hover:bg-white/10 transition-colors relative overflow-hidden col-span-1">
                 <div className="absolute top-0 right-0 p-4 opacity-10"><TrendingDown className="w-12 h-12 text-rose-500" /></div>
                 <div className="flex items-center gap-2 text-rose-400 mb-2">
                   <span className="text-xs font-medium">Bearish</span>
                 </div>
                 <div className="text-2xl font-bold text-white">{bearishPct}%</div>
               </div>
-              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors">
+              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors col-span-1">
                 <div className="flex items-center gap-2 text-slate-400 mb-2">
                   <AlertCircle className="w-4 h-4" />
                   <span className="text-xs font-medium">Divergence</span>
@@ -528,7 +663,7 @@ export default function Dashboard() {
                 <div className={cn("text-2xl font-bold", divergenceStatus.color)}>{divergenceStatus.label}</div>
               </div>
               
-              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors">
+              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors col-span-1">
                 <div className="flex flex-col text-slate-400 mb-1">
                   <span className="text-xs font-medium">{symbol} Price</span>
                   <span className="text-[9px] text-slate-500 font-normal lowercase leading-none mt-0.5">(since last close)</span>
@@ -542,14 +677,14 @@ export default function Dashboard() {
                   )}
                 </div>
               </div>
-              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors">
+              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors col-span-1">
                 <div className="flex items-center gap-2 text-slate-400 mb-2">
                   <Activity className="w-4 h-4" />
                   <span className="text-xs font-medium">Live Volume</span>
                 </div>
                 <div className="text-2xl font-bold">{formatLargeNumber(latestQuote?.volume)}</div>
               </div>
-              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors">
+              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors col-span-1">
                 <div className="flex flex-col text-slate-400 mb-1">
                   <span className="text-xs font-medium">{futureSymbol || "NQ Futures"}</span>
                   <span className="text-[9px] text-slate-500 font-normal lowercase leading-none mt-0.5">(since last close)</span>
@@ -567,26 +702,88 @@ export default function Dashboard() {
                   )}
                 </div>
               </div>
-              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors">
+              <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors col-span-1">
                 <div className="flex items-center gap-2 text-slate-400 mb-2">
                   <Zap className="w-4 h-4" />
                   <span className="text-xs font-medium">VIX Regime</span>
                 </div>
                 <div className={cn("text-2xl font-bold", vixRegime.color)}>{vixRegime.label}</div>
               </div>
+
+              {/* Pearson Correlation Card */}
+              <div className="bg-white/5 backdrop-blur-md border border-indigo-500/20 rounded-2xl p-4 hover:bg-white/10 transition-colors col-span-2 flex flex-col justify-between relative overflow-hidden">
+                <div className="absolute top-0 right-0 p-4 opacity-10"><Activity className="w-12 h-12 text-indigo-500" /></div>
+                <div className="flex items-center gap-2 text-indigo-400 mb-1">
+                  <Zap className="w-3.5 h-3.5" />
+                  <span className="text-xs font-medium">Price-Sentiment Correlation</span>
+                </div>
+                <div className="flex items-baseline justify-between mt-1">
+                  <div className={cn("text-2xl font-bold tracking-tight", 
+                    correlationData.maxR === 0 ? "text-slate-400" :
+                    correlationData.maxR > 0 ? "text-emerald-400" : "text-rose-400"
+                  )}>
+                    {correlationData.maxR === 0 ? '0.00' : `${correlationData.maxR > 0 ? '+' : ''}${correlationData.maxR.toFixed(2)}`}
+                  </div>
+                  <span className={cn("text-[9px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider",
+                    correlationData.correlationStrength === 'strong' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/20' :
+                    correlationData.correlationStrength === 'moderate' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/20' :
+                    'bg-slate-800 text-slate-400'
+                  )}>
+                    {correlationData.correlationStrength}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-300 font-medium mt-1 truncate">
+                  {correlationData.correlationText}
+                </div>
+              </div>
             </div>
 
             {/* Correlation Chart */}
             <section className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl p-6 shadow-2xl">
-              <div className="flex items-center justify-between mb-6">
-                <h2 className="text-lg font-bold flex items-center gap-2 text-white">
-                  <BarChart2 className="w-5 h-5 text-indigo-400" />
-                  Sentiment vs. Price Correlation
-                </h2>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-lg font-bold flex items-center gap-2 text-white">
+                    <BarChart2 className="w-5 h-5 text-indigo-400" />
+                    Sentiment vs. Price Correlation
+                  </h2>
+                  <div className="flex bg-slate-950/60 p-0.5 rounded-lg border border-white/5">
+                    <button
+                      onClick={() => setChartView("volume")}
+                      className={cn(
+                        "px-2.5 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer",
+                        chartView === "volume"
+                          ? "bg-indigo-500 text-white shadow-md"
+                          : "text-slate-400 hover:text-slate-200"
+                      )}
+                    >
+                      Volume
+                    </button>
+                    <button
+                      onClick={() => setChartView("sentiment")}
+                      className={cn(
+                        "px-2.5 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer",
+                        chartView === "sentiment"
+                          ? "bg-indigo-500 text-white shadow-md"
+                          : "text-slate-400 hover:text-slate-200"
+                      )}
+                    >
+                      Sentiment Trend
+                    </button>
+                  </div>
+                </div>
                 <div className="flex flex-wrap items-center gap-4 text-xs font-medium text-slate-400">
-                  <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-emerald-500"></div> Positive</div>
-                  <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-slate-500"></div> Neutral</div>
-                  <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-rose-500"></div> Negative</div>
+                  {chartView === "volume" ? (
+                    <>
+                      <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-emerald-500"></div> Positive</div>
+                      <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-slate-500"></div> Neutral</div>
+                      <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-rose-500"></div> Negative</div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-1"><div className="w-3 h-0.5 bg-[#818cf8]"></div> Sentiment Index</div>
+                      <div className="flex items-center gap-1"><div className="w-3 h-0.5 bg-[#06b6d4]"></div> Sentiment SMA</div>
+                    </>
+                  )}
                   <div className="hidden sm:block h-4 w-px bg-slate-700 mx-1"></div>
                   <div className="flex items-center gap-1"><div className="w-3 h-0.5 bg-[#fbbf24]"></div> {symbol} Price</div>
                   <div className="flex items-center gap-1"><div className="w-3 border-t-2 border-dashed border-[#8b5cf6]"></div> NQ Futures</div>
@@ -595,6 +792,13 @@ export default function Dashboard() {
               <div className="h-[400px]">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={correlationData.data} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
+                    <defs>
+                      <linearGradient id="sentimentGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#818cf8" stopOpacity={0.25}/>
+                        <stop offset="95%" stopColor="#818cf8" stopOpacity={0.0}/>
+                      </linearGradient>
+                    </defs>
+
                     <CartesianGrid stroke="#1e293b" vertical={false} strokeDasharray="3 3" />
                     
                     {correlationData.closedRegions.map((region, idx) => (
@@ -625,6 +829,8 @@ export default function Dashboard() {
                       tickLine={false}
                       axisLine={false}
                       tick={{ fontSize: 12 }}
+                      domain={chartView === 'sentiment' ? [-1.1, 1.1] : ['auto', 'auto']}
+                      tickFormatter={chartView === 'sentiment' ? (v) => `${v > 0 ? '+' : ''}${Math.round(v * 100)}%` : undefined}
                     />
                     
                     <YAxis 
@@ -643,9 +849,18 @@ export default function Dashboard() {
                       itemStyle={{ fontSize: '13px' }}
                     />
 
-                    <Bar yAxisId="left" dataKey="positive" name="Positive Posts" stackId="a" fill="#10b981" barSize={12} radius={[0, 0, 0, 0]} />
-                    <Bar yAxisId="left" dataKey="neutral" name="Neutral Posts" stackId="a" fill="#64748b" radius={[0, 0, 0, 0]} />
-                    <Bar yAxisId="left" dataKey="negative" name="Negative Posts" stackId="a" fill="#f43f5e" radius={[4, 4, 0, 0]} />
+                    {chartView === "volume" ? (
+                      <>
+                        <Bar yAxisId="left" dataKey="positive" name="Positive Posts" stackId="a" fill="#10b981" barSize={12} radius={[0, 0, 0, 0]} />
+                        <Bar yAxisId="left" dataKey="neutral" name="Neutral Posts" stackId="a" fill="#64748b" radius={[0, 0, 0, 0]} />
+                        <Bar yAxisId="left" dataKey="negative" name="Negative Posts" stackId="a" fill="#f43f5e" radius={[4, 4, 0, 0]} />
+                      </>
+                    ) : (
+                      <>
+                        <Area yAxisId="left" type="monotone" dataKey="sentimentIndex" name="Weighted Sentiment Index" stroke="#818cf8" strokeWidth={1.5} fill="url(#sentimentGrad)" />
+                        <Line yAxisId="left" type="monotone" dataKey="sentimentSMA" name="Sentiment SMA" stroke="#06b6d4" strokeWidth={3} dot={false} />
+                      </>
+                    )}
 
                     <Line 
                       yAxisId="right"

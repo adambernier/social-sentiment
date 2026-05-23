@@ -9,6 +9,7 @@ class RawPost(BaseModel):
     platform: str
     text: str
     timestamp: datetime
+    engagement: int = 1
 
 
 class CleanPost(BaseModel):
@@ -19,7 +20,7 @@ class CleanPost(BaseModel):
     timestamp: datetime
     topic_id: Optional[int] = None
     topic_label: Optional[str] = None
-
+    engagement: int = 1
 
 
 class ScoredPost(CleanPost):

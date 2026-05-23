@@ -73,12 +73,15 @@ async def main():
                                     except Exception:
                                         timestamp = datetime.now(timezone.utc)
 
+                                    engagement = max(1, int((post.like_count or 0) + 2 * (post.repost_count or 0) + 3 * (post.reply_count or 0)))
+
                                     raw_post = RawPost(
                                         id=post.cid,
                                         symbol=symbol,  # Tag with the target symbol
                                         platform="bluesky",
                                         text=post.record.text,
                                         timestamp=timestamp,
+                                        engagement=engagement,
                                     )
 
                                     await channel.default_exchange.publish(

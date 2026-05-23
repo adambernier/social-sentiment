@@ -13,8 +13,8 @@ from shared.config import DATABASE_DSN
 SCHEMA_FILE = Path(__file__).parent / "schema.sql"
 
 INSERT_POST_SQL = """
-    INSERT INTO posts (id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    INSERT INTO posts (id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, engagement)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (id) DO NOTHING
     RETURNING id
 """
@@ -83,6 +83,7 @@ class DB:
                 json.dumps(p.scores),
                 p.topic_id,
                 p.topic_label,
+                p.engagement,
             )
             for p in posts
         ]
@@ -117,6 +118,7 @@ class DB:
                 json.dumps(p.scores),
                 p.topic_id,
                 p.topic_label,
+                p.engagement,
             )
             for p in posts
         ]

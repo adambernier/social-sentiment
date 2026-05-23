@@ -74,6 +74,7 @@ def main():
                 platform="simulator",
                 text=text,
                 timestamp=datetime.now(timezone.utc),
+                engagement=random.randint(1, 50),
             )
             
             channel.basic_publish(

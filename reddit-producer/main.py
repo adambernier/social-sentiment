@@ -97,12 +97,15 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
                     created_utc = comment.get("created_utc")
                     ts = datetime.fromtimestamp(created_utc, tz=timezone.utc) if created_utc else datetime.now(timezone.utc)
                     
+                    engagement = max(1, int(comment.get("score", 1)))
+                    
                     raw_post = RawPost(
                         id=f"rd_{post_id}",
                         symbol=symbol,
                         platform="reddit",
                         text=body.strip()[:2000],
                         timestamp=ts,
+                        engagement=engagement,
                     )
 
                     await channel.default_exchange.publish(

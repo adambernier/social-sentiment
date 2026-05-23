@@ -68,6 +68,7 @@ async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio
                 platform="yahoo",
                 text=full_text,
                 timestamp=dt,
+                engagement=15,
             )
 
             await channel.default_exchange.publish(

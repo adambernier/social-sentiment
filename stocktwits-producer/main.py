@@ -54,12 +54,16 @@ async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika
             except Exception:
                 timestamp = datetime.now(timezone.utc)
 
+            likes = msg.get("likes", {}).get("total", 0) if isinstance(msg.get("likes"), dict) else 0
+            engagement = max(1, int(likes))
+
             raw_post = RawPost(
                 id=f"st_{msg_id}",
                 symbol=symbol,
                 platform="stocktwits",
                 text=body,
                 timestamp=timestamp,
+                engagement=engagement,
             )
 
             await channel.default_exchange.publish(
