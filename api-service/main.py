@@ -625,7 +625,34 @@ async def get_correlation(
                         else:
                             buckets[q_ts_str]['futureChange'] = 0.0
 
-            # 3. Fetch posts data
+            # 3. Load pre-aggregated data from hourly_sentiment_agg (cold tier).
+            # This covers hours where raw posts may have been pruned.
+            agg_query = """
+                SELECT bucket_hour, positive_count, neutral_count, negative_count,
+                       positive_weighted, negative_weighted, neutral_weighted,
+                       total_weighted, sentiment_index
+                FROM hourly_sentiment_agg
+                WHERE symbol = %s AND bucket_hour >= %s
+            """
+            await cur.execute(agg_query, [symbol, cutoff])
+            agg_data = await cur.fetchall()
+
+            for a in agg_data:
+                a_ts = a['bucket_hour'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                a_ts_str = a_ts.isoformat().replace("+00:00", "Z")
+                if a_ts_str in buckets:
+                    buckets[a_ts_str]['positive'] = a['positive_count']
+                    buckets[a_ts_str]['neutral'] = a['neutral_count']
+                    buckets[a_ts_str]['negative'] = a['negative_count']
+                    buckets[a_ts_str]['positiveWeighted'] = a['positive_weighted']
+                    buckets[a_ts_str]['negativeWeighted'] = a['negative_weighted']
+                    buckets[a_ts_str]['neutralWeighted'] = a['neutral_weighted']
+                    buckets[a_ts_str]['totalWeighted'] = a['total_weighted']
+                    buckets[a_ts_str]['sentimentIndex'] = a['sentiment_index']
+
+            # 4. Overlay with live posts data (hot tier).
+            # For buckets that still have raw posts, this overwrites the aggregated
+            # values with fresh counts computed from individual posts.
             posts_query = """
                 SELECT sentiment, timestamp, engagement
                 FROM posts
@@ -641,11 +668,25 @@ async def get_correlation(
                 
             await cur.execute(posts_query, posts_params)
             posts_data = await cur.fetchall()
+
+            # Track which buckets have live posts so we can overwrite agg data
+            live_buckets: set[str] = set()
             
             for p in posts_data:
                 p_ts = p['timestamp'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
                 p_ts_str = p_ts.isoformat().replace("+00:00", "Z")
                 if p_ts_str in buckets:
+                    # On first live post for this bucket, reset from aggregated values
+                    if p_ts_str not in live_buckets:
+                        live_buckets.add(p_ts_str)
+                        buckets[p_ts_str]['positive'] = 0
+                        buckets[p_ts_str]['neutral'] = 0
+                        buckets[p_ts_str]['negative'] = 0
+                        buckets[p_ts_str]['positiveWeighted'] = 0.0
+                        buckets[p_ts_str]['negativeWeighted'] = 0.0
+                        buckets[p_ts_str]['neutralWeighted'] = 0.0
+                        buckets[p_ts_str]['totalWeighted'] = 0.0
+
                     weight = p['engagement'] if p['engagement'] is not None else 1
                     sent = p['sentiment']
                     if sent == 'positive':
@@ -659,7 +700,7 @@ async def get_correlation(
                         buckets[p_ts_str]['neutralWeighted'] += weight
                     buckets[p_ts_str]['totalWeighted'] += weight
 
-            # 4. Fetch latest quote for regular session check
+            # 5. Fetch latest quote for regular session check
             await cur.execute(
                 "SELECT market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
                 [symbol]

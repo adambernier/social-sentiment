@@ -74,3 +74,20 @@ CREATE OR REPLACE TRIGGER trigger_notify_new_post
 AFTER INSERT ON posts
 FOR EACH ROW
 EXECUTE FUNCTION notify_new_post();
+
+
+-- Hourly aggregation table for cold-tier data retention.
+-- Raw posts older than the retention window are rolled up here before pruning.
+CREATE TABLE IF NOT EXISTS hourly_sentiment_agg (
+    symbol              TEXT NOT NULL,
+    bucket_hour         TIMESTAMPTZ NOT NULL,
+    positive_count      INTEGER NOT NULL DEFAULT 0,
+    neutral_count       INTEGER NOT NULL DEFAULT 0,
+    negative_count      INTEGER NOT NULL DEFAULT 0,
+    positive_weighted   FLOAT NOT NULL DEFAULT 0,
+    negative_weighted   FLOAT NOT NULL DEFAULT 0,
+    neutral_weighted    FLOAT NOT NULL DEFAULT 0,
+    total_weighted      FLOAT NOT NULL DEFAULT 0,
+    sentiment_index     FLOAT NOT NULL DEFAULT 0,
+    PRIMARY KEY (symbol, bucket_hour)
+);

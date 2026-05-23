@@ -176,3 +176,86 @@ class DB:
                 ),
             )
             return cur.fetchone() is not None
+
+    def rollup_to_aggregates(self, cutoff_ts) -> int:
+        """Roll up posts older than cutoff_ts into hourly_sentiment_agg.
+        
+        Uses INSERT ... ON CONFLICT to be idempotent — safe to run repeatedly.
+        Returns the number of rows upserted.
+        """
+        sql = """
+            INSERT INTO hourly_sentiment_agg (
+                symbol, bucket_hour,
+                positive_count, neutral_count, negative_count,
+                positive_weighted, negative_weighted, neutral_weighted,
+                total_weighted, sentiment_index
+            )
+            SELECT
+                symbol,
+                date_trunc('hour', timestamp) AS bucket_hour,
+                COUNT(*) FILTER (WHERE sentiment = 'positive') AS positive_count,
+                COUNT(*) FILTER (WHERE sentiment = 'neutral') AS neutral_count,
+                COUNT(*) FILTER (WHERE sentiment = 'negative') AS negative_count,
+                COALESCE(SUM(engagement) FILTER (WHERE sentiment = 'positive'), 0) AS positive_weighted,
+                COALESCE(SUM(engagement) FILTER (WHERE sentiment = 'negative'), 0) AS negative_weighted,
+                COALESCE(SUM(engagement) FILTER (WHERE sentiment = 'neutral'), 0) AS neutral_weighted,
+                COALESCE(SUM(engagement), 0) AS total_weighted,
+                CASE
+                    WHEN COALESCE(SUM(engagement), 0) > 0
+                    THEN (
+                        COALESCE(SUM(engagement) FILTER (WHERE sentiment = 'positive'), 0)
+                        - COALESCE(SUM(engagement) FILTER (WHERE sentiment = 'negative'), 0)
+                    )::float / SUM(engagement)
+                    ELSE 0.0
+                END AS sentiment_index
+            FROM posts
+            WHERE timestamp < %s
+            GROUP BY symbol, date_trunc('hour', timestamp)
+            ON CONFLICT (symbol, bucket_hour) DO UPDATE SET
+                positive_count = EXCLUDED.positive_count,
+                neutral_count = EXCLUDED.neutral_count,
+                negative_count = EXCLUDED.negative_count,
+                positive_weighted = EXCLUDED.positive_weighted,
+                negative_weighted = EXCLUDED.negative_weighted,
+                neutral_weighted = EXCLUDED.neutral_weighted,
+                total_weighted = EXCLUDED.total_weighted,
+                sentiment_index = EXCLUDED.sentiment_index
+        """
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(sql, [cutoff_ts])
+                return cur.rowcount
+        except psycopg.OperationalError:
+            print("DB connection lost during rollup, reconnecting...")
+            self._connect()
+            with self.conn.cursor() as cur:
+                cur.execute(sql, [cutoff_ts])
+                return cur.rowcount
+
+    def prune_old_posts(self, cutoff_ts) -> int:
+        """Delete posts older than cutoff_ts. Returns the number of rows deleted."""
+        sql = "DELETE FROM posts WHERE timestamp < %s"
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(sql, [cutoff_ts])
+                return cur.rowcount
+        except psycopg.OperationalError:
+            print("DB connection lost during prune, reconnecting...")
+            self._connect()
+            with self.conn.cursor() as cur:
+                cur.execute(sql, [cutoff_ts])
+                return cur.rowcount
+
+    def prune_old_quotes(self, cutoff_ts) -> int:
+        """Delete stock quotes older than cutoff_ts. Returns the number of rows deleted."""
+        sql = "DELETE FROM stock_quotes WHERE timestamp < %s"
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(sql, [cutoff_ts])
+                return cur.rowcount
+        except psycopg.OperationalError:
+            print("DB connection lost during quote prune, reconnecting...")
+            self._connect()
+            with self.conn.cursor() as cur:
+                cur.execute(sql, [cutoff_ts])
+                return cur.rowcount
