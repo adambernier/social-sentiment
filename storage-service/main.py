@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import aio_pika
@@ -101,6 +102,43 @@ async def db_writer_worker(queue: asyncio.Queue, db: DB):
             await asyncio.sleep(1)
 
 
+async def rollup_scheduler(db: DB):
+    """Periodically rolls up posts into hourly_sentiment_agg and prunes old data.
+    
+    Runs once every 24 hours. Offloads blocking synchronous database operations 
+    to a background thread to prevent halting the async event loop.
+    """
+    retention_days = 7
+    quote_retention_days = 90
+    interval_seconds = 24 * 3600  # 24 hours
+    
+    # Wait 60 seconds on service startup before performing the first cleanup
+    await asyncio.sleep(60)
+    
+    while True:
+        try:
+            logger.info("Starting scheduled database rollup and prune...")
+            now = datetime.now(timezone.utc)
+            post_cutoff = now - timedelta(days=retention_days)
+            quote_cutoff = now - timedelta(days=quote_retention_days)
+            
+            # Execute database actions concurrently on default thread pool executor
+            rolled_up = await asyncio.to_thread(db.rollup_to_aggregates, post_cutoff)
+            pruned_posts = await asyncio.to_thread(db.prune_old_posts, post_cutoff)
+            pruned_quotes = await asyncio.to_thread(db.prune_old_quotes, quote_cutoff)
+            
+            logger.info(
+                f"Scheduled database maintenance completed: "
+                f"rolled up {rolled_up:,} aggregation rows, "
+                f"pruned {pruned_posts:,} posts, "
+                f"pruned {pruned_quotes:,} stock quotes."
+            )
+        except Exception as e:
+            logger.error(f"Error in scheduled database maintenance loop: {e}", exc_info=True)
+            
+        await asyncio.sleep(interval_seconds)
+
+
 async def main():
     logger.info("Initializing database and applying schema...")
     db = DB()
@@ -123,6 +161,8 @@ async def main():
 
                 # Start the background batch database writer worker
                 worker_task = asyncio.create_task(db_writer_worker(queue, db))
+                # Start the background database maintenance scheduler
+                scheduler_task = asyncio.create_task(rollup_scheduler(db))
 
                 logger.info(f"Listening on '{INPUT_QUEUE}' (Batch size: {BATCH_SIZE}, Timeout: {BATCH_TIMEOUT}s)...")
 
@@ -138,8 +178,13 @@ async def main():
                                 await message.nack(requeue=False)
                 finally:
                     worker_task.cancel()
+                    scheduler_task.cancel()
                     try:
                         await worker_task
+                    except asyncio.CancelledError:
+                        pass
+                    try:
+                        await scheduler_task
                     except asyncio.CancelledError:
                         pass
                     # Drain and nack queue

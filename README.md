@@ -189,9 +189,9 @@ if a committed lock is stale.
 
 ## Data retention & maintenance
 
-`storage-service/rollup.py` rolls old posts up into `hourly_sentiment_agg` and
-prunes raw data. It is a standalone script (not wired into Compose), so run it
-on demand or from cron:
+Database maintenance is fully automated. Inside the `storage-service` container, a background scheduler runs once every 24 hours to automatically roll up old posts into `hourly_sentiment_agg` (posts older than 7 days) and prune expired quotes (quotes older than 90 days).
+
+You can also run database maintenance manually at any time using the `storage-service/rollup.py` script:
 
 ```bash
 # Preview what would change without writing anything
@@ -201,8 +201,7 @@ python storage-service/rollup.py --dry-run
 python storage-service/rollup.py --retention-days 7 --quote-retention-days 90
 ```
 
-The rollup uses `INSERT ... ON CONFLICT DO UPDATE`, so it is idempotent and
-safe to re-run.
+The rollup is completely idempotent and safe to execute repeatedly.
 
 ## Smoke test (synthetic posts)
 
@@ -259,6 +258,10 @@ To monitor the codebase for any Python file changes and automatically re-run the
 scripts/watch_tests.sh
 ```
 This uses `watchdog` (pre-installed in the `.venv`) to listen to file modifications and trigger `pytest`.
+
+### Continuous Integration (CI)
+
+A GitHub Actions workflow is configured in `.github/workflows/tests.yml` to automatically execute the full test suite on every code push and pull request targeting the `main` branch. The tests run in an isolated environment using mocks, meaning they complete quickly without needing any Docker containers or database services running in CI.
 
 ## Dashboard
 
