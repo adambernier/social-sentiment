@@ -27,8 +27,10 @@ class SentimentModel:
         # Run inference
         logits = self.session.run(None, onnx_inputs)[0]
         
-        # Softmax and results
-        probs = np.exp(logits) / np.sum(np.exp(logits), axis=-1, keepdims=True)
+        # Softmax (subtract row-max for numerical stability) and results
+        shifted = logits - np.max(logits, axis=-1, keepdims=True)
+        exp = np.exp(shifted)
+        probs = exp / np.sum(exp, axis=-1, keepdims=True)
         
         final_results = []
         for i in range(len(texts)):

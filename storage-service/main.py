@@ -127,16 +127,15 @@ async def main():
                 logger.info(f"Listening on '{INPUT_QUEUE}' (Batch size: {BATCH_SIZE}, Timeout: {BATCH_TIMEOUT}s)...")
 
                 try:
-                    async with connection:
-                        input_queue = await channel.declare_queue(INPUT_QUEUE, durable=True)
-                        async with input_queue.iterator() as queue_iter:
-                            async for message in queue_iter:
-                                try:
-                                    post = ScoredPost.model_validate_json(message.body)
-                                    await queue.put((message, post))
-                                except Exception as e:
-                                    logger.error(f"Malformed message, dropping: {e}")
-                                    await message.nack(requeue=False)
+                    input_queue = await channel.declare_queue(INPUT_QUEUE, durable=True)
+                    async with input_queue.iterator() as queue_iter:
+                        async for message in queue_iter:
+                            try:
+                                post = ScoredPost.model_validate_json(message.body)
+                                await queue.put((message, post))
+                            except Exception as e:
+                                logger.error(f"Malformed message, dropping: {e}")
+                                await message.nack(requeue=False)
                 finally:
                     worker_task.cancel()
                     try:

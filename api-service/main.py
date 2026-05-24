@@ -1,7 +1,7 @@
 import sys
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -30,14 +30,20 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        try:
+            self.active_connections.remove(websocket)
+        except ValueError:
+            pass
 
     async def broadcast(self, message: str):
+        dead: list[WebSocket] = []
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
             except Exception:
-                pass
+                dead.append(connection)
+        for connection in dead:
+            self.disconnect(connection)
 
 manager = ConnectionManager()
 
@@ -200,7 +206,7 @@ async def get_posts(
     platform: Optional[str] = None,
     sentiment: Optional[str] = None,
     limit: int = Query(20, le=1000),
-    offset: int = 0
+    offset: int = Query(0, ge=0)
 ):
     query = "SELECT id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, scored_at, engagement FROM posts"
     conditions = []
@@ -231,14 +237,14 @@ async def get_posts(
 async def get_sentiment_stats(
     symbol: Optional[str] = None,
     platform: Optional[str] = None,
-    hours: int = Query(24, gt=0)
+    hours: int = Query(24, gt=0, le=8760)
 ):
     query = """
         SELECT sentiment, COUNT(*) as count 
         FROM posts 
         WHERE timestamp > %s
     """
-    params = [datetime.now() - timedelta(hours=hours)]
+    params = [datetime.now(timezone.utc) - timedelta(hours=hours)]
 
     if symbol:
         query += " AND symbol = %s"
@@ -258,14 +264,14 @@ async def get_sentiment_stats(
 async def get_topic_stats(
     symbol: Optional[str] = None,
     platform: Optional[str] = None,
-    hours: int = Query(24, gt=0)
+    hours: int = Query(24, gt=0, le=8760)
 ):
     query = """
         SELECT topic_label, COUNT(*) as count 
         FROM posts 
         WHERE timestamp > %s
     """
-    params = [datetime.now() - timedelta(hours=hours)]
+    params = [datetime.now(timezone.utc) - timedelta(hours=hours)]
 
     if symbol:
         query += " AND symbol = %s"
@@ -284,7 +290,7 @@ async def get_topic_stats(
 @app.get("/stats/market", response_model=list[MarketQuote])
 async def get_market_stats(
     symbol: str,
-    hours: int = Query(24, gt=0)
+    hours: int = Query(24, gt=0, le=8760)
 ):
     query = """
         SELECT symbol, timestamp, price, volume, market_session 
@@ -292,7 +298,7 @@ async def get_market_stats(
         WHERE symbol = %s AND timestamp > %s
         ORDER BY timestamp ASC
     """
-    params = [symbol, datetime.now() - timedelta(hours=hours)]
+    params = [symbol, datetime.now(timezone.utc) - timedelta(hours=hours)]
 
     async with get_db_conn() as conn:
         async with conn.cursor() as cur:
@@ -383,10 +389,9 @@ async def get_stock_metrics(symbol: str):
 @app.get("/stats/dashboard", response_model=DashboardResponse)
 async def get_dashboard(
     symbol: str,
-    hours: int = Query(24, gt=0),
+    hours: int = Query(24, gt=0, le=8760),
     platform: Optional[str] = None
 ):
-    from datetime import timezone
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     futures_map = primary_futures_map()
     primary_future_symbol = futures_map.get(symbol)
@@ -405,7 +410,7 @@ async def get_dashboard(
                 return await cur.fetchone()
 
             # Time threshold for hourly stats and graphs
-            cutoff = datetime.now() - timedelta(hours=hours)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
             # 1. Fetch posts matching symbol and optional platform, ordered by timestamp
             posts_query = (
@@ -557,11 +562,10 @@ async def get_dashboard(
 @app.get("/stats/correlation", response_model=CorrelationResponse)
 async def get_correlation(
     symbol: str,
-    hours: int = Query(24, gt=0),
+    hours: int = Query(24, gt=0, le=8760),
     platform: Optional[str] = None,
     topic: Optional[str] = None
 ):
-    from datetime import timezone
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(hours=hours)).replace(minute=0, second=0, microsecond=0)
     futures_map = primary_futures_map()
