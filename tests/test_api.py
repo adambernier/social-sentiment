@@ -1,7 +1,7 @@
 import asyncio
 import importlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
@@ -119,3 +119,62 @@ def test_topic_stats_endpoint(mock_db):
         assert len(data) == 2
         assert data[0]["topic_label"] == "Earnings & Guidance"
         assert data[0]["count"] == 8
+
+def test_correlation_endpoint(mock_db):
+    now = datetime.now(timezone.utc)
+    now_hour = now.replace(minute=0, second=0, microsecond=0)
+    
+    # Mock data for 20 quotes to correctly resolve 5th and 95th percentile indexes
+    mock_quotes = [
+        {"timestamp": now_hour - timedelta(hours=20-i), "price": 100.0 + i, "volume": 1000 + i * 10, "market_session": "regular"}
+        for i in range(20)
+    ]
+    
+    # Mock data for aggregates
+    mock_aggs = [
+        {
+            "bucket_hour": now_hour,
+            "positive_count": 5, "neutral_count": 2, "negative_count": 1,
+            "positive_weighted": 5.0, "negative_weighted": 1.0, "neutral_weighted": 2.0,
+            "total_weighted": 8.0, "sentiment_index": 0.5
+        }
+    ]
+    
+    # Mock data for live posts
+    mock_posts = [
+        {"sentiment": "positive", "timestamp": now_hour, "engagement": 10}
+    ]
+    
+    # Setup mock_db.fetchall side_effect to return mocks for sequential queries:
+    # 1. target quotes
+    # 2. future quotes
+    # 3. agg sentiment
+    # 4. live posts
+    mock_db.fetchall.side_effect = [
+        mock_quotes,
+        mock_quotes,
+        mock_aggs,
+        mock_posts
+    ]
+    
+    mock_db.fetchone = AsyncMock(return_value={"market_session": "regular"})
+    
+    with TestClient(app) as client:
+        response = client.get("/stats/correlation?symbol=NVDA&hours=2")
+        assert response.status_code == 200
+        data = response.json()
+        assert "data" in data
+        assert "closedRegions" in data
+        assert "supportPrice" in data
+        assert "resistancePrice" in data
+        assert "maxR" in data
+        assert "bestLag" in data
+        
+        # Support and resistance checks
+        # support_price = sorted_prices[idx5] -> idx5 = int(19 * 0.05) = 0 -> 100.0
+        # resistance_price = sorted_prices[idx95] -> idx95 = int(19 * 0.95) = 18 -> 118.0
+        # latest_price = prices[-1] = 119.0
+        assert data["supportPrice"] == 100.0
+        assert data["resistancePrice"] == 118.0
+        assert abs(data["supportPct"] - (-15.96638)) < 0.05
+        assert abs(data["resistancePct"] - (-0.84033)) < 0.05

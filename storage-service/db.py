@@ -197,16 +197,16 @@ class DB:
                 COUNT(*) FILTER (WHERE sentiment = 'positive') AS positive_count,
                 COUNT(*) FILTER (WHERE sentiment = 'neutral') AS neutral_count,
                 COUNT(*) FILTER (WHERE sentiment = 'negative') AS negative_count,
-                COALESCE(SUM(engagement) FILTER (WHERE sentiment = 'positive'), 0) AS positive_weighted,
-                COALESCE(SUM(engagement) FILTER (WHERE sentiment = 'negative'), 0) AS negative_weighted,
-                COALESCE(SUM(engagement) FILTER (WHERE sentiment = 'neutral'), 0) AS neutral_weighted,
-                COALESCE(SUM(engagement), 0) AS total_weighted,
+                COALESCE(SUM(LN(engagement + 1.0)) FILTER (WHERE sentiment = 'positive'), 0) AS positive_weighted,
+                COALESCE(SUM(LN(engagement + 1.0)) FILTER (WHERE sentiment = 'negative'), 0) AS negative_weighted,
+                COALESCE(SUM(LN(engagement + 1.0)) FILTER (WHERE sentiment = 'neutral'), 0) AS neutral_weighted,
+                COALESCE(SUM(LN(engagement + 1.0)), 0) AS total_weighted,
                 CASE
-                    WHEN COALESCE(SUM(engagement), 0) > 0
+                    WHEN COALESCE(SUM(LN(engagement + 1.0)), 0) > 0
                     THEN (
-                        COALESCE(SUM(engagement) FILTER (WHERE sentiment = 'positive'), 0)
-                        - COALESCE(SUM(engagement) FILTER (WHERE sentiment = 'negative'), 0)
-                    )::float / SUM(engagement)
+                        COALESCE(SUM(LN(engagement + 1.0)) FILTER (WHERE sentiment = 'positive'), 0)
+                        - COALESCE(SUM(LN(engagement + 1.0)) FILTER (WHERE sentiment = 'negative'), 0)
+                    )::float / SUM(LN(engagement + 1.0))
                     ELSE 0.0
                 END AS sentiment_index
             FROM posts

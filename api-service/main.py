@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import math
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -595,39 +596,48 @@ async def get_correlation(
     async with get_db_conn() as conn:
         async with conn.cursor() as cur:
             # 1. Fetch market quotes for target
+            # We query from 1 hour prior to cutoff to calculate hourly returns for the first hour of the window
+            db_cutoff = cutoff - timedelta(hours=1)
             market_query = """
                 SELECT timestamp, price, volume, market_session 
                 FROM stock_quotes 
                 WHERE symbol = %s AND timestamp >= %s
                 ORDER BY timestamp ASC
             """
-            await cur.execute(market_query, [symbol, cutoff])
+            await cur.execute(market_query, [symbol, db_cutoff])
             market_data = await cur.fetchall()
             
-            ref_price = market_data[0]['price'] if market_data else None
-            for q in market_data:
-                q_ts = q['timestamp'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-                q_ts_str = q_ts.isoformat().replace("+00:00", "Z")
-                if q_ts_str in buckets:
-                    if ref_price and ref_price != 0:
-                        buckets[q_ts_str]['priceChange'] = ((q['price'] - ref_price) / ref_price) * 100
+            # Chronological returns calculation (percentage change from previous hour)
+            market_data = sorted(market_data, key=lambda x: x['timestamp'])
+            for idx in range(1, len(market_data)):
+                prev_q = market_data[idx - 1]
+                curr_q = market_data[idx]
+                curr_ts = curr_q['timestamp'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                curr_ts_str = curr_ts.isoformat().replace("+00:00", "Z")
+                if curr_ts_str in buckets:
+                    prev_price = prev_q['price']
+                    if prev_price and prev_price != 0:
+                        buckets[curr_ts_str]['priceChange'] = ((curr_q['price'] - prev_price) / prev_price) * 100
                     else:
-                        buckets[q_ts_str]['priceChange'] = 0.0
-                    buckets[q_ts_str]['isMarketOpen'] = True
+                        buckets[curr_ts_str]['priceChange'] = 0.0
+                    buckets[curr_ts_str]['isMarketOpen'] = True
 
             # 2. Fetch market quotes for primary future
             if primary_future_symbol:
-                await cur.execute(market_query, [primary_future_symbol, cutoff])
+                await cur.execute(market_query, [primary_future_symbol, db_cutoff])
                 future_market_data = await cur.fetchall()
-                ref_future_price = future_market_data[0]['price'] if future_market_data else None
-                for q in future_market_data:
-                    q_ts = q['timestamp'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-                    q_ts_str = q_ts.isoformat().replace("+00:00", "Z")
-                    if q_ts_str in buckets:
-                        if ref_future_price and ref_future_price != 0:
-                            buckets[q_ts_str]['futureChange'] = ((q['price'] - ref_future_price) / ref_future_price) * 100
+                future_market_data = sorted(future_market_data, key=lambda x: x['timestamp'])
+                for idx in range(1, len(future_market_data)):
+                    prev_q = future_market_data[idx - 1]
+                    curr_q = future_market_data[idx]
+                    curr_ts = curr_q['timestamp'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                    curr_ts_str = curr_ts.isoformat().replace("+00:00", "Z")
+                    if curr_ts_str in buckets:
+                        prev_price = prev_q['price']
+                        if prev_price and prev_price != 0:
+                            buckets[curr_ts_str]['futureChange'] = ((curr_q['price'] - prev_price) / prev_price) * 100
                         else:
-                            buckets[q_ts_str]['futureChange'] = 0.0
+                            buckets[curr_ts_str]['futureChange'] = 0.0
 
             # 3. Load pre-aggregated data from hourly_sentiment_agg (cold tier).
             # This covers hours where raw posts may have been pruned.
@@ -691,7 +701,8 @@ async def get_correlation(
                         buckets[p_ts_str]['neutralWeighted'] = 0.0
                         buckets[p_ts_str]['totalWeighted'] = 0.0
 
-                    weight = p['engagement'] if p['engagement'] is not None else 1
+                    engagement = p['engagement'] if p['engagement'] is not None else 1
+                    weight = math.log1p(engagement)
                     sent = p['sentiment']
                     if sent == 'positive':
                         buckets[p_ts_str]['positive'] += 1
@@ -835,9 +846,10 @@ async def get_correlation(
         idx95 = int((len(sorted_prices) - 1) * 0.95)
         support_price = sorted_prices[idx5]
         resistance_price = sorted_prices[idx95]
-        if ref_price and ref_price != 0:
-            support_pct = ((support_price - ref_price) / ref_price) * 100
-            resistance_pct = ((resistance_price - ref_price) / ref_price) * 100
+        latest_price = prices[-1]
+        if latest_price and latest_price != 0:
+            support_pct = ((support_price - latest_price) / latest_price) * 100
+            resistance_pct = ((resistance_price - latest_price) / latest_price) * 100
 
     return {
         "data": sorted_data,
