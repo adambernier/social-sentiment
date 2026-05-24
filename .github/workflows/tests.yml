@@ -1,0 +1,36 @@
+name: Run Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip' # Caches pip dependencies automatically
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        # Install service dependencies and test framework packages
+        pip install -r api-service/requirements.txt \
+                    -r preprocessing-service/requirements.txt \
+                    -r sentiment-service/requirements.txt \
+                    pytest \
+                    pytest-asyncio \
+                    psycopg-pool
+
+    - name: Run test suite
+      run: |
+        pytest
