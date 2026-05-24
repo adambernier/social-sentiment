@@ -1,0 +1,8 @@
+# Direct dependencies for news-producer (intent). Shared libs pinned in ../constraints.txt.
+# Regenerate: uv pip compile news-producer/requirements.in --generate-hashes -o news-producer/requirements.txt
+-c ../constraints.txt
+
+feedparser
+httpx
+aio-pika
+pydantic

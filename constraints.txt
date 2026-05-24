@@ -1,0 +1,24 @@
+# Shared dependency version pins, applied across services via `-c ../constraints.txt`
+# in each service's requirements.in. Pinning these centrally keeps common libraries
+# on a single version across every image and avoids cross-service drift.
+#
+# These are intent-level version pins; the per-service requirements.txt lockfiles
+# (compiled with uv, with hashes) are what actually get installed.
+#
+# Pinned to the known-good versions running as of 2026-05-24.
+# Used by every service
+pydantic==2.13.4
+aio-pika==9.6.2
+
+# Database (api, storage, market, preprocessing)
+psycopg==3.3.4
+psycopg-pool==3.3.1
+
+# HTTP / feeds (producers)
+httpx==0.28.1
+feedparser==6.0.12
+
+# ML inference (sentiment, preprocessing)
+onnxruntime==1.26.0
+transformers==5.9.0
+numpy==2.4.6

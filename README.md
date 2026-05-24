@@ -166,6 +166,27 @@ Override defaults with env vars if needed (see `shared/config.py`):
 | `QUEUE_SCORED_POSTS` | `scored-posts`                                             |
 | `DATABASE_DSN`       | `postgresql://postgres:sentiment@localhost:5432/sentiment` |
 
+## Dependency lockfiles
+
+Each service installs from a fully hashed, transitively pinned `requirements.txt`
+compiled by [`uv`](https://github.com/astral-sh/uv) from its `requirements.in`
+(direct deps) plus the shared `constraints.txt` (cross-service version pins).
+Images install with `pip install --require-hashes`, so builds are reproducible
+and artifact-verified.
+
+Regenerate after editing any `requirements.in` or `constraints.txt`:
+
+```bash
+scripts/lock.sh                 # recompile all services
+scripts/lock.sh api-service     # or just one
+docker compose up -d --build
+```
+
+`scripts/lock.sh` runs `uv` inside a `python:3.11-slim` container (matching the
+build image), so you need neither `uv` nor a changed runtime image on the host.
+CI (`.github/workflows/lockfiles.yml`) runs `scripts/lock.sh --check` and fails
+if a committed lock is stale.
+
 ## Data retention & maintenance
 
 `storage-service/rollup.py` rolls old posts up into `hourly_sentiment_agg` and

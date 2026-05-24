@@ -1,0 +1,7 @@
+# Direct dependencies for stocktwits-producer (intent). Shared libs pinned in ../constraints.txt.
+# Regenerate: uv pip compile stocktwits-producer/requirements.in --generate-hashes -o stocktwits-producer/requirements.txt
+-c ../constraints.txt
+
+httpx
+aio-pika
+pydantic

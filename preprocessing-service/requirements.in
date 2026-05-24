@@ -1,0 +1,10 @@
+# Direct dependencies for preprocessing-service (intent). Shared libs pinned in ../constraints.txt.
+# Regenerate: uv pip compile preprocessing-service/requirements.in --generate-hashes -o preprocessing-service/requirements.txt
+-c ../constraints.txt
+
+onnxruntime
+transformers
+numpy
+aio-pika
+pydantic
+psycopg[binary]

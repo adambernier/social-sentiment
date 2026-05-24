@@ -1,0 +1,27 @@
+name: lockfiles
+
+# Fail if any committed requirements.txt is out of date with its requirements.in
+# / constraints.txt. Regenerate locally with `scripts/lock.sh` and commit.
+on:
+  pull_request:
+    paths:
+      - "**/requirements.in"
+      - "**/requirements.txt"
+      - "constraints.txt"
+      - "scripts/lock.sh"
+      - ".github/workflows/lockfiles.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/requirements.in"
+      - "**/requirements.txt"
+      - "constraints.txt"
+      - "scripts/lock.sh"
+
+jobs:
+  check-locks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify lockfiles are in sync with requirements.in
+        run: ./scripts/lock.sh --check

@@ -1,0 +1,7 @@
+# Direct dependencies for storage-service (intent). Shared libs pinned in ../constraints.txt.
+# Regenerate: uv pip compile storage-service/requirements.in --generate-hashes -o storage-service/requirements.txt
+-c ../constraints.txt
+
+psycopg[binary,pool]
+aio-pika
+pydantic

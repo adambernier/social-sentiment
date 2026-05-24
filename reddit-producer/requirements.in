@@ -1,0 +1,8 @@
+# Direct dependencies for reddit-producer (intent). Shared libs pinned in ../constraints.txt.
+# Regenerate: uv pip compile reddit-producer/requirements.in --generate-hashes -o reddit-producer/requirements.txt
+-c ../constraints.txt
+
+httpx
+feedparser
+aio-pika
+pydantic

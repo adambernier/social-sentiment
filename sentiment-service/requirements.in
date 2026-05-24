@@ -1,0 +1,9 @@
+# Direct dependencies for sentiment-service (intent). Shared libs pinned in ../constraints.txt.
+# Regenerate: uv pip compile sentiment-service/requirements.in --generate-hashes -o sentiment-service/requirements.txt
+-c ../constraints.txt
+
+onnxruntime
+transformers
+numpy
+aio-pika
+pydantic

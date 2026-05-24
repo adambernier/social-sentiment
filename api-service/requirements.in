@@ -1,0 +1,14 @@
+# Direct dependencies for api-service (intent / source of truth).
+# Shared libraries (pydantic, psycopg, ...) are version-pinned centrally in
+# ../constraints.txt. Regenerate the locked, hashed requirements.txt with:
+#
+#   uv pip compile api-service/requirements.in --generate-hashes \
+#       -o api-service/requirements.txt
+#
+# (run inside a python:3.11-slim container so the lock matches the build image)
+-c ../constraints.txt
+
+fastapi==0.136.1
+uvicorn[standard]==0.47.0
+psycopg[binary,pool]
+pydantic
