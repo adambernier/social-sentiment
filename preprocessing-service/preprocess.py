@@ -18,3 +18,5 @@ def clean_text(raw: str) -> str:
 
 def is_valid(text: str) -> bool:
     return len(text) >= MIN_LENGTH
+
+# Trivial comment to trigger watcher test run

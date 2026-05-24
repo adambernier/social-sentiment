@@ -232,6 +232,33 @@ Or via the API:
 curl -s http://localhost:8000/posts?limit=5 | jq
 curl -s http://localhost:8000/stats/sentiment?hours=24 | jq
 ```
+## Running Tests
+
+We use `pytest` for unit and integration testing. Tests are designed to run quickly on the host using the local virtual environment `.venv`.
+
+To install testing dependencies:
+```bash
+source .venv/bin/activate
+pip install pytest pytest-asyncio
+```
+
+To run all tests:
+```bash
+scripts/run_tests.sh
+```
+
+To run a subset of tests or pass extra arguments to `pytest`:
+```bash
+scripts/run_tests.sh tests/test_preprocess.py -v
+```
+
+### Auto-run tests on file changes (Watch Mode)
+
+To monitor the codebase for any Python file changes and automatically re-run the test suite, run:
+```bash
+scripts/watch_tests.sh
+```
+This uses `watchdog` (pre-installed in the `.venv`) to listen to file modifications and trigger `pytest`.
 
 ## Dashboard
 
