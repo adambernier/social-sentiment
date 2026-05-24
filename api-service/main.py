@@ -179,6 +179,11 @@ class CorrelationBucket(BaseModel):
     rawPrice: Optional[float] = None
     buySignal: Optional[bool] = None
     buyScore: Optional[float] = None
+    # Sentiment momentum oscillator (MACD-style). Optional: None during warm-up
+    # and leading empty hours, so 0.0 stays meaningful (the zero-cross).
+    sentimentMACD: Optional[float] = None
+    sentimentSignal: Optional[float] = None
+    sentimentHist: Optional[float] = None
 
 
 class ClosedRegion(BaseModel):
@@ -309,6 +314,59 @@ def compute_opportunity(
         "checklist": checklist
     }
 
+
+def compute_sentiment_macd(
+    indices: list[Optional[float]],
+    fast: int,
+    slow: int,
+    signal: int,
+) -> list[dict]:
+    """Sentiment momentum oscillator (MACD concept, SMA-based).
+
+    `indices` is the per-bucket weighted sentiment index in chronological order,
+    with None for empty hours (no posts). Empty hours carry the previous real
+    value forward so the oscillator tracks sentiment momentum, not posting
+    cadence; leading None hours (before the first post in-window) stay None and
+    emit no bars. Each output dict is {"macd", "signal", "hist"}; values are
+    None during warm-up so 0.0 stays meaningful as the zero-cross.
+    """
+    n = len(indices)
+    out = [{"macd": None, "signal": None, "hist": None} for _ in range(n)]
+    if n == 0:
+        return out
+
+    # Carry-forward: empty hours inherit the previous real value; leading
+    # empties stay None.
+    filled: list[Optional[float]] = []
+    last: Optional[float] = None
+    for v in indices:
+        if v is not None:
+            last = v
+        filled.append(last)
+
+    def sma(seq: list[Optional[float]], i: int, period: int) -> Optional[float]:
+        # Trailing simple MA; None until `period` consecutive non-None values exist.
+        if i + 1 < period:
+            return None
+        window = seq[i - period + 1 : i + 1]
+        if any(w is None for w in window):
+            return None
+        return sum(window) / period
+
+    macd_line: list[Optional[float]] = []
+    for i in range(n):
+        f = sma(filled, i, fast)
+        s = sma(filled, i, slow)
+        macd_line.append((f - s) if (f is not None and s is not None) else None)
+
+    for i in range(n):
+        sig = sma(macd_line, i, signal)
+        m = macd_line[i]
+        out[i]["macd"] = m
+        out[i]["signal"] = sig
+        out[i]["hist"] = (m - sig) if (m is not None and sig is not None) else None
+
+    return out
 
 
 def get_db_conn():
@@ -887,6 +945,33 @@ async def get_correlation(
             sum_sma += sorted_data[j]['sentimentIndex']
             count_sma += 1
         sorted_data[i]['sentimentSMA'] = sum_sma / count_sma if count_sma > 0 else 0.0
+
+    # 5b. Sentiment momentum oscillator (MACD-style). Fast period reuses the
+    # adaptive sma_period so it stays coherent with sentimentSMA; slow/signal
+    # follow classic-ish ratios scaled to the window.
+    fast_period = sma_period
+    if hours <= 1:
+        slow_period, signal_period = 6, 3
+    elif hours <= 24:
+        slow_period, signal_period = 12, 5
+    elif hours <= 168:
+        slow_period, signal_period = 26, 9
+    else:
+        slow_period, signal_period = 52, 12
+
+    # Preserve empty hours as None (totalWeighted == 0) so carry-forward in the
+    # oscillator measures sentiment momentum, not posting cadence.
+    macd_indices = [
+        (b['sentimentIndex'] if b['totalWeighted'] > 0 else None)
+        for b in sorted_data
+    ]
+    macd_series = compute_sentiment_macd(
+        macd_indices, fast_period, slow_period, signal_period
+    )
+    for i, m in enumerate(macd_series):
+        sorted_data[i]['sentimentMACD'] = m['macd']
+        sorted_data[i]['sentimentSignal'] = m['signal']
+        sorted_data[i]['sentimentHist'] = m['hist']
 
     # 6. Calculate Pearson Correlation
     def pearson_r(s_list, p_list):

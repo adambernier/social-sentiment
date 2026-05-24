@@ -55,6 +55,7 @@ interface CorrelationBucket {
   priceChange: number | null; futureChange: number | null;
   isMarketOpen: boolean; sentimentIndex: number; sentimentSMA: number;
   rawPrice: number | null; buySignal: boolean | null; buyScore: number | null;
+  sentimentMACD?: number | null; sentimentSignal?: number | null; sentimentHist?: number | null;
 }
 interface ClosedRegion { start: string; end: string; }
 interface CorrelationData {
@@ -738,6 +739,53 @@ export default function Dashboard() {
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
+              {chartView === "sentiment" && (
+                <div className="mt-1">
+                  <div className="flex items-center gap-3 px-1 mb-1">
+                    <span className="text-xs font-medium text-slate-400">Sentiment Momentum</span>
+                    <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                      <div className="flex items-center gap-1"><div className="w-2.5 h-2.5 rounded-sm bg-emerald-500"></div> Rising</div>
+                      <div className="flex items-center gap-1"><div className="w-2.5 h-2.5 rounded-sm bg-rose-500"></div> Falling</div>
+                    </div>
+                  </div>
+                  <div className="h-[90px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={correlationData.data} margin={{ top: 0, right: 10, bottom: 0, left: -20 }}>
+                        <CartesianGrid stroke="#1e293b" vertical={false} strokeDasharray="3 3" />
+                        <XAxis
+                          dataKey="timestamp"
+                          tickFormatter={formatXAxis}
+                          stroke="#64748b"
+                          tickLine={false}
+                          axisLine={false}
+                          dy={6}
+                          minTickGap={40}
+                          tick={{ fontSize: 10 }}
+                        />
+                        <YAxis
+                          stroke="#64748b"
+                          tickLine={false}
+                          axisLine={false}
+                          tick={{ fontSize: 10 }}
+                          domain={['auto', 'auto']}
+                        />
+                        <Tooltip
+                          contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.9)', borderColor: '#334155', borderRadius: '8px', backdropFilter: 'blur(8px)' }}
+                          labelFormatter={(l) => format(new Date(l), "MMM d, yyyy h:mm a")}
+                          itemStyle={{ fontSize: '13px' }}
+                          formatter={(v) => [typeof v === 'number' ? v.toFixed(4) : v, "Momentum"]}
+                        />
+                        <ReferenceLine y={0} stroke="#475569" />
+                        <Bar dataKey="sentimentHist" name="Sentiment Momentum">
+                          {correlationData.data.map((entry, idx) => (
+                            <Cell key={idx} fill={(entry.sentimentHist ?? 0) >= 0 ? "#10b981" : "#f43f5e"} />
+                          ))}
+                        </Bar>
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
             </section>
 
             {/* Bottom Grid Split */}

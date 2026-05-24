@@ -255,3 +255,65 @@ def test_compute_opportunity_logic():
     assert opp_overbought["classification"] == "CAUTION / OVERBOUGHT"
     assert opp_overbought["strategy"] == "Protect Longs / Buy Puts"
 
+
+def test_sentiment_macd_dense_and_warmup():
+    # Pure helper; small periods so values are hand-checkable.
+    macd = getattr(api_main, "compute_sentiment_macd")
+    indices = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    res = macd(indices, fast=2, slow=4, signal=2)
+
+    assert len(res) == 6
+    # Warm-up: macd is None until the slow SMA fills (index 3).
+    assert res[0]["macd"] is None
+    assert res[2]["macd"] is None
+    assert res[3]["macd"] == pytest.approx(0.10)
+    assert res[5]["macd"] == pytest.approx(0.10)
+    # Signal needs two consecutive macd values, so it is None at index 3.
+    assert res[3]["signal"] is None
+    assert res[3]["hist"] is None
+    # Steady ramp -> macd flat -> histogram converges to zero.
+    assert res[4]["signal"] == pytest.approx(0.10)
+    assert res[4]["hist"] == pytest.approx(0.0)
+
+
+def test_sentiment_macd_histogram_warmup_window():
+    # First (slow-1)+(signal-1) histogram entries are None; here that is 4.
+    macd = getattr(api_main, "compute_sentiment_macd")
+    res = macd([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], fast=2, slow=4, signal=2)
+    for i in range(4):
+        assert res[i]["hist"] is None, f"expected None hist at warm-up index {i}"
+    assert res[4]["hist"] is not None
+
+
+def test_sentiment_macd_empty_buckets_carry_forward():
+    # Empty hours (None) must be carried forward, not treated as 0.0.
+    macd = getattr(api_main, "compute_sentiment_macd")
+
+    # A gapped series equals the same series with gaps filled by the prior value.
+    dense = macd([0.5, 0.5, 0.5, 0.5, 0.5, 0.5], fast=2, slow=4, signal=2)
+    gapped = macd([0.5, None, 0.5, None, 0.5, None], fast=2, slow=4, signal=2)
+    assert gapped == dense
+
+    # Burst-after-quiet on a constant series must NOT manufacture a cross:
+    # if None were read as 0.0, the histogram would swing here.
+    res = macd([0.8, 0.8, 0.8, None, None, 0.8, 0.8, 0.8], fast=2, slow=4, signal=2)
+    for r in res:
+        if r["hist"] is not None:
+            assert r["hist"] == pytest.approx(0.0)
+
+
+def test_sentiment_macd_leading_empties_stay_none():
+    macd = getattr(api_main, "compute_sentiment_macd")
+    res = macd([None, None, 0.5, 0.6, 0.7, 0.8], fast=2, slow=4, signal=2)
+    assert res[0]["macd"] is None
+    assert res[1]["macd"] is None
+    # First fully-populated slow window lands at index 5.
+    assert res[5]["macd"] == pytest.approx(0.10)
+    # Signal never gets two consecutive macd values, so no histogram bars.
+    assert all(r["hist"] is None for r in res)
+
+
+def test_sentiment_macd_empty_input():
+    macd = getattr(api_main, "compute_sentiment_macd")
+    assert macd([], fast=2, slow=4, signal=2) == []
+
