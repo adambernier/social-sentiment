@@ -1,4 +1,4 @@
 yfinance
 pandas_market_calendars
-psycopg[binary]
+psycopg[binary,pool]
 pydantic
