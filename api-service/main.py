@@ -176,11 +176,23 @@ class CorrelationBucket(BaseModel):
     isMarketOpen: bool
     sentimentIndex: float
     sentimentSMA: float
+    rawPrice: Optional[float] = None
+    buySignal: Optional[bool] = None
+    buyScore: Optional[float] = None
 
 
 class ClosedRegion(BaseModel):
     start: str
     end: str
+
+
+class OpportunityResponse(BaseModel):
+    score: float
+    classification: str
+    color: str
+    strategy: str
+    description: str
+    checklist: list[str]
 
 
 class CorrelationResponse(BaseModel):
@@ -194,6 +206,109 @@ class CorrelationResponse(BaseModel):
     bestLag: int
     correlationText: str
     correlationStrength: str
+    opportunity: Optional[OpportunityResponse] = None
+
+
+def compute_opportunity(
+    price: Optional[float],
+    support: float,
+    resistance: float,
+    sentiment: float,
+    sentiment_sma: float,
+    vix_price: Optional[float] = None,
+    pe_relative: Optional[float] = None,
+    prev_prices: Optional[list[float]] = None,
+    prev_sentiments: Optional[list[float]] = None
+) -> dict:
+    score = 0.0
+    checklist = []
+    
+    # 1. Price near support
+    if price and support and price > 0:
+        dist_to_support = (price - support) / price
+        if dist_to_support <= 0.025: # within 2.5% of support
+            score += 3.0
+            checklist.append("Price near support level")
+        elif dist_to_support <= 0.05: # within 5% of support
+            score += 1.5
+            checklist.append("Price approaching support level")
+            
+    # 2. Sentiment momentum (crossover)
+    if sentiment is not None and sentiment_sma is not None:
+        if sentiment > sentiment_sma:
+            if sentiment_sma > 0:
+                score += 3.0
+                checklist.append("Bullish sentiment crossover (above positive SMA)")
+            else:
+                score += 1.5
+                checklist.append("Bullish sentiment crossover (above negative SMA)")
+                
+    # 3. Sentiment-price divergence (price down, sentiment up in recent trailing window)
+    if prev_prices and prev_sentiments and len(prev_prices) >= 3 and len(prev_sentiments) >= 3:
+        price_trend = prev_prices[-1] - prev_prices[0]
+        sentiment_trend = prev_sentiments[-1] - prev_sentiments[0]
+        if price_trend < 0 and sentiment_trend > 0.1:
+            score += 2.0
+            checklist.append("Bullish sentiment divergence (price down, sentiment rising)")
+            
+    # 4. Valuation vs sector benchmark
+    if pe_relative is not None:
+        if pe_relative < 0:
+            score += 2.0
+            checklist.append("Undervalued relative to sector benchmarks")
+        elif pe_relative == 0:
+            score += 1.0
+            checklist.append("Fairly valued relative to sector benchmarks")
+            
+    opportunity_pct = min(100.0, (score / 10.0) * 100.0)
+    
+    # Classification
+    if opportunity_pct >= 75.0:
+        classification = "STRONG BUY"
+        color = "emerald"
+    elif opportunity_pct >= 50.0:
+        classification = "ACCUMULATE"
+        color = "teal"
+    elif opportunity_pct >= 30.0:
+        classification = "HOLD / NEUTRAL"
+        color = "slate"
+    else:
+        classification = "CAUTION / OVERBOUGHT"
+        color = "rose"
+        
+    # Strategy Recommendation
+    strategy = "Hold / Sell Covered Calls"
+    strategy_desc = "Neutral market stance. Capitalize on range-bound behavior using covered call writing."
+    
+    vix = vix_price if vix_price is not None else 15.0
+    
+    if classification in ("STRONG BUY", "ACCUMULATE"):
+        if vix < 15.0:
+            strategy = "Long Call Option (Buy Call)"
+            strategy_desc = "Low volatility regime. Buy outright call options to leverage cheap premium."
+        elif vix <= 22.0:
+            strategy = "Long Shares / Bull Call Spread"
+            strategy_desc = "Moderate volatility. Buy shares directly or use bull call debit spreads."
+        else:
+            strategy = "Sell Put Credit Spreads"
+            strategy_desc = "High volatility regime. Sell put credit spreads to harvest rich premium."
+    elif classification == "CAUTION / OVERBOUGHT":
+        if vix > 22.0:
+            strategy = "Sell Call Credit Spreads"
+            strategy_desc = "High volatility overbought. Sell call credit spreads for fast premium decay."
+        else:
+            strategy = "Protect Longs / Buy Puts"
+            strategy_desc = "Overbought stance. Trim shares or buy puts to hedge downside risk."
+            
+    return {
+        "score": opportunity_pct,
+        "classification": classification,
+        "color": color,
+        "strategy": strategy,
+        "description": strategy_desc,
+        "checklist": checklist
+    }
+
 
 
 def get_db_conn():
@@ -571,6 +686,8 @@ async def get_correlation(
     cutoff = (now - timedelta(hours=hours)).replace(minute=0, second=0, microsecond=0)
     futures_map = primary_futures_map()
     primary_future_symbol = futures_map.get(symbol)
+    pe_relative = None
+    vix_price = 15.0
     
     # Pre-fill hourly buckets to avoid missing hours
     buckets = {}
@@ -590,7 +707,10 @@ async def get_correlation(
             "negativeWeighted": 0.0,
             "totalWeighted": 0.0,
             "sentimentIndex": 0.0,
-            "sentimentSMA": 0.0
+            "sentimentSMA": 0.0,
+            "rawPrice": None,
+            "buySignal": None,
+            "buyScore": None
         }
 
     async with get_db_conn() as conn:
@@ -620,6 +740,7 @@ async def get_correlation(
                         buckets[curr_ts_str]['priceChange'] = ((curr_q['price'] - prev_price) / prev_price) * 100
                     else:
                         buckets[curr_ts_str]['priceChange'] = 0.0
+                    buckets[curr_ts_str]['rawPrice'] = curr_q['price']
                     buckets[curr_ts_str]['isMarketOpen'] = True
 
             # 2. Fetch market quotes for primary future
@@ -721,6 +842,22 @@ async def get_correlation(
                 [symbol]
             )
             latest_quote = await cur.fetchone()
+
+            # 6. Fetch valuation metrics (P/E relative to sector)
+            await cur.execute(
+                "SELECT pe_relative_sector FROM stock_metrics WHERE symbol = %s ORDER BY updated_at DESC LIMIT 1",
+                [symbol]
+            )
+            metrics_row = await cur.fetchone()
+            pe_relative = metrics_row['pe_relative_sector'] if metrics_row else None
+
+            # 7. Fetch VIX quote
+            await cur.execute(
+                "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
+                ["VX=F"]
+            )
+            vix_row = await cur.fetchone()
+            vix_price = vix_row['price'] if vix_row else 15.0
 
     # Post-process sentiment indices
     for b in buckets.values():
@@ -851,6 +988,53 @@ async def get_correlation(
             support_pct = ((support_price - latest_price) / latest_price) * 100
             resistance_pct = ((resistance_price - latest_price) / latest_price) * 100
 
+    # 9. Compute historical buy signals
+    for i in range(len(sorted_data)):
+        bucket_price = sorted_data[i]['rawPrice']
+        
+        # Build trailing 3-hour lists for divergence check
+        prev_prices = []
+        prev_sentiments = []
+        for k in range(max(0, i - 2), i + 1):
+            if sorted_data[k]['rawPrice'] is not None:
+                prev_prices.append(sorted_data[k]['rawPrice'])
+            if sorted_data[k]['sentimentIndex'] is not None:
+                prev_sentiments.append(sorted_data[k]['sentimentIndex'])
+                
+        opp = compute_opportunity(
+            price=bucket_price,
+            support=support_price,
+            resistance=resistance_price,
+            sentiment=sorted_data[i]['sentimentIndex'],
+            sentiment_sma=sorted_data[i]['sentimentSMA'],
+            vix_price=vix_price,
+            pe_relative=pe_relative,
+            prev_prices=prev_prices,
+            prev_sentiments=prev_sentiments
+        )
+        sorted_data[i]['buyScore'] = opp['score']
+        sorted_data[i]['buySignal'] = opp['score'] >= 50.0
+
+    # 10. Compute final current opportunity
+    latest_item = sorted_data[-1] if len(sorted_data) > 0 else None
+    latest_prices = []
+    latest_sentiments = []
+    if len(sorted_data) >= 3:
+        latest_prices = [d['rawPrice'] for d in sorted_data[-3:] if d['rawPrice'] is not None]
+        latest_sentiments = [d['sentimentIndex'] for d in sorted_data[-3:] if d['sentimentIndex'] is not None]
+        
+    current_opp = compute_opportunity(
+        price=latest_item['rawPrice'] if latest_item else None,
+        support=support_price,
+        resistance=resistance_price,
+        sentiment=latest_item['sentimentIndex'] if latest_item else 0.0,
+        sentiment_sma=latest_item['sentimentSMA'] if latest_item else 0.0,
+        vix_price=vix_price,
+        pe_relative=pe_relative,
+        prev_prices=latest_prices,
+        prev_sentiments=latest_sentiments
+    ) if latest_item else None
+
     return {
         "data": sorted_data,
         "closedRegions": actual_closed_regions,
@@ -861,7 +1045,8 @@ async def get_correlation(
         "maxR": max_r,
         "bestLag": best_lag,
         "correlationText": correlation_text,
-        "correlationStrength": correlation_strength
+        "correlationStrength": correlation_strength,
+        "opportunity": current_opp
     }
 
 @app.get("/health")
