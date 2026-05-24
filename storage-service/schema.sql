@@ -28,13 +28,34 @@ CREATE TABLE IF NOT EXISTS stock_quotes (
     price       FLOAT NOT NULL,
     volume      BIGINT NOT NULL,
     market_session TEXT NOT NULL DEFAULT 'closed',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (symbol, timestamp)
 );
 
 CREATE INDEX IF NOT EXISTS stock_quotes_symbol_idx ON stock_quotes (symbol);
 CREATE INDEX IF NOT EXISTS stock_quotes_timestamp_idx ON stock_quotes (timestamp);
 CREATE INDEX IF NOT EXISTS stock_quotes_symbol_timestamp_idx ON stock_quotes (symbol, timestamp DESC);
 CREATE INDEX IF NOT EXISTS stock_quotes_symbol_session_timestamp_idx ON stock_quotes (symbol, market_session, timestamp DESC);
+
+-- Clean up duplicate quotes if they exist before adding the constraint to an existing table
+DELETE FROM stock_quotes a
+USING stock_quotes b
+WHERE a.id > b.id
+  AND a.symbol = b.symbol
+  AND a.timestamp = b.timestamp;
+
+-- Add unique constraint if it doesn't already exist for older installations
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'stock_quotes_symbol_timestamp_key'
+           OR conname = 'unique_symbol_timestamp'
+    ) THEN
+        ALTER TABLE stock_quotes ADD CONSTRAINT unique_symbol_timestamp UNIQUE (symbol, timestamp);
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS stock_metrics (
     symbol                  TEXT PRIMARY KEY,

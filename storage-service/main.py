@@ -142,9 +142,14 @@ async def main():
                         await worker_task
                     except asyncio.CancelledError:
                         pass
-                    # Drain queue
+                    # Drain and nack queue
+                    logger.info(f"Shutting down: nacking {queue.qsize()} buffered messages in local queue...")
                     while not queue.empty():
-                        queue.get_nowait()
+                        try:
+                            message, _ = queue.get_nowait()
+                            await message.nack(requeue=True)
+                        except Exception as e:
+                            logger.error(f"Error nacking message during shutdown: {e}")
 
         except Exception as e:
             logger.error(f"Error in storage consumer connection: {e}. Retrying in 10s...")

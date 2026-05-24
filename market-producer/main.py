@@ -1,6 +1,7 @@
 import time
 import threading
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import pandas_market_calendars as mcal
@@ -152,51 +153,66 @@ def get_market_session(now_utc: datetime) -> str:
     else:
         return 'closed'
 
+
+def fetch_single_quote(symbol: str, now_utc: datetime) -> StockQuote | None:
+    try:
+        # Determine session based on instrument type
+        if symbol.endswith("=F"):
+            current_session = get_futures_session(symbol, now_utc)
+        else:
+            current_session = get_market_session(now_utc)
+            
+        print(f"Fetching {symbol} (Session: {current_session})...")
+        ticker = yf.Ticker(symbol)
+        # Fetch last 1 day of 1-minute data to get the absolute latest close
+        data = ticker.history(period="1d", interval="1m")
+        
+        if data.empty:
+            print(f"Warning: No data returned for {symbol}")
+            return None
+        
+        latest = data.iloc[-1]
+        # Convert pandas Timestamp to UTC datetime
+        ts = data.index[-1].to_pydatetime().astimezone(timezone.utc)
+        
+        try:
+            daily_volume = int(ticker.fast_info.get("lastVolume") or latest["Volume"])
+        except Exception:
+            daily_volume = int(latest["Volume"])
+
+        return StockQuote(
+            symbol=symbol,
+            timestamp=ts,
+            price=float(latest["Close"]),
+            volume=daily_volume,
+            market_session=current_session
+        )
+    except Exception as e:
+        print(f"ERROR fetching {symbol}: {e}")
+        return None
+
+
 def fetch_and_store(db: DB):
     now_utc = datetime.now(timezone.utc)
     
-    for symbol in SYMBOLS:
+    # Run requests concurrently using a ThreadPoolExecutor
+    # max_workers=10 balance speed and resource usage
+    with ThreadPoolExecutor(max_workers=min(len(SYMBOLS), 10)) as executor:
+        quotes = list(executor.map(lambda sym: fetch_single_quote(sym, now_utc), SYMBOLS))
+        
+    # Write to database sequentially to prevent concurrent psycopg connection issues
+    for quote in quotes:
+        if quote is None:
+            continue
         try:
-            # Determine session based on instrument type
-            if symbol.endswith("=F"):
-                current_session = get_futures_session(symbol, now_utc)
-            else:
-                current_session = get_market_session(now_utc)
-                
-            print(f"Fetching {symbol} (Session: {current_session})...")
-            ticker = yf.Ticker(symbol)
-            # Fetch last 1 day of 1-minute data to get the absolute latest close
-            data = ticker.history(period="1d", interval="1m")
-            
-            if data.empty:
-                print(f"Warning: No data returned for {symbol}")
-                continue
-            
-            latest = data.iloc[-1]
-            # Convert pandas Timestamp to UTC datetime
-            ts = data.index[-1].to_pydatetime().astimezone(timezone.utc)
-            
-            try:
-                daily_volume = int(ticker.fast_info.get("lastVolume") or latest["Volume"])
-            except Exception:
-                daily_volume = int(latest["Volume"])
-
-            quote = StockQuote(
-                symbol=symbol,
-                timestamp=ts,
-                price=float(latest["Close"]),
-                volume=daily_volume,
-                market_session=current_session
-            )
-            
             inserted = db.insert_quote(quote)
             if inserted:
-                print(f"SUCCESS: {symbol} at {ts.strftime('%H:%M:%S')} UTC -> ${quote.price:.2f} ({current_session})")
+                print(f"SUCCESS: {quote.symbol} at {quote.timestamp.strftime('%H:%M:%S')} UTC -> ${quote.price:.2f} ({quote.market_session})")
             else:
-                print(f"INFO: {symbol} quote already exists for {ts}")
-                
+                print(f"INFO: {quote.symbol} quote already exists for {quote.timestamp}")
         except Exception as e:
-            print(f"ERROR fetching {symbol}: {e}")
+            print(f"ERROR saving {quote.symbol}: {e}")
+
 
 def run_metrics_in_background():
     def worker():

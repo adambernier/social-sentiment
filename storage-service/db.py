@@ -22,6 +22,7 @@ INSERT_POST_SQL = """
 INSERT_QUOTE_SQL = """
     INSERT INTO stock_quotes (symbol, timestamp, price, volume, market_session)
     VALUES (%s, %s, %s, %s, %s)
+    ON CONFLICT (symbol, timestamp) DO NOTHING
     RETURNING id
 """
 
