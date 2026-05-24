@@ -121,8 +121,11 @@ Useful endpoints once the stack is up:
 - 24h topic stats: http://localhost:8000/stats/topics
 - Financial metrics: http://localhost:8000/stats/metrics?symbol=INTC
 - Live updates (WebSocket): ws://localhost:8000/stats/stream
-- RabbitMQ management UI: http://localhost:15672 (`guest` / `guest`)
-- Postgres: `localhost:5432`, db `sentiment`, user `postgres`, password `sentiment`
+- RabbitMQ management UI: http://localhost:15672 (default development user/password: `guest` / `guest`)
+- Postgres: `localhost:5432` (default development db: `sentiment`, user: `postgres`, password: `sentiment`)
+
+> [!WARNING]
+> The default credentials specified in `docker-compose.yml` are strictly for convenient local development and testing. When deploying to staging or production environments, you **must** override these values. Copy the [.env.example](file:///home/acbernier/social-sentiment/.env.example) template to `.env` in the root directory and supply secure password values. Docker Compose and the Python service config parser will automatically detect and apply the values from your `.env` file.
 
 Tear down:
 ```bash
