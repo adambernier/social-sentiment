@@ -236,4 +236,9 @@ def main():
         time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
-    main()
+    from shared.runtime import install_sigterm_handler
+    install_sigterm_handler()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Market producer stopped.")

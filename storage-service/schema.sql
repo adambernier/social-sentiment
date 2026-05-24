@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS stock_quotes (
 
 CREATE INDEX IF NOT EXISTS stock_quotes_symbol_idx ON stock_quotes (symbol);
 CREATE INDEX IF NOT EXISTS stock_quotes_timestamp_idx ON stock_quotes (timestamp);
+CREATE INDEX IF NOT EXISTS stock_quotes_symbol_timestamp_idx ON stock_quotes (symbol, timestamp DESC);
+CREATE INDEX IF NOT EXISTS stock_quotes_symbol_session_timestamp_idx ON stock_quotes (symbol, market_session, timestamp DESC);
 
 CREATE TABLE IF NOT EXISTS stock_metrics (
     symbol                  TEXT PRIMARY KEY,

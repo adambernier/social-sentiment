@@ -109,7 +109,5 @@ async def main():
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Service stopped by user.")
+    from shared.runtime import run
+    run(main, name="bluesky-producer")

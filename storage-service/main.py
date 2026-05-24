@@ -152,7 +152,5 @@ async def main():
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Service stopped.")
+    from shared.runtime import run
+    run(main, name="storage-service")

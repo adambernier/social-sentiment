@@ -113,7 +113,5 @@ async def main():
             await asyncio.sleep(10)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Service stopped.")
+    from shared.runtime import run
+    run(main, name="stocktwits-producer")
