@@ -422,7 +422,7 @@ export default function Dashboard() {
         </header>
 
         {/* Telemetry Bento Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-10 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
               <div className="bg-white/5 backdrop-blur-md border border-white/5 rounded-2xl p-4 hover:bg-white/10 transition-colors col-span-1">
                 <div className="flex items-center gap-2 text-slate-400 mb-2">
                   <MessageSquare className="w-4 h-4" />
@@ -500,7 +500,7 @@ export default function Dashboard() {
               </div>
 
               {/* Pearson Correlation Card */}
-              <div className="bg-white/5 backdrop-blur-md border border-indigo-500/20 rounded-2xl p-4 hover:bg-white/10 transition-colors col-span-2 flex flex-col justify-between relative overflow-hidden">
+              <div className="bg-white/5 backdrop-blur-md border border-indigo-500/20 rounded-2xl p-4 hover:bg-white/10 transition-colors col-span-2 md:col-span-4 lg:col-span-2 flex flex-col justify-between relative overflow-hidden">
                 <div className="absolute top-0 right-0 p-4 opacity-10"><Activity className="w-12 h-12 text-indigo-500" /></div>
                 <div className="flex items-center gap-2 text-indigo-400 mb-1">
                   <Zap className="w-3.5 h-3.5" />
