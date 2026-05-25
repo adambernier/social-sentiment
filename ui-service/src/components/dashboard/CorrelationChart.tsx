@@ -113,7 +113,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
           <ComposedChart 
             data={correlationData.data} 
             margin={{ top: 10, right: 10, bottom: 0, left: -20 }}
-            onClick={(e) => {
+            onClick={(e: any) => {
               // Recharts passes the chart state. We can use activeLabel or activePayload
               const ts = e?.activePayload?.[0]?.payload?.timestamp || e?.activeLabel;
               if (ts) {
