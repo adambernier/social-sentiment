@@ -17,6 +17,24 @@ export function useDashboardData() {
   const [selectedHour, setSelectedHour] = useState<string | null>(null);
   const [drillDownPosts, setDrillDownPosts] = useState<Post[]>([]);
   const [isDrillDownLoading, setIsDrillDownLoading] = useState(false);
+  const [hasHydrated, setHasHydrated] = useState(false);
+  
+  // Persist symbol across reloads
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const savedSymbol = localStorage.getItem('social_sentiment_symbol');
+      if (savedSymbol) {
+        setSymbol(savedSymbol);
+      }
+      setHasHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (hasHydrated) {
+      localStorage.setItem('social_sentiment_symbol', symbol);
+    }
+  }, [symbol, hasHydrated]);
   
   // States
   const [posts, setPosts] = useState<Post[]>([]);
