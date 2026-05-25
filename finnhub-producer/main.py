@@ -20,13 +20,16 @@ from shared.config import (
     get_env_int,
 )
 from shared.schemas import RawPost
-from shared.symbols import tickers
+from shared.symbols import tickers, match_symbol
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("finnhub-producer")
+# httpx logs each request URL at INFO, which includes the ?token=... API key.
+# Quiet it so the key never lands in the logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Finnhub's free tier allows ~60 req/min; 10 symbols every 15 min is comfortable.
 # News is slow-moving, so a long interval also keeps duplicate re-fetches low.
@@ -67,6 +70,7 @@ async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio
             return False
 
         new_count = 0
+        skipped = 0
         for art in articles:
             art_id = art.get("id")
             if art_id is None:
@@ -79,6 +83,16 @@ async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio
             summary = (art.get("summary") or "").strip()
             full_text = f"{headline}. {summary}" if summary else headline
             if not full_text.strip():
+                continue
+
+            # Finnhub's per-symbol feed is broad — lots of generic market/ETF
+            # content that merely co-occurs with the ticker. Keep only articles that
+            # actually name the company, using the same high-precision matcher the
+            # social producers rely on. Mark skipped ids seen so we don't recheck
+            # them every poll.
+            if not match_symbol(full_text, symbol):
+                seen_ids.add(post_id)
+                skipped += 1
                 continue
 
             try:
@@ -106,8 +120,8 @@ async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio
             seen_ids.add(post_id)
             new_count += 1
 
-        if new_count > 0:
-            logger.info(f"Symbol '{symbol}': Published {new_count} new articles.")
+        if new_count or skipped:
+            logger.info(f"Symbol '{symbol}': published {new_count}, skipped {skipped} off-topic.")
         return False
 
     except Exception as e:
