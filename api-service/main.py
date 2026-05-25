@@ -137,6 +137,14 @@ class LeaderboardEntry(BaseModel):
     baseline_hourly: float
     baseline_samples: int
 
+class SourceHealth(BaseModel):
+    platform: str
+    posts_1h: int
+    posts_24h: int
+    last_ingest: Optional[datetime] = None
+    age_seconds: Optional[float] = None
+    status: str  # "active" | "quiet" | "silent"
+
 class MarketQuote(BaseModel):
     symbol: str
     timestamp: datetime
@@ -491,6 +499,56 @@ async def get_topic_stats(
         async with conn.cursor() as cur:
             await cur.execute(query, params)
             return await cur.fetchall()
+
+# Post-producing data sources we expect to be ingesting. Surfaced read-only so a
+# dead/blocked source (e.g. a rate-limited news feed) is obvious at a glance.
+INGESTION_SOURCES = ["bluesky", "reddit", "stocktwits", "yahoo", "finnhub"]
+
+@app.get("/stats/sources", response_model=list[SourceHealth])
+async def get_source_health():
+    """Read-only ingestion health per source: recency + volume from `posts`.
+
+    status is descriptive, not a hard up/down verdict:
+      • active — at least one post in the last hour
+      • quiet  — none in the last hour but some in 24h (normal for low-volume news)
+      • silent — nothing in 24h (a dead/blocked source, e.g. Yahoo when rate-limited)
+    True producer up/down and rate-limit counters live in Prometheus/Grafana; this
+    answers the product question "is each source still delivering data?".
+    """
+    query = """
+        SELECT platform,
+               COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 hour')   AS posts_1h,
+               COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '24 hours') AS posts_24h,
+               MAX(timestamp) AS last_ingest
+        FROM posts
+        WHERE platform = ANY(%s) AND timestamp > NOW() - INTERVAL '7 days'
+        GROUP BY platform
+    """
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, [INGESTION_SOURCES])
+            rows = {r["platform"]: r for r in await cur.fetchall()}
+
+    now = datetime.now(timezone.utc)
+    out = []
+    for platform in INGESTION_SOURCES:
+        r = rows.get(platform)
+        posts_1h = r["posts_1h"] if r else 0
+        posts_24h = r["posts_24h"] if r else 0
+        last_ingest = r["last_ingest"] if r else None
+        status = "active" if posts_1h > 0 else "quiet" if posts_24h > 0 else "silent"
+        out.append(SourceHealth(
+            platform=platform,
+            posts_1h=posts_1h,
+            posts_24h=posts_24h,
+            last_ingest=last_ingest,
+            age_seconds=(now - last_ingest).total_seconds() if last_ingest else None,
+            status=status,
+        ))
+    # Surface problem sources first (silent, then quiet, then active by volume).
+    rank = {"silent": 0, "quiet": 1, "active": 2}
+    out.sort(key=lambda s: (rank[s.status], -s.posts_24h))
+    return out
 
 # Minimum number of historical hourly samples before a buzz z-score is trusted.
 # Below this the stddev is too noisy to be meaningful, so buzz_z is returned None.

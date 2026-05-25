@@ -5,6 +5,14 @@ export interface Post {
   engagement: number;
 }
 export interface SentimentStat { sentiment: string; count: number; }
+export interface SourceHealth {
+  platform: string;
+  posts_1h: number;
+  posts_24h: number;
+  last_ingest: string | null;
+  age_seconds: number | null;
+  status: "active" | "quiet" | "silent";
+}
 export interface TopicStat { topic_label: string | null; count: number; }
 export interface LeaderboardEntry { symbol: string; post_count_4h: number; sentiment_index_4h: number; buzz_z: number | null; baseline_hourly: number; baseline_samples: number; }
 export interface MarketQuote { timestamp: string; price: number; volume: number; market_session: string; }
