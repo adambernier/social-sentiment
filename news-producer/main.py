@@ -19,6 +19,8 @@ from shared.config import (
     RABBIT_PORT,
     RABBIT_USER,
     QUEUE_RAW_POSTS,
+    get_env,
+    get_env_int,
 )
 from shared.schemas import RawPost
 from shared.symbols import tickers
@@ -29,18 +31,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger("news-producer")
 
-POLL_INTERVAL = 60  # 1 minute
+# News changes slowly, so poll gently. The previous 60s cadence across 10 symbols
+# (~600 req/hr) with a default user-agent got the IP rate-limited (HTTP 429) by
+# Yahoo, which halted ingestion entirely. Default 15 min; tune via env.
+POLL_INTERVAL = get_env_int("NEWS_POLL_INTERVAL", 900)
+# When throttled, exponentially back off (up to this cap) so we stop hammering and
+# let Yahoo's rate limit reset instead of staying blocked.
+MAX_BACKOFF = get_env_int("NEWS_MAX_BACKOFF", 3600)
+# Yahoo 429s the default httpx user-agent outright; a browser-like UA is required.
+USER_AGENT = get_env(
+    "NEWS_USER_AGENT",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+)
+REQUEST_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+}
 
-async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio_pika.Channel, seen_links: set):
+async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio_pika.Channel, seen_links: set) -> bool:
+    """Fetch and publish new headlines for one symbol.
+
+    Returns True if the request was rate-limited (HTTP 429), so the caller can
+    back off; False otherwise.
+    """
     try:
-        # Add a small random jitter to avoid hitting Yahoo all at once
-        await asyncio.sleep(random.uniform(0.5, 3.0))
-        
-        url = f"https://finance.yahoo.com/rss/headline?s={symbol}"
-        response = await client.get(url, timeout=10)
+        # Spread requests over several seconds so the batch isn't a burst.
+        await asyncio.sleep(random.uniform(0.5, 8.0))
+
+        # Hit the canonical feed host directly. finance.yahoo.com/rss/headline
+        # 301-redirects here; going direct avoids the extra round-trip (the client
+        # also follows redirects as a safety net).
+        url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
+        response = await client.get(url)
+        if response.status_code == 429:
+            logger.warning(f"Rate limited (429) fetching news for {symbol}")
+            return True
         if response.status_code != 200:
             logger.error(f"Error fetching news for {symbol}: {response.status_code}")
-            return
+            return False
 
         # Use feedparser on the response content
         feed = feedparser.parse(response.text)
@@ -84,9 +112,11 @@ async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio
 
         if new_count > 0:
             logger.info(f"Symbol '{symbol}': Published {new_count} new headlines.")
-            
+        return False
+
     except Exception as e:
         logger.error(f"Error processing symbol {symbol}: {e}")
+        return False
 
 async def main():
     logger.info("Starting Yahoo Finance News Async Polling Producer...")
@@ -104,20 +134,37 @@ async def main():
                 channel = await connection.channel()
                 await channel.declare_queue(QUEUE_RAW_POSTS, durable=True)
 
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(
+                    headers=REQUEST_HEADERS, follow_redirects=True, timeout=10
+                ) as client:
+                    backoff = POLL_INTERVAL
                     while True:
                         tasks = [fetch_symbol_news(symbol, client, channel, seen_links) for symbol in symbols]
-                        await asyncio.gather(*tasks)
+                        results = await asyncio.gather(*tasks)
+                        rate_limited = any(results)
 
                         # Keep seen_links from growing infinitely (keep last 500)
                         if len(seen_links) > 500:
-                            # Note: set is unordered, so this is a bit arbitrary, 
+                            # Note: set is unordered, so this is a bit arbitrary,
                             # but fine for duplicate prevention in a rolling window.
                             l = list(seen_links)
                             seen_links = set(l[-500:])
 
-                        logger.info(f"Batch complete. Sleeping for {POLL_INTERVAL} seconds...")
-                        await asyncio.sleep(POLL_INTERVAL)
+                        # Exponential backoff while throttled; reset once requests
+                        # go through, so a transient limit doesn't slow us forever.
+                        if rate_limited:
+                            backoff = min(backoff * 2, MAX_BACKOFF)
+                            logger.warning(
+                                f"Throttled by Yahoo (429). Backing off for {backoff}s "
+                                "to let the rate limit reset."
+                            )
+                        else:
+                            if backoff != POLL_INTERVAL:
+                                logger.info("Requests succeeding again; resetting poll interval.")
+                            backoff = POLL_INTERVAL
+
+                        logger.info(f"Batch complete. Sleeping for {backoff} seconds...")
+                        await asyncio.sleep(backoff)
 
         except Exception as e:
             logger.error(f"Error in main loop: {e}. Retrying in 10s...")
