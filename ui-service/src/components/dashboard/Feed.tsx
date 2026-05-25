@@ -6,8 +6,8 @@ import { platformColors, platformLabels, topicColors } from "./constants";
 import { DashboardDataProps } from "../types";
 
 export default function Feed({ state, setters, computed }: DashboardDataProps) {
-  const { feedTab } = state;
-  const { setFeedTab } = setters;
+  const { feedTab, selectedHour, isDrillDownLoading } = state;
+  const { setFeedTab, setSelectedHour } = setters;
   const { filteredFeedPosts } = computed;
 
   return (
@@ -38,10 +38,25 @@ export default function Feed({ state, setters, computed }: DashboardDataProps) {
               {feedTab === "news" && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 rounded-full"></div>}
             </button>
           </div>
-          <div className="text-xs text-slate-400">Showing last {filteredFeedPosts.length} items</div>
+          <div className="text-xs text-slate-400 flex items-center gap-3">
+            {selectedHour && (
+              <span className="bg-indigo-500/20 text-indigo-300 px-2 py-1 rounded border border-indigo-500/30 flex items-center gap-2">
+                Viewing {format(new Date(selectedHour), "h:mm a")} - {format(new Date(new Date(selectedHour).getTime() + 60*60*1000), "h:mm a")}
+                <button onClick={() => setSelectedHour(null)} className="hover:text-white transition-colors cursor-pointer px-1">✕</button>
+              </span>
+            )}
+            Showing {filteredFeedPosts.length} items
+          </div>
         </div>
-        <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
-          {filteredFeedPosts.map((post: any, idx: number) => (
+        
+        {isDrillDownLoading ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-slate-500">
+            <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+            Loading historical posts...
+          </div>
+        ) : (
+          <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+            {filteredFeedPosts.map((post: any, idx: number) => (
             <div key={idx} className="bg-white/5 border border-white/5 rounded-xl p-3 text-sm hover:bg-white/10 transition-colors">
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2 flex-wrap">
@@ -64,10 +79,11 @@ export default function Feed({ state, setters, computed }: DashboardDataProps) {
               <p className="text-slate-300 leading-relaxed">{post.text}</p>
             </div>
           ))}
-          {filteredFeedPosts.length === 0 && (
-            <div className="text-center text-slate-500 mt-10">No items found for this time window.</div>
-          )}
-        </div>
+            {filteredFeedPosts.length === 0 && (
+              <div className="text-center text-slate-500 mt-10">No items found for this time window.</div>
+            )}
+          </div>
+        )}
       </section>
     </div>
   );

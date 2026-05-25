@@ -14,6 +14,9 @@ export function useDashboardData() {
   const [showSR, setShowSR] = useState(true);
   const [feedTab, setFeedTab] = useState<"social" | "news">("social");
   const [chartView, setChartView] = useState<"volume" | "sentiment">("volume");
+  const [selectedHour, setSelectedHour] = useState<string | null>(null);
+  const [drillDownPosts, setDrillDownPosts] = useState<Post[]>([]);
+  const [isDrillDownLoading, setIsDrillDownLoading] = useState(false);
   
   // States
   const [posts, setPosts] = useState<Post[]>([]);
@@ -115,6 +118,31 @@ export function useDashboardData() {
     return () => ws.close();
   }, [symbol, platform, wsBase]);
 
+  useEffect(() => {
+    if (!selectedHour) {
+      setDrillDownPosts([]);
+      return;
+    }
+    const fetchDrillDown = async () => {
+      setIsDrillDownLoading(true);
+      try {
+        const start = new Date(selectedHour);
+        const end = new Date(start.getTime() + 60 * 60 * 1000);
+        const platformParam = platform !== 'all' ? `&platform=${platform}` : '';
+        const res = await fetch(`${apiBase}/posts?symbol=${symbol}&start_time=${start.toISOString()}&end_time=${end.toISOString()}${platformParam}&limit=1000`);
+        if (res.ok) {
+          const data = await res.json();
+          setDrillDownPosts(data || []);
+        }
+      } catch (err) {
+        console.error("Failed to fetch historical posts", err);
+      } finally {
+        setIsDrillDownLoading(false);
+      }
+    };
+    fetchDrillDown();
+  }, [selectedHour, symbol, platform, apiBase]);
+
   const totalMentions = sentimentStats.reduce((sum, s) => sum + s.count, 0);
   const bullishCount = sentimentStats.find(s => s.sentiment === "positive")?.count || 0;
   const bearishCount = sentimentStats.find(s => s.sentiment === "negative")?.count || 0;
@@ -177,7 +205,8 @@ export function useDashboardData() {
   }, [metrics]);
 
   const filteredFeedPosts = useMemo(() => {
-    let list = posts.filter(p => feedTab === 'news' ? isNewsPlatform(p.platform) : !isNewsPlatform(p.platform));
+    const sourcePosts = selectedHour ? drillDownPosts : posts;
+    let list = sourcePosts.filter(p => feedTab === 'news' ? isNewsPlatform(p.platform) : !isNewsPlatform(p.platform));
     if (selectedTopic !== "all") {
       if (selectedTopic === "General / Outlier") {
         list = list.filter(p => p.topic_label === "General / Outlier" || !p.topic_label);
@@ -186,7 +215,7 @@ export function useDashboardData() {
       }
     }
     return list;
-  }, [posts, feedTab, selectedTopic]);
+  }, [posts, drillDownPosts, selectedHour, feedTab, selectedTopic]);
 
   const totalTopicCount = topicStats.reduce((sum, t) => sum + t.count, 0);
   const sortedTopics = useMemo(() => {
@@ -198,10 +227,10 @@ export function useDashboardData() {
       symbol, hours, platform, selectedTopic, isConnected, showSR, feedTab, chartView,
       posts, sentimentStats, topicStats, leaderboard, marketData, metrics,
       latestQuote, primaryDelta, futureSymbol, futureQuote, futureDelta, futureMarketData,
-      vixQuote, correlationData
+      vixQuote, correlationData, selectedHour, isDrillDownLoading
     },
     setters: {
-      setSymbol, setHours, setPlatform, setSelectedTopic, setShowSR, setFeedTab, setChartView
+      setSymbol, setHours, setPlatform, setSelectedTopic, setShowSR, setFeedTab, setChartView, setSelectedHour
     },
     computed: {
       totalMentions, bullishPct, bearishPct, marketSession, divergenceStatus,

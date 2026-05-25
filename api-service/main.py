@@ -400,6 +400,8 @@ async def get_posts(
     symbol: Optional[str] = None,
     platform: Optional[str] = None,
     sentiment: Optional[str] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
     limit: int = Query(20, le=1000),
     offset: int = Query(0, ge=0)
 ):
@@ -416,6 +418,12 @@ async def get_posts(
     if sentiment:
         conditions.append("sentiment = %s")
         params.append(sentiment)
+    if start_time:
+        conditions.append("timestamp >= %s")
+        params.append(start_time)
+    if end_time:
+        conditions.append("timestamp < %s")
+        params.append(end_time)
 
     if conditions:
         query += " WHERE " + " AND ".join(conditions)

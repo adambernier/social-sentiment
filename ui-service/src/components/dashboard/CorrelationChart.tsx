@@ -6,8 +6,10 @@ import { cn } from "./utils";
 import { DashboardDataProps } from "../types";
 
 const CustomizedOpportunityDot = (props: any) => {
-  const { cx, cy, payload } = props;
-  if (!payload || !payload.buySignal) return null;
+  const { cx, cy, payload, value } = props;
+  // If there's no valid price data (null value) or no signal, don't render the dot.
+  // This prevents dots from floating at the top (cy=0) when markets are closed.
+  if (!payload || !payload.buySignal || value == null) return null;
   return (
     <g key={`buy-dot-${payload.timestamp}`}>
       <circle 
@@ -20,8 +22,8 @@ const CustomizedOpportunityDot = (props: any) => {
 };
 
 export default function CorrelationChart({ state, setters }: DashboardDataProps) {
-  const { symbol, hours, chartView, correlationData, showSR } = state;
-  const { setChartView } = setters;
+  const { symbol, hours, chartView, correlationData, showSR, selectedHour } = state;
+  const { setChartView, setSelectedHour } = setters;
 
   const formatXAxis = (t: string) => {
     if (hours <= 24) return format(new Date(t), "h:mm a");
@@ -108,7 +110,16 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
       </div>
       <div className="h-[400px]">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={correlationData.data} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
+          <ComposedChart 
+            data={correlationData.data} 
+            margin={{ top: 10, right: 10, bottom: 0, left: -20 }}
+            onClick={(e) => {
+              if (e?.activePayload?.[0]?.payload?.timestamp) {
+                setSelectedHour(e.activePayload[0].payload.timestamp);
+              }
+            }}
+            style={{ cursor: 'pointer' }}
+          >
             <defs>
               <linearGradient id="sentimentGrad" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="#818cf8" stopOpacity={0.25}/>
@@ -121,6 +132,10 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
             {correlationData.closedRegions.map((region: any, idx: number) => (
               <ReferenceArea key={idx} x1={region.start} x2={region.end} fill="#0f172a" fillOpacity={0.6} yAxisId="left" />
             ))}
+
+            {selectedHour && (
+              <ReferenceArea x1={selectedHour} x2={selectedHour} fill="#818cf8" fillOpacity={0.2} yAxisId="left" />
+            )}
             
             <XAxis 
               dataKey="timestamp" tickFormatter={formatXAxis} stroke="#64748b" tickLine={false} axisLine={false} dy={10} minTickGap={40} tick={{ fontSize: 12 }}
