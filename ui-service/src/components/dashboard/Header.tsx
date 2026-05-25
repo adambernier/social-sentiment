@@ -4,7 +4,7 @@ import { cn } from "./utils";
 import { DashboardDataProps } from "../types";
 
 export default function Header({ state, setters, computed }: DashboardDataProps) {
-  const { symbol, hours, platform, selectedTopic, isConnected, showSR } = state;
+  const { symbol, hours, platform, selectedTopic, isConnected, showSR, leaderboard } = state;
   const { setSymbol, setHours, setPlatform, setSelectedTopic, setShowSR } = setters;
   const { marketSession } = computed;
 
@@ -36,16 +36,16 @@ export default function Header({ state, setters, computed }: DashboardDataProps)
           onChange={(e) => setSymbol(e.target.value)}
           className="bg-slate-900/80 border border-white/10 text-white text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block px-4 py-2 outline-none backdrop-blur-md cursor-pointer transition-colors hover:bg-slate-800"
         >
-          <option value="AMD">AMD</option>
-          <option value="ASTS">ASTS</option>
-          <option value="CRWV">CRWV</option>
-          <option value="INTC">INTC</option>
-          <option value="IREN">IREN</option>
-          <option value="MU">MU</option>
-          <option value="NVDA">NVDA</option>
-          <option value="RKLB">RKLB</option>
-          <option value="SMCI">SMCI</option>
-          <option value="SMH">SMH</option>
+          {leaderboard && leaderboard.length > 0 ? (
+            leaderboard
+              .slice()
+              .sort((a, b) => a.symbol.localeCompare(b.symbol))
+              .map((item) => (
+                <option key={item.symbol} value={item.symbol}>{item.symbol}</option>
+              ))
+          ) : (
+            <option value={symbol}>{symbol}</option>
+          )}
         </select>
         <select 
           value={hours}

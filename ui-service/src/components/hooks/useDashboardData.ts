@@ -26,6 +26,7 @@ export function useDashboardData() {
   const [marketData, setMarketData] = useState<MarketQuote[]>([]);
   const [metrics, setMetrics] = useState<MetricsData | null>(null);
   
+  const [hasSetDefaultHours, setHasSetDefaultHours] = useState(false);
   const [latestQuote, setLatestQuote] = useState<MarketQuote | null>(null);
   const [primaryDelta, setPrimaryDelta] = useState<DeltaData | null>(null);
   const [futureSymbol, setFutureSymbol] = useState<string | null>(null);
@@ -142,6 +143,15 @@ export function useDashboardData() {
     };
     fetchDrillDown();
   }, [selectedHour, symbol, platform, apiBase]);
+
+  useEffect(() => {
+    if (!hasSetDefaultHours && latestQuote) {
+      if (latestQuote.market_session !== 'regular') {
+        setHours(168);
+      }
+      setHasSetDefaultHours(true);
+    }
+  }, [latestQuote, hasSetDefaultHours]);
 
   const totalMentions = sentimentStats.reduce((sum, s) => sum + s.count, 0);
   const bullishCount = sentimentStats.find(s => s.sentiment === "positive")?.count || 0;
