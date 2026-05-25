@@ -16,7 +16,7 @@ from pydantic import BaseModel
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.config import DATABASE_DSN
-from shared.symbols import primary_futures_map
+from shared.symbols import primary_futures_map, tickers
 
 
 # Global pool instance
@@ -121,6 +121,19 @@ class TopicStats(BaseModel):
 class SentimentStats(BaseModel):
     sentiment: str
     count: int
+
+class LeaderboardEntry(BaseModel):
+    symbol: str
+    post_count_4h: int
+    sentiment_index_4h: float
+    # How unusual the current posting rate is, in standard deviations above the
+    # symbol's own typical rate *for these hours of day* (trailing 7d). Variance-
+    # aware (a noisy ticker needs a bigger jump) and time-of-day matched (so active
+    # hours aren't systematically flagged). None when the baseline has too few
+    # samples to be meaningful. baseline_hourly/_samples are exposed for context.
+    buzz_z: Optional[float] = None
+    baseline_hourly: float
+    baseline_samples: int
 
 class MarketQuote(BaseModel):
     symbol: str
@@ -467,6 +480,103 @@ async def get_topic_stats(
     async with get_db_conn() as conn:
         async with conn.cursor() as cur:
             await cur.execute(query, params)
+            return await cur.fetchall()
+
+# Minimum number of historical hourly samples before a buzz z-score is trusted.
+# Below this the stddev is too noisy to be meaningful, so buzz_z is returned None.
+LEADERBOARD_MIN_BASELINE_HOURS = 8
+
+@app.get("/stats/leaderboard", response_model=list[LeaderboardEntry])
+async def get_leaderboard():
+    """Cross-symbol discovery: how unusual each tracked ticker's chatter is right now.
+
+    buzz_z = (current posts/hour − μ) / σ, where μ/σ are the mean and standard
+    deviation of hourly post counts over the trailing 7d, restricted to the same
+    hours-of-day the current 4h window spans. Two properties matter:
+      • Variance-aware — a normally-noisy ticker (large σ) needs a bigger jump to
+        score high, so small-count spikes don't read as "buzzing."
+      • Time-of-day matched — comparing only like hours-of-day removes the upward
+        bias of an all-hours baseline (overnight/weekends drag the mean down and
+        make any active-hours window look elevated).
+    The baseline unions the hot tier (`posts`) with the cold tier
+    (`hourly_sentiment_agg`), preferring the aggregate when an hour is in both, so
+    it stays stable across the ~7d post-retention horizon. All tracked symbols are
+    always returned (so the panel never looks empty); buzz_z is None when the
+    baseline has fewer than %s matching samples.
+    """
+    query = """
+        WITH universe AS (
+            SELECT unnest(%s::text[]) AS symbol
+        ),
+        -- Hours-of-day the current 4h window touches, for like-for-like matching.
+        target_hours AS (
+            SELECT DISTINCT extract(hour FROM gs)::int AS hod
+            FROM generate_series(
+                date_trunc('hour', NOW() - INTERVAL '4 hours'),
+                date_trunc('hour', NOW()),
+                INTERVAL '1 hour'
+            ) gs
+        ),
+        current_stats AS (
+            SELECT
+                symbol,
+                COUNT(*) AS post_count_4h,
+                (SUM(CASE WHEN sentiment = 'positive' THEN 1 ELSE 0 END)
+                 - SUM(CASE WHEN sentiment = 'negative' THEN 1 ELSE 0 END))::float
+                  / NULLIF(COUNT(*), 0) AS sentiment_index_4h
+            FROM posts
+            WHERE timestamp >= NOW() - INTERVAL '4 hours'
+            GROUP BY symbol
+        ),
+        hourly_union AS (
+            SELECT symbol, bucket_hour AS h,
+                   (positive_count + neutral_count + negative_count)::float AS c, 1 AS src
+            FROM hourly_sentiment_agg
+            WHERE bucket_hour >= NOW() - INTERVAL '7 days'
+              AND bucket_hour <  NOW() - INTERVAL '4 hours'
+            UNION ALL
+            SELECT symbol, date_trunc('hour', timestamp) AS h, COUNT(*)::float AS c, 2 AS src
+            FROM posts
+            WHERE timestamp >= NOW() - INTERVAL '7 days'
+              AND timestamp <  NOW() - INTERVAL '4 hours'
+            GROUP BY symbol, date_trunc('hour', timestamp)
+        ),
+        hourly_dedup AS (
+            -- One row per (symbol, hour); src=1 (cold aggregate) wins over src=2 (raw)
+            -- so a partially-pruned hour isn't double-counted.
+            SELECT DISTINCT ON (symbol, h) symbol, h, c
+            FROM hourly_union
+            ORDER BY symbol, h, src
+        ),
+        baseline AS (
+            -- Mean/stddev of hourly counts, only for matching hours-of-day.
+            SELECT d.symbol,
+                   AVG(d.c) AS mu_hourly,
+                   COALESCE(STDDEV_SAMP(d.c), 0) AS sd_hourly,
+                   COUNT(*) AS n_hours
+            FROM hourly_dedup d
+            WHERE extract(hour FROM d.h)::int IN (SELECT hod FROM target_hours)
+            GROUP BY d.symbol
+        )
+        SELECT
+            u.symbol,
+            COALESCE(c.post_count_4h, 0) AS post_count_4h,
+            COALESCE(c.sentiment_index_4h, 0.0) AS sentiment_index_4h,
+            CASE
+                WHEN b.sd_hourly IS NULL OR b.sd_hourly = 0
+                  OR COALESCE(b.n_hours, 0) < %s THEN NULL
+                ELSE ((COALESCE(c.post_count_4h, 0) / 4.0) - b.mu_hourly) / b.sd_hourly
+            END AS buzz_z,
+            COALESCE(b.mu_hourly, 0.0) AS baseline_hourly,
+            COALESCE(b.n_hours, 0) AS baseline_samples
+        FROM universe u
+        LEFT JOIN current_stats c ON u.symbol = c.symbol
+        LEFT JOIN baseline b ON u.symbol = b.symbol
+        ORDER BY buzz_z DESC NULLS LAST, post_count_4h DESC, u.symbol;
+    """
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, [tickers(), LEADERBOARD_MIN_BASELINE_HOURS])
             return await cur.fetchall()
 
 @app.get("/stats/market", response_model=list[MarketQuote])

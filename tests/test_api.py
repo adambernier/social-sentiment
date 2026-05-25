@@ -120,6 +120,37 @@ def test_topic_stats_endpoint(mock_db):
         assert data[0]["topic_label"] == "Earnings & Guidance"
         assert data[0]["count"] == 8
 
+def test_leaderboard_endpoint(mock_db):
+    # The endpoint runs a single query and returns the rows as-is; the SQL itself
+    # (time-matched z-score, cold/hot baseline union, all-symbols seed) is validated
+    # against a live DB, so here we confirm the wiring + response_model coercion,
+    # including the nullable buzz_z for a too-sparse baseline.
+    mock_rows = [
+        {"symbol": "IREN", "post_count_4h": 60, "sentiment_index_4h": 0.58, "buzz_z": 2.40, "baseline_hourly": 5.0, "baseline_samples": 13},
+        {"symbol": "NVDA", "post_count_4h": 137, "sentiment_index_4h": 0.08, "buzz_z": -0.80, "baseline_hourly": 144.0, "baseline_samples": 29},
+        {"symbol": "INTC", "post_count_4h": 0, "sentiment_index_4h": 0.0, "buzz_z": None, "baseline_hourly": 0.0, "baseline_samples": 0},
+    ]
+    mock_db.execute = AsyncMock()
+    mock_db.fetchall = AsyncMock(return_value=mock_rows)
+
+    with TestClient(app) as client:
+        response = client.get("/stats/leaderboard")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 3
+        # Columns map onto the model fields.
+        assert set(data[0].keys()) == {"symbol", "post_count_4h", "sentiment_index_4h", "buzz_z", "baseline_hourly", "baseline_samples"}
+        assert data[0]["symbol"] == "IREN"
+        assert data[0]["buzz_z"] == pytest.approx(2.40)
+        # A symbol with too few baseline samples returns None (not 0.0) for buzz_z.
+        assert data[2]["symbol"] == "INTC"
+        assert data[2]["buzz_z"] is None
+        assert data[2]["post_count_4h"] == 0
+        # The endpoint seeds the universe from tracked symbols and passes the
+        # min-baseline-hours guard as the second query param.
+        called_args = mock_db.execute.call_args[0]
+        assert called_args[1] == [api_main.tickers(), api_main.LEADERBOARD_MIN_BASELINE_HOURS]
+
 def test_correlation_endpoint(mock_db):
     now = datetime.now(timezone.utc)
     now_hour = now.replace(minute=0, second=0, microsecond=0)

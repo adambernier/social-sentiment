@@ -34,6 +34,7 @@ interface Post {
 }
 interface SentimentStat { sentiment: string; count: number; }
 interface TopicStat { topic_label: string | null; count: number; }
+interface LeaderboardEntry { symbol: string; post_count_4h: number; sentiment_index_4h: number; buzz_z: number | null; baseline_hourly: number; baseline_samples: number; }
 interface MarketQuote { timestamp: string; price: number; volume: number; market_session: string; }
 interface DeltaData { reference_price: number; latest_price: number; pct_change: number; abs_change: number; }
 interface MetricsData {
@@ -151,6 +152,7 @@ export default function Dashboard() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [sentimentStats, setSentimentStats] = useState<SentimentStat[]>([]);
   const [topicStats, setTopicStats] = useState<TopicStat[]>([]);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [marketData, setMarketData] = useState<MarketQuote[]>([]);
   const [metrics, setMetrics] = useState<MetricsData | null>(null);
   
@@ -183,9 +185,10 @@ export default function Dashboard() {
       try {
         const platformParam = platform !== 'all' ? `&platform=${platform}` : '';
         const topicParam = selectedTopic !== 'all' ? `&topic=${encodeURIComponent(selectedTopic)}` : '';
-        const [dashRes, corrRes] = await Promise.all([
+        const [dashRes, corrRes, leaderRes] = await Promise.all([
           fetch(`${apiBase}/stats/dashboard?symbol=${symbol}&hours=${hours}${platformParam}`),
-          fetch(`${apiBase}/stats/correlation?symbol=${symbol}&hours=${hours}${platformParam}${topicParam}`)
+          fetch(`${apiBase}/stats/correlation?symbol=${symbol}&hours=${hours}${platformParam}${topicParam}`),
+          fetch(`${apiBase}/stats/leaderboard`)
         ]);
         if (dashRes.ok) {
           const data = await dashRes.json();
@@ -205,6 +208,9 @@ export default function Dashboard() {
         if (corrRes.ok) {
           const corrData = await corrRes.json();
           setCorrelationData(corrData);
+        }
+        if (leaderRes.ok) {
+          setLeaderboard(await leaderRes.json());
         }
       } catch (err) {
         console.error("Failed to fetch dashboard data", err);
@@ -407,6 +413,7 @@ export default function Dashboard() {
               <option value="CRWV">CRWV</option>
               <option value="INTC">INTC</option>
               <option value="IREN">IREN</option>
+              <option value="MU">MU</option>
               <option value="NVDA">NVDA</option>
               <option value="RKLB">RKLB</option>
               <option value="SMCI">SMCI</option>
@@ -463,6 +470,70 @@ export default function Dashboard() {
             </button>
           </div>
         </header>
+
+        {/* Ticker Activity — cross-symbol discovery. The "Buzzing"/"Active" badge is
+            earned on a time-of-day-matched z-score (how many σ above the symbol's own
+            typical rate for these hours) plus a volume floor, so it doesn't over-flag
+            noisy or merely-active names. Click a ticker to load it into the dashboard. */}
+        {leaderboard.length > 0 && (
+          <section className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl p-4 shadow-2xl">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+                <Zap className="w-4 h-4 text-amber-400" /> Ticker Activity
+                <span className="text-[10px] font-normal text-slate-500 normal-case">vs typical for this time of day</span>
+              </h3>
+            </div>
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {leaderboard.map((item) => {
+                const active = symbol === item.symbol;
+                const si = item.sentiment_index_4h;
+                const z = item.buzz_z;
+                // "Buzzing" = genuine statistical lift (≥2σ) backed by real volume;
+                // "Active" = a milder above-typical signal. Below that, no badge.
+                const status =
+                  z !== null && z >= 2 && item.post_count_4h >= 10
+                    ? { label: "Buzzing", cls: "bg-amber-500/20 text-amber-300" }
+                    : z !== null && z >= 1 && item.post_count_4h >= 5
+                    ? { label: "Active", cls: "bg-emerald-500/10 text-emerald-400" }
+                    : null;
+                return (
+                  <button
+                    key={item.symbol}
+                    onClick={() => setSymbol(item.symbol)}
+                    title={
+                      `${item.post_count_4h} posts in last 4h · ` +
+                      (z !== null
+                        ? `${z >= 0 ? "+" : ""}${z.toFixed(1)}σ vs typical for this time (n=${item.baseline_samples}h)`
+                        : "baseline too sparse to score")
+                    }
+                    className={cn(
+                      "flex-shrink-0 min-w-[112px] flex flex-col gap-1 p-2.5 rounded-xl border text-left transition-colors cursor-pointer",
+                      active ? "bg-indigo-500/20 border-indigo-500/40" : "bg-slate-950/40 border-white/5 hover:bg-slate-800/60"
+                    )}
+                  >
+                    <div className="flex items-center justify-between w-full min-h-[18px]">
+                      <span className="font-bold text-white text-sm">{item.symbol}</span>
+                      {status && (
+                        <span className={cn("text-[10px] font-semibold px-1.5 py-0.5 rounded", status.cls)}>
+                          {status.label}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between w-full">
+                      <span className="text-[10px] text-slate-500">{item.post_count_4h} posts</span>
+                      <span className={cn(
+                        "text-[10px] font-medium",
+                        si > 0.1 ? "text-emerald-400" : si < -0.1 ? "text-rose-400" : "text-slate-400"
+                      )}>
+                        {si > 0 ? "+" : ""}{(si * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         {/* Telemetry Bento Grid */}
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
