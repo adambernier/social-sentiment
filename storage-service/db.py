@@ -1,5 +1,7 @@
 import json
+import random
 import sys
+import time
 from pathlib import Path
 
 import psycopg
@@ -11,6 +13,15 @@ from shared.schemas import ScoredPost, StockQuote, StockMetrics
 from shared.config import DATABASE_DSN
 
 SCHEMA_FILE = Path(__file__).parent / "schema.sql"
+
+# Schema is applied on startup and can include DDL (e.g. ADD CONSTRAINT) that takes
+# an exclusive lock on a busy table. Concurrent readers/writers can deadlock it (or
+# it can block), and an unhandled error there crashes the whole consumer — stranding
+# the pipeline. So apply with a short lock_timeout (fail fast) and retry transient
+# lock errors instead of dying.
+SCHEMA_APPLY_RETRIES = 5
+SCHEMA_LOCK_TIMEOUT_MS = 5000
+SCHEMA_RETRY_BASE_DELAY = 1.0
 
 INSERT_POST_SQL = """
     INSERT INTO posts (id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, engagement)
@@ -96,8 +107,30 @@ class DB:
 
     def _apply_schema(self) -> None:
         sql = SCHEMA_FILE.read_text()
-        with self.conn.cursor() as cur:
-            cur.execute(sql)
+        last_err: Exception | None = None
+        for attempt in range(1, SCHEMA_APPLY_RETRIES + 1):
+            try:
+                with self.conn.cursor() as cur:
+                    # Fail fast rather than block forever if a concurrent
+                    # reader/writer holds a lock the migration needs.
+                    cur.execute(f"SET lock_timeout = '{SCHEMA_LOCK_TIMEOUT_MS}ms'")
+                    cur.execute(sql)
+                return
+            except (psycopg.errors.DeadlockDetected, psycopg.errors.LockNotAvailable) as e:
+                last_err = e
+                if attempt >= SCHEMA_APPLY_RETRIES:
+                    break
+                delay = SCHEMA_RETRY_BASE_DELAY * attempt + random.uniform(0, SCHEMA_RETRY_BASE_DELAY)
+                print(
+                    f"Schema apply blocked by lock contention ({type(e).__name__}); "
+                    f"attempt {attempt}/{SCHEMA_APPLY_RETRIES}, retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+                # The aborted statement leaves the session usable under autocommit,
+                # but reconnect for a clean slate (and reset the timed-out lock wait).
+                self._connect()
+        print(f"Schema apply failed after {SCHEMA_APPLY_RETRIES} attempts: {last_err}")
+        raise last_err
 
     def insert_scored_batch(self, posts: list[ScoredPost]) -> int:
         try:
