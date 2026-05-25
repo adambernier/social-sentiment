@@ -7,3 +7,4 @@ transformers
 numpy
 aio-pika
 pydantic
+PyYAML

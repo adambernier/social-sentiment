@@ -6,3 +6,4 @@ yfinance==1.4.0
 pandas_market_calendars==5.3.2
 psycopg[binary,pool]
 pydantic
+PyYAML

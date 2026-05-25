@@ -6,3 +6,4 @@ feedparser
 httpx
 aio-pika
 pydantic
+PyYAML

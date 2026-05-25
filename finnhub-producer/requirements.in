@@ -5,3 +5,4 @@
 httpx
 aio-pika
 pydantic
+PyYAML

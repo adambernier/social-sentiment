@@ -5,3 +5,4 @@
 psycopg[binary,pool]
 aio-pika
 pydantic
+PyYAML

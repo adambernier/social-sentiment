@@ -22,3 +22,6 @@ feedparser==6.0.12
 onnxruntime==1.26.0
 transformers==5.9.0
 numpy==2.4.6
+
+# Configuration parsing
+PyYAML==6.0.2

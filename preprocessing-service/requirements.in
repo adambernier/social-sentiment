@@ -8,3 +8,4 @@ numpy
 aio-pika
 pydantic
 psycopg[binary]
+PyYAML

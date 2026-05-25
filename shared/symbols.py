@@ -1,39 +1,27 @@
 import re
 
+import yaml
+from pathlib import Path
+
 """Source of truth for per-symbol configuration.
 
-Adding a new symbol is a one-line edit to SYMBOLS below; every producer
-and the UI picks it up on next start.
+Loads the tracker configuration dynamically from symbols.yaml at the project root.
 """
 
-SYMBOLS: dict[str, dict] = {
-    "AMD":  {"keywords": ["Advanced Micro Devices", "Lisa Su"], "future": "NQ=F",  "sector": "XLK"},
-    "ASTS": {"keywords": ["SpaceMobile"],                       "future": "RTY=F", "sector": "XAR"},
-    "CRWV": {"keywords": ["CoreWeave"],                         "future": "NQ=F",  "sector": "XLK"},
-    "INTC": {"keywords": ["Intel"],                             "future": "NQ=F",  "sector": "XLK"},
-    "IREN": {
-        "keywords": ["Iris Energy", "Daniel Johnston"],
-        "future": "NQ=F",
-        "sector": "XLK",
-        "require_uppercase": True,
-        "block_phrases": ["irene", "hurricane irene", "iron"]
-    },
-    "MU":   {
-        "keywords": ["Micron"],
-        "future": "NQ=F", "sector": "XLK",
-        "require_uppercase": True,
-        "block_phrases": ["mu wave", "mu metal", "mu meson", "mu-wave", "mu-metal"]
-    },
-    "NVDA": {"keywords": ["Nvidia", "Jensen Huang"],            "future": "NQ=F",  "sector": "XLK"},
-    "RKLB": {"keywords": ["Rocket Lab"],                        "future": "RTY=F", "sector": "XAR"},
-    "SMCI": {"keywords": ["Super Micro Computer", "Supermicro", "Charles Liang"], "future": "NQ=F",  "sector": "XLK"},
-    "SMH":  {
-        "keywords": ["VanEck Semiconductor"],
-        "future": "NQ=F", "sector": "XLK",
-        "require_uppercase": True,
-        "block_phrases": ["shaking my head", "smh tbh", "smh at", "/s smh", "smfh"]
-    },
-}
+def load_symbols() -> dict[str, dict]:
+    # Project root is two levels up from shared/symbols.py
+    # (i.e. /shared/symbols.py -> /)
+    config_path = Path(__file__).resolve().parent.parent / "symbols.yaml"
+    if not config_path.exists():
+        # Fallback for testing or if missing
+        return {}
+        
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+        
+    return config if config else {}
+
+SYMBOLS: dict[str, dict] = load_symbols()
 
 
 def tickers() -> list[str]:

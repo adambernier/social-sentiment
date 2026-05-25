@@ -2,188 +2,197 @@ services:
   rabbitmq:
     image: rabbitmq:3-management
     ports:
-      - "5672:5672"
-      - "15672:15672"
+    - 5672:5672
+    - 15672:15672
     environment:
-      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-guest}
-      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS:-guest}
+    - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-guest}
+    - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS:-guest}
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      test:
+      - CMD
+      - rabbitmq-diagnostics
+      - check_port_connectivity
       interval: 5s
       timeout: 5s
       retries: 5
-
   postgres:
     image: postgres:15
     environment:
-      - POSTGRES_DB=${POSTGRES_DB:-sentiment}
-      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-sentiment}
+    - POSTGRES_DB=${POSTGRES_DB:-sentiment}
+    - POSTGRES_USER=${POSTGRES_USER:-postgres}
+    - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-sentiment}
     ports:
-      - "5432:5432"
+    - 5432:5432
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+    - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d sentiment"]
+      test:
+      - CMD-SHELL
+      - pg_isready -U postgres -d sentiment
       interval: 5s
       timeout: 5s
       retries: 5
-
   preprocessing-service:
     build:
       context: .
       dockerfile: preprocessing-service/Dockerfile
     volumes:
-      - hf_cache:/root/.cache/huggingface
+    - hf_cache:/root/.cache/huggingface
+    - ./symbols.yaml:/app/symbols.yaml:ro
     environment:
-      - RABBITMQ_HOST=rabbitmq
-      - HF_HOME=/root/.cache/huggingface
-      - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
-      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-      - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
-      - PYTHONUNBUFFERED=1
+    - RABBITMQ_HOST=rabbitmq
+    - HF_HOME=/root/.cache/huggingface
+    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
+    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
         condition: service_healthy
       postgres:
         condition: service_healthy
-
   sentiment-service:
     build:
       context: .
       dockerfile: sentiment-service/Dockerfile
     volumes:
-      - hf_cache:/root/.cache/huggingface
+    - hf_cache:/root/.cache/huggingface
+    - ./symbols.yaml:/app/symbols.yaml:ro
     environment:
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-      - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - RABBITMQ_HOST=rabbitmq
+    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
     depends_on:
       rabbitmq:
         condition: service_healthy
-
   storage-service:
     build:
       context: .
       dockerfile: storage-service/Dockerfile
     environment:
-      - RABBITMQ_HOST=rabbitmq
-      - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
-      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-      - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - RABBITMQ_HOST=rabbitmq
+    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
+    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
     depends_on:
       rabbitmq:
         condition: service_healthy
       postgres:
         condition: service_healthy
-
-
+    volumes:
+    - ./symbols.yaml:/app/symbols.yaml:ro
   bluesky-producer:
     build:
       context: .
       dockerfile: bluesky-producer/Dockerfile
     environment:
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-      - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
-      - PYTHONUNBUFFERED=1
+    - RABBITMQ_HOST=rabbitmq
+    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
         condition: service_healthy
-
+    volumes:
+    - ./symbols.yaml:/app/symbols.yaml:ro
   stocktwits-producer:
     build:
       context: .
       dockerfile: stocktwits-producer/Dockerfile
     environment:
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-      - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
-      - PYTHONUNBUFFERED=1
+    - RABBITMQ_HOST=rabbitmq
+    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
         condition: service_healthy
-
+    volumes:
+    - ./symbols.yaml:/app/symbols.yaml:ro
   reddit-producer:
     build:
       context: .
       dockerfile: reddit-producer/Dockerfile
     environment:
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-      - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
-      - PYTHONUNBUFFERED=1
-      - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-rss/0.1 (sentiment dashboard)}
+    - RABBITMQ_HOST=rabbitmq
+    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - PYTHONUNBUFFERED=1
+    - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-rss/0.1 (sentiment dashboard)}
     depends_on:
       rabbitmq:
         condition: service_healthy
-
+    volumes:
+    - ./symbols.yaml:/app/symbols.yaml:ro
   news-producer:
     build:
       context: .
       dockerfile: news-producer/Dockerfile
     environment:
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-      - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
-      - PYTHONUNBUFFERED=1
+    - RABBITMQ_HOST=rabbitmq
+    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
         condition: service_healthy
-
+    volumes:
+    - ./symbols.yaml:/app/symbols.yaml:ro
   finnhub-producer:
     build:
       context: .
       dockerfile: finnhub-producer/Dockerfile
     environment:
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-      - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
-      - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
-      - PYTHONUNBUFFERED=1
+    - RABBITMQ_HOST=rabbitmq
+    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
+    - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
         condition: service_healthy
-
+    volumes:
+    - ./symbols.yaml:/app/symbols.yaml:ro
   market-producer:
     build:
       context: .
       dockerfile: market-producer/Dockerfile
     environment:
-      - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
     depends_on:
       postgres:
         condition: service_healthy
-
+    volumes:
+    - ./symbols.yaml:/app/symbols.yaml:ro
   api-service:
     build:
       context: .
       dockerfile: api-service/Dockerfile
     environment:
-      - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
     ports:
-      - "8000:8000"
+    - 8000:8000
     depends_on:
       postgres:
         condition: service_healthy
-
+    volumes:
+    - ./symbols.yaml:/app/symbols.yaml:ro
   ui-service:
     build:
       context: ui-service
       dockerfile: Dockerfile
     volumes:
-      - ./ui-service:/app
-      - /app/node_modules
-      - /app/.next
+    - ./ui-service:/app
+    - /app/node_modules
+    - /app/.next
     environment:
-      - API_URL=http://api-service:8000
-      - WATCHPACK_POLLING=true
+    - API_URL=http://api-service:8000
+    - WATCHPACK_POLLING=true
     command: npm run dev
     ports:
-      - "3000:3000"
+    - 3000:3000
     depends_on:
-      - api-service
-
+    - api-service
 volumes:
-  postgres_data:
-  hf_cache:
+  postgres_data: null
+  hf_cache: null
