@@ -6,9 +6,18 @@ import { SourceHealth } from "../types";
 
 const STATUS: Record<SourceHealth["status"], { dot: string; text: string }> = {
   active: { dot: "bg-emerald-500", text: "text-emerald-400" },
-  quiet: { dot: "bg-amber-500", text: "text-amber-400" },
+  // quiet is benign (a source within its normal slow cadence) → neutral, not alarming.
+  quiet: { dot: "bg-slate-500", text: "text-slate-400" },
+  // stalled = unusually quiet for this source (volume-aware) → warning.
+  stalled: { dot: "bg-amber-500 animate-pulse", text: "text-amber-400" },
+  // silent = nothing in 24h → critical.
   silent: { dot: "bg-rose-500 animate-pulse", text: "text-rose-400" },
 };
+
+function rateLabel(perHour: number | null): string {
+  if (!perHour) return "";
+  return ` · ~${perHour >= 10 ? Math.round(perHour) : perHour.toFixed(1)}/hr typical`;
+}
 
 function ageLabel(seconds: number | null): string {
   if (seconds == null) return "no data";
@@ -22,6 +31,7 @@ function ageLabel(seconds: number | null): string {
 
 export default function SourceHealthPanel({ sources }: { sources: SourceHealth[] }) {
   const silentCount = sources.filter((s) => s.status === "silent").length;
+  const stalledCount = sources.filter((s) => s.status === "stalled").length;
 
   return (
     <section className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl p-6 shadow-2xl">
@@ -30,11 +40,18 @@ export default function SourceHealthPanel({ sources }: { sources: SourceHealth[]
           <Activity className="w-4 h-4 text-indigo-400" />
           Source Health
         </h3>
-        {silentCount > 0 && (
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20">
-            {silentCount} silent
-          </span>
-        )}
+        <div className="flex items-center gap-1.5">
+          {stalledCount > 0 && (
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
+              {stalledCount} stalled
+            </span>
+          )}
+          {silentCount > 0 && (
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20">
+              {silentCount} silent
+            </span>
+          )}
+        </div>
       </div>
       <p className="text-xs text-slate-400 mb-4">Ingestion recency &amp; volume per data source</p>
 
@@ -48,7 +65,7 @@ export default function SourceHealthPanel({ sources }: { sources: SourceHealth[]
             <div
               key={s.platform}
               className="flex items-center justify-between p-2.5 bg-white/5 rounded-xl border border-white/5"
-              title={`${s.posts_1h} posts in last 1h · ${s.posts_24h} in 24h`}
+              title={`${s.posts_1h} posts in last 1h · ${s.posts_24h} in 24h${rateLabel(s.baseline_per_hour)}`}
             >
               <div className="flex items-center gap-2.5 min-w-0">
                 <span className={cn("w-2 h-2 rounded-full shrink-0", st.dot)} />

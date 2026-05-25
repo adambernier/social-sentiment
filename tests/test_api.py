@@ -363,3 +363,34 @@ def test_sentiment_macd_empty_input():
     macd = getattr(api_main, "compute_sentiment_macd")
     assert macd([], fast=2, slow=4, signal=2) == []
 
+
+def test_source_health_volume_aware_status(mock_db):
+    # Status is judged per-source: a busy source silent for 2h is "stalled", while a
+    # slow source with the same gap is within its normal cadence ("quiet").
+    now = datetime.now(timezone.utc)
+    mock_rows = [
+        # ~42/hr but silent 2h → gap far exceeds its average → stalled
+        {"platform": "stocktwits", "posts_1h": 0, "posts_24h": 1000, "last_ingest": now - timedelta(hours=2)},
+        # ~0.4/hr; a 2h gap is well within its slow cadence → quiet (not alarming)
+        {"platform": "reddit", "posts_1h": 0, "posts_24h": 10, "last_ingest": now - timedelta(hours=2)},
+        # posted within the hour → active
+        {"platform": "bluesky", "posts_1h": 5, "posts_24h": 200, "last_ingest": now - timedelta(minutes=2)},
+        # yahoo + finnhub absent from rows → no data in 24h → silent
+    ]
+    mock_db.fetchall = AsyncMock(return_value=mock_rows)
+
+    with TestClient(app) as client:
+        response = client.get("/stats/sources")
+        assert response.status_code == 200
+        data = {d["platform"]: d for d in response.json()}
+        assert data["stocktwits"]["status"] == "stalled"
+        assert data["reddit"]["status"] == "quiet"
+        assert data["bluesky"]["status"] == "active"
+        assert data["yahoo"]["status"] == "silent"
+        assert data["finnhub"]["status"] == "silent"
+        # baseline rate is exposed for sources with volume, null when silent.
+        assert data["stocktwits"]["baseline_per_hour"] == pytest.approx(1000 / 24)
+        assert data["yahoo"]["baseline_per_hour"] is None
+        # Problems (silent/stalled) are sorted to the top.
+        assert response.json()[0]["status"] in ("silent", "stalled")
+

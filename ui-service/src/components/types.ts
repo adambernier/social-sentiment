@@ -11,7 +11,8 @@ export interface SourceHealth {
   posts_24h: number;
   last_ingest: string | null;
   age_seconds: number | null;
-  status: "active" | "quiet" | "silent";
+  baseline_per_hour: number | null;
+  status: "active" | "quiet" | "stalled" | "silent";
 }
 export interface TopicStat { topic_label: string | null; count: number; }
 export interface LeaderboardEntry { symbol: string; post_count_4h: number; sentiment_index_4h: number; buzz_z: number | null; baseline_hourly: number; baseline_samples: number; }

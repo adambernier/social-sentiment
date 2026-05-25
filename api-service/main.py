@@ -143,7 +143,8 @@ class SourceHealth(BaseModel):
     posts_24h: int
     last_ingest: Optional[datetime] = None
     age_seconds: Optional[float] = None
-    status: str  # "active" | "quiet" | "silent"
+    baseline_per_hour: Optional[float] = None  # recent avg rate (posts_24h / 24)
+    status: str  # "active" | "quiet" | "stalled" | "silent"
 
 class MarketQuote(BaseModel):
     symbol: str
@@ -504,14 +505,25 @@ async def get_topic_stats(
 # dead/blocked source (e.g. a rate-limited news feed) is obvious at a glance.
 INGESTION_SOURCES = ["bluesky", "reddit", "stocktwits", "yahoo", "finnhub"]
 
+# A source is "stalled" (unusually quiet for itself) when the gap since its last
+# post exceeds this multiple of its average gap (24h / posts_24h) AND an absolute
+# floor. The ratio makes it volume-aware — a busy source flags after minutes, a
+# naturally-slow news feed only after a genuinely long silence — while the floor
+# keeps a high-volume source from tripping on a brief lull.
+SOURCE_STALL_RATIO = 12.0
+SOURCE_STALL_FLOOR_SECONDS = 1800  # 30 min
+
 @app.get("/stats/sources", response_model=list[SourceHealth])
 async def get_source_health():
     """Read-only ingestion health per source: recency + volume from `posts`.
 
     status is descriptive, not a hard up/down verdict:
-      • active — at least one post in the last hour
-      • quiet  — none in the last hour but some in 24h (normal for low-volume news)
-      • silent — nothing in 24h (a dead/blocked source, e.g. Yahoo when rate-limited)
+      • active  — at least one post in the last hour
+      • quiet   — no post in the last hour, but within the source's normal cadence
+      • stalled — unusually quiet *for this source*: silent far longer than its own
+                  average gap (volume-aware), so a busy feed going dark is flagged
+                  even while a naturally-slow one isn't
+      • silent  — nothing at all in 24h (a dead/blocked source, e.g. Yahoo throttled)
     True producer up/down and rate-limit counters live in Prometheus/Grafana; this
     answers the product question "is each source still delivering data?".
     """
@@ -536,17 +548,32 @@ async def get_source_health():
         posts_1h = r["posts_1h"] if r else 0
         posts_24h = r["posts_24h"] if r else 0
         last_ingest = r["last_ingest"] if r else None
-        status = "active" if posts_1h > 0 else "quiet" if posts_24h > 0 else "silent"
+        age = (now - last_ingest).total_seconds() if last_ingest else None
+
+        if posts_24h == 0:
+            status = "silent"
+        else:
+            # Average gap between posts over the last 24h; flag a silence that's
+            # both far longer than that and past the absolute floor.
+            expected_gap = 86400 / posts_24h
+            if age is not None and age > SOURCE_STALL_FLOOR_SECONDS and age > SOURCE_STALL_RATIO * expected_gap:
+                status = "stalled"
+            elif posts_1h > 0:
+                status = "active"
+            else:
+                status = "quiet"
+
         out.append(SourceHealth(
             platform=platform,
             posts_1h=posts_1h,
             posts_24h=posts_24h,
             last_ingest=last_ingest,
-            age_seconds=(now - last_ingest).total_seconds() if last_ingest else None,
+            age_seconds=age,
+            baseline_per_hour=(posts_24h / 24.0) if posts_24h > 0 else None,
             status=status,
         ))
-    # Surface problem sources first (silent, then quiet, then active by volume).
-    rank = {"silent": 0, "quiet": 1, "active": 2}
+    # Surface problem sources first: silent (dead) and stalled (degraded) on top.
+    rank = {"silent": 0, "stalled": 1, "quiet": 2, "active": 3}
     out.sort(key=lambda s: (rank[s.status], -s.posts_24h))
     return out
 
