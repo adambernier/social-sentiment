@@ -5,14 +5,18 @@ import { ResponsiveContainer, BarChart, XAxis, YAxis, Tooltip, ReferenceLine, Ba
 import { cn } from "./utils";
 import { topicProgressColors } from "./constants";
 import { DashboardDataProps } from "../types";
+import SourceHealthPanel from "./SourceHealthPanel";
 
 export default function Sidebar({ state, computed }: DashboardDataProps) {
-  const { correlationData, metrics } = state;
+  const { correlationData, metrics, sourceHealth } = state;
   const { scorecardData, sortedTopics, totalTopicCount } = computed;
 
   return (
     <div className="xl:col-span-4 space-y-6">
-      
+
+      {/* Pipeline / data-source health (read-only ops view) */}
+      <SourceHealthPanel sources={sourceHealth || []} />
+
       {/* Opportunity Scanner */}
       <section className={cn(
         "bg-slate-900/40 backdrop-blur-xl border rounded-2xl p-6 shadow-2xl relative overflow-hidden flex flex-col transition-all duration-300",

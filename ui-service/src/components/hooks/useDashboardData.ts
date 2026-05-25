@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
-import { 
-  Post, SentimentStat, TopicStat, LeaderboardEntry, 
-  MarketQuote, DeltaData, MetricsData, CorrelationData 
+import {
+  Post, SentimentStat, TopicStat, LeaderboardEntry,
+  MarketQuote, DeltaData, MetricsData, CorrelationData, SourceHealth
 } from '../types';
 import { isNewsPlatform } from '../dashboard/constants';
 
@@ -41,6 +41,7 @@ export function useDashboardData() {
   const [sentimentStats, setSentimentStats] = useState<SentimentStat[]>([]);
   const [topicStats, setTopicStats] = useState<TopicStat[]>([]);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [sourceHealth, setSourceHealth] = useState<SourceHealth[]>([]);
   const [marketData, setMarketData] = useState<MarketQuote[]>([]);
   const [metrics, setMetrics] = useState<MetricsData | null>(null);
   
@@ -72,10 +73,11 @@ export function useDashboardData() {
       try {
         const platformParam = platform !== 'all' ? `&platform=${platform}` : '';
         const topicParam = selectedTopic !== 'all' ? `&topic=${encodeURIComponent(selectedTopic)}` : '';
-        const [dashRes, corrRes, leaderRes] = await Promise.all([
+        const [dashRes, corrRes, leaderRes, sourcesRes] = await Promise.all([
           fetch(`${apiBase}/stats/dashboard?symbol=${symbol}&hours=${hours}${platformParam}`),
           fetch(`${apiBase}/stats/correlation?symbol=${symbol}&hours=${hours}${platformParam}${topicParam}`),
-          fetch(`${apiBase}/stats/leaderboard`)
+          fetch(`${apiBase}/stats/leaderboard`),
+          fetch(`${apiBase}/stats/sources`)
         ]);
         if (dashRes.ok) {
           const data = await dashRes.json();
@@ -98,6 +100,9 @@ export function useDashboardData() {
         }
         if (leaderRes.ok) {
           setLeaderboard(await leaderRes.json());
+        }
+        if (sourcesRes.ok) {
+          setSourceHealth(await sourcesRes.json());
         }
       } catch (err) {
         console.error("Failed to fetch dashboard data", err);
@@ -253,7 +258,7 @@ export function useDashboardData() {
   return {
     state: {
       symbol, hours, platform, selectedTopic, isConnected, showSR, feedTab, chartView,
-      posts, sentimentStats, topicStats, leaderboard, marketData, metrics,
+      posts, sentimentStats, topicStats, leaderboard, sourceHealth, marketData, metrics,
       latestQuote, primaryDelta, futureSymbol, futureQuote, futureDelta, futureMarketData,
       vixQuote, correlationData, selectedHour, isDrillDownLoading, hasHydrated, hasSetDefaultHours
     },
