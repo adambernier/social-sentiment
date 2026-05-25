@@ -131,6 +131,20 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  finnhub-producer:
+    build:
+      context: .
+      dockerfile: finnhub-producer/Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
   market-producer:
     build:
       context: .

@@ -73,6 +73,7 @@ const platformColors: Record<string, string> = {
   reddit: 'bg-orange-500/20 text-orange-400 border border-orange-500/10',
   yahoo: 'bg-purple-500/20 text-purple-400 border border-purple-500/10',
   stocktwits: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/10',
+  finnhub: 'bg-blue-500/20 text-blue-400 border border-blue-500/10',
 };
 
 const platformLabels: Record<string, string> = {
@@ -81,7 +82,13 @@ const platformLabels: Record<string, string> = {
   bluesky: 'Bluesky',
   yahoo: 'News Article',
   stocktwits: 'Stocktwits',
+  finnhub: 'Finnhub News',
 };
+
+// Platforms treated as "news" (vs retail social) in the feed split. News sources
+// emit per-symbol headlines; everything else is social chatter.
+const NEWS_PLATFORMS = new Set(["yahoo", "finnhub"]);
+const isNewsPlatform = (platform: string) => NEWS_PLATFORMS.has(platform);
 
 const topicColors: Record<string, string> = {
   "Earnings & Guidance": "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30",
@@ -266,8 +273,8 @@ export default function Dashboard() {
 
   // Divergence calculation comparing social vs news sentiment
   const divergenceStatus = useMemo(() => {
-    const socialPosts = posts.filter(p => p.platform !== 'yahoo');
-    const newsPosts = posts.filter(p => p.platform === 'yahoo');
+    const socialPosts = posts.filter(p => !isNewsPlatform(p.platform));
+    const newsPosts = posts.filter(p => isNewsPlatform(p.platform));
 
     if (socialPosts.length < 5 || newsPosts.length < 2) {
       return { label: "Aligned", color: "text-slate-400" };
@@ -321,7 +328,7 @@ export default function Dashboard() {
 
   // Filter posts based on Social Stream vs News Desk tab and Topic
   const filteredFeedPosts = useMemo(() => {
-    let list = posts.filter(p => feedTab === 'news' ? p.platform === 'yahoo' : p.platform !== 'yahoo');
+    let list = posts.filter(p => feedTab === 'news' ? isNewsPlatform(p.platform) : !isNewsPlatform(p.platform));
     if (selectedTopic !== "all") {
       if (selectedTopic === "General / Outlier") {
         list = list.filter(p => p.topic_label === "General / Outlier" || !p.topic_label);
@@ -439,6 +446,7 @@ export default function Dashboard() {
               <option value="reddit">Reddit</option>
               <option value="stocktwits">Stocktwits</option>
               <option value="yahoo">Yahoo Finance News</option>
+              <option value="finnhub">Finnhub News</option>
             </select>
             <select 
               value={selectedTopic}
