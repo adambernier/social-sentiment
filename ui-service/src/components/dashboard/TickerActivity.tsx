@@ -14,7 +14,7 @@ export default function TickerActivity({ state, setters }: DashboardDataProps) {
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
           <Zap className="w-4 h-4 text-amber-400" /> Ticker Activity
-          <span className="text-[10px] font-normal text-slate-500 normal-case">vs typical for this time of day</span>
+          <span className="text-[10px] font-normal text-slate-500 normal-case">vs typical for this time on similar days</span>
         </h3>
       </div>
       <div className="flex gap-2 overflow-x-auto pb-1">
@@ -36,7 +36,7 @@ export default function TickerActivity({ state, setters }: DashboardDataProps) {
               title={
                 `${item.post_count_4h} posts in last 4h · ` +
                 (z !== null
-                  ? `${z >= 0 ? "+" : ""}${z.toFixed(1)}σ vs typical for this time (n=${item.baseline_samples}h)`
+                  ? `${z >= 0 ? "+" : ""}${z.toFixed(1)}σ vs typical for these hours on comparable days (n=${item.baseline_samples}h)`
                   : "baseline too sparse to score")
               }
               className={cn(
