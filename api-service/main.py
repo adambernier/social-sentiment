@@ -485,28 +485,40 @@ async def get_topic_stats(
 # Minimum number of historical hourly samples before a buzz z-score is trusted.
 # Below this the stddev is too noisy to be meaningful, so buzz_z is returned None.
 LEADERBOARD_MIN_BASELINE_HOURS = 8
+# How far back the baseline reaches. Wider than the 4h window so day-type matching
+# (trading vs non-trading) still has enough same-type samples — a holiday/weekend
+# only yields ~2 comparable days per week, so 7d was too sparse once matched.
+LEADERBOARD_BASELINE_DAYS = 28
 
 @app.get("/stats/leaderboard", response_model=list[LeaderboardEntry])
 async def get_leaderboard():
     """Cross-symbol discovery: how unusual each tracked ticker's chatter is right now.
 
     buzz_z = (current posts/hour − μ) / σ, where μ/σ are the mean and standard
-    deviation of hourly post counts over the trailing 7d, restricted to the same
-    hours-of-day the current 4h window spans. Two properties matter:
+    deviation of historical hourly post counts, restricted to comparable hours.
+    Three properties matter:
       • Variance-aware — a normally-noisy ticker (large σ) needs a bigger jump to
         score high, so small-count spikes don't read as "buzzing."
-      • Time-of-day matched — comparing only like hours-of-day removes the upward
-        bias of an all-hours baseline (overnight/weekends drag the mean down and
-        make any active-hours window look elevated).
+      • Time-of-day matched — only like hours-of-day, removing the upward bias of an
+        all-hours baseline (overnight drags the mean down, inflating active hours).
+      • Day-type matched — only days whose market-open status (a `regular` equity
+        session existed) matches today's. Weekend/holiday chatter runs far lower
+        than a trading day, so this stops a quiet holiday from being measured
+        against busy weekdays (and vice versa). Holidays are caught automatically
+        since they have no regular session — no hardcoded market calendar.
     The baseline unions the hot tier (`posts`) with the cold tier
     (`hourly_sentiment_agg`), preferring the aggregate when an hour is in both, so
-    it stays stable across the ~7d post-retention horizon. All tracked symbols are
+    it stays stable across the post-retention horizon. All tracked symbols are
     always returned (so the panel never looks empty); buzz_z is None when the
-    baseline has fewer than %s matching samples.
+    matched baseline has fewer than %s samples.
     """
     query = """
         WITH universe AS (
             SELECT unnest(%s::text[]) AS symbol
+        ),
+        bounds AS (
+            SELECT NOW() - make_interval(days => %s) AS win_start,
+                   NOW() - INTERVAL '4 hours'        AS recent_end
         ),
         -- Hours-of-day the current 4h window touches, for like-for-like matching.
         target_hours AS (
@@ -517,6 +529,21 @@ async def get_leaderboard():
                 INTERVAL '1 hour'
             ) gs
         ),
+        -- Days with a regular equity session = trading days (handles holidays too).
+        trading_days AS (
+            SELECT date_trunc('day', timestamp) AS d
+            FROM stock_quotes
+            WHERE timestamp >= (SELECT win_start FROM bounds)
+              AND market_session = 'regular'
+            GROUP BY 1
+        ),
+        today_trading AS (
+            SELECT EXISTS (
+                SELECT 1 FROM stock_quotes
+                WHERE timestamp >= date_trunc('day', NOW())
+                  AND market_session = 'regular'
+            ) AS is_trading
+        ),
         current_stats AS (
             SELECT
                 symbol,
@@ -525,20 +552,20 @@ async def get_leaderboard():
                  - SUM(CASE WHEN sentiment = 'negative' THEN 1 ELSE 0 END))::float
                   / NULLIF(COUNT(*), 0) AS sentiment_index_4h
             FROM posts
-            WHERE timestamp >= NOW() - INTERVAL '4 hours'
+            WHERE timestamp >= (SELECT recent_end FROM bounds)
             GROUP BY symbol
         ),
         hourly_union AS (
             SELECT symbol, bucket_hour AS h,
                    (positive_count + neutral_count + negative_count)::float AS c, 1 AS src
             FROM hourly_sentiment_agg
-            WHERE bucket_hour >= NOW() - INTERVAL '7 days'
-              AND bucket_hour <  NOW() - INTERVAL '4 hours'
+            WHERE bucket_hour >= (SELECT win_start FROM bounds)
+              AND bucket_hour <  (SELECT recent_end FROM bounds)
             UNION ALL
             SELECT symbol, date_trunc('hour', timestamp) AS h, COUNT(*)::float AS c, 2 AS src
             FROM posts
-            WHERE timestamp >= NOW() - INTERVAL '7 days'
-              AND timestamp <  NOW() - INTERVAL '4 hours'
+            WHERE timestamp >= (SELECT win_start FROM bounds)
+              AND timestamp <  (SELECT recent_end FROM bounds)
             GROUP BY symbol, date_trunc('hour', timestamp)
         ),
         hourly_dedup AS (
@@ -549,13 +576,15 @@ async def get_leaderboard():
             ORDER BY symbol, h, src
         ),
         baseline AS (
-            -- Mean/stddev of hourly counts, only for matching hours-of-day.
+            -- Mean/stddev of hourly counts, matched on hour-of-day AND day-type.
             SELECT d.symbol,
                    AVG(d.c) AS mu_hourly,
                    COALESCE(STDDEV_SAMP(d.c), 0) AS sd_hourly,
                    COUNT(*) AS n_hours
             FROM hourly_dedup d
             WHERE extract(hour FROM d.h)::int IN (SELECT hod FROM target_hours)
+              AND (date_trunc('day', d.h) IN (SELECT d FROM trading_days))
+                  = (SELECT is_trading FROM today_trading)
             GROUP BY d.symbol
         )
         SELECT
@@ -576,7 +605,10 @@ async def get_leaderboard():
     """
     async with get_db_conn() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(query, [tickers(), LEADERBOARD_MIN_BASELINE_HOURS])
+            await cur.execute(
+                query,
+                [tickers(), LEADERBOARD_BASELINE_DAYS, LEADERBOARD_MIN_BASELINE_HOURS],
+            )
             return await cur.fetchall()
 
 @app.get("/stats/market", response_model=list[MarketQuote])
