@@ -255,7 +255,7 @@ export function useDashboardData() {
       symbol, hours, platform, selectedTopic, isConnected, showSR, feedTab, chartView,
       posts, sentimentStats, topicStats, leaderboard, marketData, metrics,
       latestQuote, primaryDelta, futureSymbol, futureQuote, futureDelta, futureMarketData,
-      vixQuote, correlationData, selectedHour, isDrillDownLoading
+      vixQuote, correlationData, selectedHour, isDrillDownLoading, hasHydrated, hasSetDefaultHours
     },
     setters: {
       setSymbol, setHours, setPlatform, setSelectedTopic, setShowSR, setFeedTab, setChartView, setSelectedHour
