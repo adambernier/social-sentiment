@@ -167,9 +167,19 @@ export function useDashboardData() {
     fetchDrillDown();
   }, [selectedHour, symbol, platform, apiBase]);
 
+  // A stored "regular" label means the market was open at the quote's timestamp,
+  // not necessarily now. yfinance replays the last trading day's final bar on
+  // weekends/holidays, and ON CONFLICT keeps that stale 'regular' quote — so the
+  // market is only actually open if the latest quote is also fresh. Producer polls
+  // every 60s; 10 min tolerates a missed poll while still catching stale data.
+  const QUOTE_STALE_MS = 10 * 60 * 1000;
+  const latestQuoteFresh = latestQuote
+    ? Date.now() - new Date(latestQuote.timestamp).getTime() < QUOTE_STALE_MS
+    : false;
+
   useEffect(() => {
     if (!hasSetDefaultHours && latestQuote) {
-      if (latestQuote.market_session !== 'regular') {
+      if (latestQuote.market_session !== 'regular' || !latestQuoteFresh) {
         setHours(168);
       }
       setHasSetDefaultHours(true);
@@ -183,7 +193,12 @@ export function useDashboardData() {
   const bullishPct = totalMentions ? Math.round((bullishCount / totalMentions) * 100) : 0;
   const bearishPct = totalMentions ? Math.round((bearishCount / totalMentions) * 100) : 0;
   
-  const marketSession = latestQuote?.market_session || "closed";
+  // Override a stale 'regular' (weekend/holiday/stopped producer) to 'closed' so
+  // the badge reflects whether the market is open *now*, not at the last quote.
+  const marketSession =
+    latestQuote?.market_session === "regular" && !latestQuoteFresh
+      ? "closed"
+      : latestQuote?.market_session || "closed";
 
   const divergenceStatus = useMemo(() => {
     const socialPosts = posts.filter(p => !isNewsPlatform(p.platform));
