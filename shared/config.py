@@ -33,3 +33,6 @@ DATABASE_DSN = get_env(
 REDDIT_USER_AGENT = get_env(
     "REDDIT_USER_AGENT", "social-sentiment-rss/0.1 (sentiment dashboard)"
 )
+
+# Finnhub Config (news producer) — free API key from https://finnhub.io
+FINNHUB_API_KEY = get_env("FINNHUB_API_KEY", "")

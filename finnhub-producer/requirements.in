@@ -1,0 +1,7 @@
+# Direct dependencies for finnhub-producer (intent). Shared libs pinned in ../constraints.txt.
+# Regenerate: uv pip compile finnhub-producer/requirements.in --generate-hashes -o finnhub-producer/requirements.txt
+-c ../constraints.txt
+
+httpx
+aio-pika
+pydantic
