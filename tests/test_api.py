@@ -157,7 +157,12 @@ def test_correlation_endpoint(mock_db):
         mock_posts
     ]
     
-    mock_db.fetchone = AsyncMock(return_value={"market_session": "regular"})
+    mock_db.fetchone = AsyncMock()
+    mock_db.fetchone.side_effect = [
+        {"market_session": "regular"},
+        {"pe_relative_sector": -0.25}, # Undervalued relative to sector
+        {"price": 12.5}               # Low VIX (options are cheap)
+    ]
     
     with TestClient(app) as client:
         response = client.get("/stats/correlation?symbol=NVDA&hours=2")
@@ -169,12 +174,146 @@ def test_correlation_endpoint(mock_db):
         assert "resistancePrice" in data
         assert "maxR" in data
         assert "bestLag" in data
+        assert "opportunity" in data
         
         # Support and resistance checks
         # support_price = sorted_prices[idx5] -> idx5 = int(19 * 0.05) = 0 -> 100.0
         # resistance_price = sorted_prices[idx95] -> idx95 = int(19 * 0.95) = 18 -> 118.0
-        # latest_price = prices[-1] = 119.0
         assert data["supportPrice"] == 100.0
         assert data["resistancePrice"] == 118.0
         assert abs(data["supportPct"] - (-15.96638)) < 0.05
         assert abs(data["resistancePct"] - (-0.84033)) < 0.05
+
+        # Opportunity scanner checks
+        opp = data["opportunity"]
+        assert opp is not None
+        assert "score" in opp
+        assert "classification" in opp
+        assert "strategy" in opp
+        assert "checklist" in opp
+        
+        # With price = 119.0 (latest quote), support = 100.0: Price is not near support.
+        # Sentiment = 1.0 (positive weighted = 5.0, total weighted = 5.0): Bullish crossover.
+        # Valuation = -0.25 (undervalued): +2.0 points.
+        # Total score should be non-zero
+        assert opp["score"] > 0
+
+        # Check that historical buckets contain rawPrice, buySignal and buyScore
+        first_bucket = data["data"][0]
+        assert "rawPrice" in first_bucket
+        assert "buySignal" in first_bucket
+        assert "buyScore" in first_bucket
+
+def test_compute_opportunity_logic():
+    # Test compute_opportunity helper function directly
+    compute_opp = getattr(api_main, "compute_opportunity")
+    
+    # 1. Test Strong Buy Setup with Low VIX -> Buy Call Option
+    opp_strong_low_vix = compute_opp(
+        price=101.0,
+        support=100.0, # Within 2.5% of support
+        resistance=110.0,
+        sentiment=0.8,
+        sentiment_sma=0.2, # Bullish sentiment crossover
+        vix_price=12.0,    # Low VIX
+        pe_relative=-0.3,  # Undervalued
+        prev_prices=[105.0, 103.0, 101.0],      # Price down
+        prev_sentiments=[0.2, 0.5, 0.8]        # Sentiment up (divergence)
+    )
+    assert opp_strong_low_vix["classification"] == "STRONG BUY"
+    assert opp_strong_low_vix["score"] >= 75.0
+    assert opp_strong_low_vix["strategy"] == "Long Call Option (Buy Call)"
+    assert "Price near support level" in opp_strong_low_vix["checklist"]
+    assert "Bullish sentiment crossover (above positive SMA)" in opp_strong_low_vix["checklist"]
+    assert "Bullish sentiment divergence (price down, sentiment rising)" in opp_strong_low_vix["checklist"]
+
+    # 2. Test Strong Buy Setup with High VIX -> Sell Put Credit Spreads
+    opp_strong_high_vix = compute_opp(
+        price=101.0,
+        support=100.0,
+        resistance=110.0,
+        sentiment=0.8,
+        sentiment_sma=0.2,
+        vix_price=25.0,    # High VIX
+        pe_relative=-0.3,
+        prev_prices=[105.0, 103.0, 101.0],
+        prev_sentiments=[0.2, 0.5, 0.8]
+    )
+    assert opp_strong_high_vix["classification"] == "STRONG BUY"
+    assert opp_strong_high_vix["strategy"] == "Sell Put Credit Spreads"
+
+    # 3. Test Caution / Overbought Setup
+    opp_overbought = compute_opp(
+        price=109.0,
+        support=100.0,
+        resistance=110.0, # Near resistance
+        sentiment=-0.5,
+        sentiment_sma=-0.1, # Bearish setup
+        vix_price=15.0,
+        pe_relative=0.5
+    )
+    assert opp_overbought["classification"] == "CAUTION / OVERBOUGHT"
+    assert opp_overbought["strategy"] == "Protect Longs / Buy Puts"
+
+
+def test_sentiment_macd_dense_and_warmup():
+    # Pure helper; small periods so values are hand-checkable.
+    macd = getattr(api_main, "compute_sentiment_macd")
+    indices = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    res = macd(indices, fast=2, slow=4, signal=2)
+
+    assert len(res) == 6
+    # Warm-up: macd is None until the slow SMA fills (index 3).
+    assert res[0]["macd"] is None
+    assert res[2]["macd"] is None
+    assert res[3]["macd"] == pytest.approx(0.10)
+    assert res[5]["macd"] == pytest.approx(0.10)
+    # Signal needs two consecutive macd values, so it is None at index 3.
+    assert res[3]["signal"] is None
+    assert res[3]["hist"] is None
+    # Steady ramp -> macd flat -> histogram converges to zero.
+    assert res[4]["signal"] == pytest.approx(0.10)
+    assert res[4]["hist"] == pytest.approx(0.0)
+
+
+def test_sentiment_macd_histogram_warmup_window():
+    # First (slow-1)+(signal-1) histogram entries are None; here that is 4.
+    macd = getattr(api_main, "compute_sentiment_macd")
+    res = macd([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], fast=2, slow=4, signal=2)
+    for i in range(4):
+        assert res[i]["hist"] is None, f"expected None hist at warm-up index {i}"
+    assert res[4]["hist"] is not None
+
+
+def test_sentiment_macd_empty_buckets_carry_forward():
+    # Empty hours (None) must be carried forward, not treated as 0.0.
+    macd = getattr(api_main, "compute_sentiment_macd")
+
+    # A gapped series equals the same series with gaps filled by the prior value.
+    dense = macd([0.5, 0.5, 0.5, 0.5, 0.5, 0.5], fast=2, slow=4, signal=2)
+    gapped = macd([0.5, None, 0.5, None, 0.5, None], fast=2, slow=4, signal=2)
+    assert gapped == dense
+
+    # Burst-after-quiet on a constant series must NOT manufacture a cross:
+    # if None were read as 0.0, the histogram would swing here.
+    res = macd([0.8, 0.8, 0.8, None, None, 0.8, 0.8, 0.8], fast=2, slow=4, signal=2)
+    for r in res:
+        if r["hist"] is not None:
+            assert r["hist"] == pytest.approx(0.0)
+
+
+def test_sentiment_macd_leading_empties_stay_none():
+    macd = getattr(api_main, "compute_sentiment_macd")
+    res = macd([None, None, 0.5, 0.6, 0.7, 0.8], fast=2, slow=4, signal=2)
+    assert res[0]["macd"] is None
+    assert res[1]["macd"] is None
+    # First fully-populated slow window lands at index 5.
+    assert res[5]["macd"] == pytest.approx(0.10)
+    # Signal never gets two consecutive macd values, so no histogram bars.
+    assert all(r["hist"] is None for r in res)
+
+
+def test_sentiment_macd_empty_input():
+    macd = getattr(api_main, "compute_sentiment_macd")
+    assert macd([], fast=2, slow=4, signal=2) == []
+

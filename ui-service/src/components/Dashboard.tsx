@@ -42,16 +42,27 @@ interface MetricsData {
   beta_relative_sector: number | null; return_relative_sector: number | null;
   updated_at: string;
 }
+interface OpportunityData {
+  score: number;
+  classification: string;
+  color: string;
+  strategy: string;
+  description: string;
+  checklist: string[];
+}
 interface CorrelationBucket {
   timestamp: string; positive: number; neutral: number; negative: number;
   priceChange: number | null; futureChange: number | null;
   isMarketOpen: boolean; sentimentIndex: number; sentimentSMA: number;
+  rawPrice: number | null; buySignal: boolean | null; buyScore: number | null;
+  sentimentMACD?: number | null; sentimentSignal?: number | null; sentimentHist?: number | null;
 }
 interface ClosedRegion { start: string; end: string; }
 interface CorrelationData {
   data: CorrelationBucket[]; closedRegions: ClosedRegion[];
   supportPrice: number; supportPct: number; resistancePrice: number; resistancePct: number;
   maxR: number; bestLag: number; correlationText: string; correlationStrength: string;
+  opportunity: OpportunityData | null;
 }
 
 const platformColors: Record<string, string> = {
@@ -95,6 +106,36 @@ const topicProgressColors: Record<string, string> = {
   "General Chat": "bg-slate-600",
 };
 
+const CustomizedOpportunityDot = (props: any) => {
+  const { cx, cy, payload } = props;
+  if (!payload || !payload.buySignal) {
+    return null;
+  }
+  return (
+    <g key={`buy-dot-${payload.timestamp}`}>
+      <circle 
+        cx={cx} 
+        cy={cy} 
+        r={7} 
+        fill="none" 
+        stroke="#10b981" 
+        strokeWidth={1.5} 
+        strokeOpacity={0.8}
+        className="animate-ping"
+        style={{ transformOrigin: `${cx}px ${cy}px` }}
+      />
+      <circle 
+        cx={cx} 
+        cy={cy} 
+        r={4.5} 
+        fill="#10b981" 
+        stroke="#0f172a" 
+        strokeWidth={1.5} 
+      />
+    </g>
+  );
+};
+
 export default function Dashboard() {
   const [symbol, setSymbol] = useState("SMH");
   const [hours, setHours] = useState(24);
@@ -122,7 +163,8 @@ export default function Dashboard() {
   const [correlationData, setCorrelationData] = useState<CorrelationData>({
     data: [], closedRegions: [], supportPrice: 0, supportPct: 0,
     resistancePrice: 0, resistancePct: 0, maxR: 0, bestLag: 0,
-    correlationText: "Insufficient data for correlation", correlationStrength: "weak"
+    correlationText: "Insufficient data for correlation", correlationStrength: "weak",
+    opportunity: null
   });
 
   // Dynamic host determination for API and WebSocket
@@ -658,7 +700,7 @@ export default function Dashboard() {
                       name={`${symbol} Price Change`} 
                       stroke="#fbbf24" 
                       strokeWidth={3}
-                      dot={false} 
+                      dot={<CustomizedOpportunityDot />}
                       connectNulls={true}
                     />
                     <Line 
@@ -697,6 +739,53 @@ export default function Dashboard() {
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
+              {chartView === "sentiment" && (
+                <div className="mt-1">
+                  <div className="flex items-center gap-3 px-1 mb-1">
+                    <span className="text-xs font-medium text-slate-400">Sentiment Momentum</span>
+                    <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                      <div className="flex items-center gap-1"><div className="w-2.5 h-2.5 rounded-sm bg-emerald-500"></div> Rising</div>
+                      <div className="flex items-center gap-1"><div className="w-2.5 h-2.5 rounded-sm bg-rose-500"></div> Falling</div>
+                    </div>
+                  </div>
+                  <div className="h-[90px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={correlationData.data} margin={{ top: 0, right: 10, bottom: 0, left: -20 }}>
+                        <CartesianGrid stroke="#1e293b" vertical={false} strokeDasharray="3 3" />
+                        <XAxis
+                          dataKey="timestamp"
+                          tickFormatter={formatXAxis}
+                          stroke="#64748b"
+                          tickLine={false}
+                          axisLine={false}
+                          dy={6}
+                          minTickGap={40}
+                          tick={{ fontSize: 10 }}
+                        />
+                        <YAxis
+                          stroke="#64748b"
+                          tickLine={false}
+                          axisLine={false}
+                          tick={{ fontSize: 10 }}
+                          domain={['auto', 'auto']}
+                        />
+                        <Tooltip
+                          contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.9)', borderColor: '#334155', borderRadius: '8px', backdropFilter: 'blur(8px)' }}
+                          labelFormatter={(l) => format(new Date(l), "MMM d, yyyy h:mm a")}
+                          itemStyle={{ fontSize: '13px' }}
+                          formatter={(v) => [typeof v === 'number' ? v.toFixed(4) : v, "Momentum"]}
+                        />
+                        <ReferenceLine y={0} stroke="#475569" />
+                        <Bar dataKey="sentimentHist" name="Sentiment Momentum">
+                          {correlationData.data.map((entry, idx) => (
+                            <Cell key={idx} fill={(entry.sentimentHist ?? 0) >= 0 ? "#10b981" : "#f43f5e"} />
+                          ))}
+                        </Bar>
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
             </section>
 
             {/* Bottom Grid Split */}
@@ -775,6 +864,91 @@ export default function Dashboard() {
           {/* RIGHT COLUMN - SIDEBAR */}
           <div className="xl:col-span-4 space-y-6">
             
+            {/* Opportunity Scanner */}
+            <section className={cn(
+              "bg-slate-900/40 backdrop-blur-xl border rounded-2xl p-6 shadow-2xl relative overflow-hidden flex flex-col transition-all duration-300",
+              correlationData.opportunity
+                ? (correlationData.opportunity.color === 'emerald' ? 'border-emerald-500/25 shadow-[0_0_20px_rgba(16,185,129,0.08)]' :
+                   correlationData.opportunity.color === 'teal' ? 'border-teal-500/25 shadow-[0_0_20px_rgba(20,184,166,0.08)]' :
+                   correlationData.opportunity.color === 'rose' ? 'border-rose-500/25 shadow-[0_0_20px_rgba(244,63,94,0.08)]' :
+                   'border-white/5')
+                : 'border-white/5'
+            )}>
+              <div className="absolute top-0 right-0 p-4 opacity-[0.03] pointer-events-none">
+                <Zap className="w-16 h-16 text-indigo-500" />
+              </div>
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <Zap className="w-4 h-4 text-indigo-400" />
+                Opportunity Scanner
+              </h3>
+              <p className="text-xs text-slate-400 mb-4">Real-time trade opportunity signals & strategies</p>
+
+              {!correlationData.opportunity ? (
+                <div className="text-slate-500 text-xs text-center py-8">Calculating opportunity parameters...</div>
+              ) : (() => {
+                const opp = correlationData.opportunity;
+                
+                const colorMap: Record<string, { bg: string, text: string, border: string, progress: string }> = {
+                  emerald: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20', progress: 'bg-emerald-500' },
+                  teal: { bg: 'bg-teal-500/10', text: 'text-teal-400', border: 'border-teal-500/20', progress: 'bg-teal-500' },
+                  slate: { bg: 'bg-slate-500/10', text: 'text-slate-400', border: 'border-white/10', progress: 'bg-slate-400' },
+                  rose: { bg: 'bg-rose-500/10', text: 'text-rose-400', border: 'border-rose-500/20', progress: 'bg-rose-500' },
+                };
+                const theme = colorMap[opp.color] || colorMap.slate;
+
+                const checklistItems = [
+                  { key: "support", text: "Price near support zone", active: opp.checklist.some(s => s.toLowerCase().includes("support")) },
+                  { key: "crossover", text: "Bullish sentiment crossover", active: opp.checklist.some(s => s.toLowerCase().includes("crossover")) },
+                  { key: "divergence", text: "Bullish sentiment divergence", active: opp.checklist.some(s => s.toLowerCase().includes("divergence")) },
+                  { key: "valuation", text: "Favorable relative valuation", active: opp.checklist.some(s => s.toLowerCase().includes("valued")) },
+                ];
+
+                return (
+                  <div className="space-y-5">
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded border uppercase tracking-wider", theme.bg, theme.text, theme.border)}>
+                          {opp.classification}
+                        </span>
+                        <span className="text-xs font-bold text-white">{Math.round(opp.score)}% Setup Score</span>
+                      </div>
+                      <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                        <div className={cn("h-full rounded-full transition-all duration-500", theme.progress)} style={{ width: `${opp.score}%` }}></div>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-950/50 border border-white/5 rounded-xl p-4">
+                      <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Recommended Strategy</div>
+                      <div className="text-sm font-extrabold text-white flex items-center gap-1.5 mb-1">
+                        <TrendingUp className={cn("w-4 h-4 shrink-0", opp.score >= 50.0 ? "text-emerald-400" : "text-slate-400")} />
+                        {opp.strategy}
+                      </div>
+                      <p className="text-xs text-slate-400 leading-relaxed font-medium">{opp.description}</p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Signal Checklist</div>
+                      {checklistItems.map((item) => (
+                        <div key={item.key} className="flex items-center gap-2.5">
+                          <div className={cn(
+                            "w-4 h-4 rounded-full flex items-center justify-center border text-[9px] font-bold shrink-0",
+                            item.active
+                              ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                              : "bg-slate-950 text-slate-600 border-white/5"
+                          )}>
+                            {item.active ? "✓" : "○"}
+                          </div>
+                          <span className={cn("text-xs font-medium", item.active ? "text-slate-200" : "text-slate-500")}>
+                            {item.text}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+            </section>
+
             {/* Fundamental Metrics */}
             <section className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl p-6 shadow-2xl">
               <h3 className="text-lg font-bold mb-5 text-white">Fundamental Metrics</h3>
