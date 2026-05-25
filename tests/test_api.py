@@ -175,6 +175,17 @@ def test_correlation_endpoint(mock_db):
         assert "maxR" in data
         assert "bestLag" in data
         assert "opportunity" in data
+
+        # Lag sweep: one Pearson r per integer lag across the ±5h window, and
+        # the reported bestLag must be one of the swept lags.
+        assert "lagSweeps" in data
+        sweeps = data["lagSweeps"]
+        assert [s["lag"] for s in sweeps] == list(range(-5, 6))
+        assert all(-1.0 <= s["r"] <= 1.0 for s in sweeps)
+        assert data["bestLag"] in [s["lag"] for s in sweeps]
+        # bestLag/maxR must agree with the strongest-magnitude swept r.
+        peak = max(sweeps, key=lambda s: abs(s["r"]))
+        assert abs(data["maxR"]) == abs(peak["r"])
         
         # Support and resistance checks
         # support_price = sorted_prices[idx5] -> idx5 = int(19 * 0.05) = 0 -> 100.0

@@ -191,6 +191,13 @@ class ClosedRegion(BaseModel):
     end: str
 
 
+class LagSweepValue(BaseModel):
+    # Pearson r for one lag offset (hours). lag > 0: sentiment leads price;
+    # lag < 0: price leads sentiment; 0: coincident.
+    lag: int
+    r: float
+
+
 class OpportunityResponse(BaseModel):
     score: float
     classification: str
@@ -209,6 +216,7 @@ class CorrelationResponse(BaseModel):
     resistancePct: float
     maxR: float
     bestLag: int
+    lagSweeps: list[LagSweepValue] = []
     correlationText: str
     correlationStrength: str
     opportunity: Optional[OpportunityResponse] = None
@@ -988,6 +996,7 @@ async def get_correlation(
 
     max_r = 0.0
     best_lag = 0
+    lag_sweeps = []
     for lag in range(-5, 6):
         s_vals = []
         p_vals = []
@@ -1000,6 +1009,7 @@ async def get_correlation(
                     s_vals.append(s_val)
                     p_vals.append(p_val)
         r = pearson_r(s_vals, p_vals)
+        lag_sweeps.append({"lag": lag, "r": r})
         if abs(r) > abs(max_r):
             max_r = r
             best_lag = lag
@@ -1129,6 +1139,7 @@ async def get_correlation(
         "resistancePct": resistance_pct,
         "maxR": max_r,
         "bestLag": best_lag,
+        "lagSweeps": lag_sweeps,
         "correlationText": correlation_text,
         "correlationStrength": correlation_strength,
         "opportunity": current_opp
