@@ -17,6 +17,7 @@ from shared.config import (
     RABBIT_PORT,
     RABBIT_USER,
     QUEUE_RAW_POSTS,
+    get_env_int,
 )
 from shared.schemas import RawPost
 from shared.symbols import keywords_map, match_symbol
@@ -27,7 +28,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bluesky-producer")
 
-POLL_INTERVAL = 60  # 1 minute
+POLL_INTERVAL = get_env_int("BLUESKY_POLL_INTERVAL", 60)
+MAX_BACKOFF = get_env_int("BLUESKY_MAX_BACKOFF", 3600)
 
 async def main():
     logger.info("Starting Bluesky Polling Producer...")
@@ -46,11 +48,17 @@ async def main():
                 channel = await connection.channel()
                 await channel.declare_queue(QUEUE_RAW_POSTS, durable=True)
 
+                backoff = POLL_INTERVAL
                 while True:
                     kw_map = keywords_map()
+                    rate_limited = False
 
                     for symbol, terms in kw_map.items():
+                        if rate_limited:
+                            break
                         for term in terms:
+                            if rate_limited:
+                                break
                             try:
                                 params = {'q': term, 'limit': 25, 'sort': 'latest'}
                                 if term in last_seen:
@@ -100,9 +108,18 @@ async def main():
                                     logger.info(f"Term '{term}' ({symbol}): Published {new_posts_count} new posts.")
                             except Exception as e:
                                 logger.error(f"Error searching for term '{term}': {e}")
+                                rate_limited = True
 
-                    logger.info(f"Batch complete. Sleeping for {POLL_INTERVAL} seconds...")
-                    await asyncio.sleep(POLL_INTERVAL)
+                    if rate_limited:
+                        backoff = min(backoff * 2, MAX_BACKOFF)
+                        logger.warning(f"Error/Rate limit hit. Backing off for {backoff}s.")
+                    else:
+                        if backoff != POLL_INTERVAL:
+                            logger.info("Requests succeeding again; resetting poll interval.")
+                        backoff = POLL_INTERVAL
+
+                    logger.info(f"Batch complete. Sleeping for {backoff} seconds...")
+                    await asyncio.sleep(backoff)
 
         except Exception as e:
             logger.error(f"Error in main loop: {e}. Retrying in 5s...")

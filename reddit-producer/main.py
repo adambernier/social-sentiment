@@ -20,6 +20,7 @@ from shared.config import (
     RABBIT_USER,
     QUEUE_RAW_POSTS,
     REDDIT_USER_AGENT,
+    get_env_int,
 )
 from shared.schemas import RawPost
 from shared.symbols import keywords_map, match_symbol
@@ -36,28 +37,27 @@ SUBREDDITS = (
     "+options+StockMarket+semiconductors+Spacestocks"
 )
 FEED_URL = f"https://www.reddit.com/r/{SUBREDDITS}/comments.json?limit=100"
-POLL_INTERVAL = 300  # 5 minutes
+POLL_INTERVAL = get_env_int("REDDIT_POLL_INTERVAL", 300)
+MAX_BACKOFF = get_env_int("REDDIT_MAX_BACKOFF", 3600)
 
 # Global deque for ID-based deduplication
 seen_ids = deque(maxlen=2000)
 
-async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel):
+async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel) -> tuple[bool, int]:
     try:
         logger.info(f"Fetching RSS feed: {FEED_URL}")
         resp = await client.get(FEED_URL, timeout=15)
         
         if resp.status_code == 403:
             logger.error("Reddit 403 Forbidden. Check User-Agent or IP block.")
-            await asyncio.sleep(300)
-            return
+            return True, 300
         elif resp.status_code == 429:
             retry_after = int(resp.headers.get("Retry-After", 60))
-            logger.warning(f"Reddit 429 Rate Limited. Retrying after {retry_after}s.")
-            await asyncio.sleep(retry_after)
-            return
+            logger.warning(f"Reddit 429 Rate Limited. Retry-After header: {retry_after}s.")
+            return True, retry_after
         elif resp.status_code != 200:
             logger.error(f"Reddit JSON error: HTTP {resp.status_code}")
-            return
+            return True, 0
 
         data = resp.json()
         children = data.get("data", {}).get("children", [])
@@ -123,9 +123,12 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
             logger.info(f"Cycle complete. Published {new_posts_count} new Reddit comments across {len(matched_symbols)} symbols. (Feed: {total_entries}, New: {unseen_count})")
         else:
             logger.info(f"Cycle complete. No new matches. (Feed: {total_entries}, New: {unseen_count})")
+            
+        return False, 0
 
     except Exception as e:
         logger.error(f"Error in fetch_and_process: {e}", exc_info=True)
+        return True, 0
 
 async def main():
     logger.info("Starting Reddit RSS Producer...")
@@ -157,9 +160,23 @@ async def main():
                 await channel.declare_queue(QUEUE_RAW_POSTS, durable=True)
 
                 async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}) as client:
+                    backoff = POLL_INTERVAL
                     while True:
-                        await fetch_and_process(client, channel)
-                        await asyncio.sleep(POLL_INTERVAL)
+                        rate_limited, requested_backoff = await fetch_and_process(client, channel)
+                        
+                        if rate_limited:
+                            if requested_backoff > 0:
+                                backoff = min(requested_backoff, MAX_BACKOFF)
+                            else:
+                                backoff = min(backoff * 2, MAX_BACKOFF)
+                            logger.warning(f"Rate limited by Reddit. Backing off for {backoff}s.")
+                        else:
+                            if backoff != POLL_INTERVAL:
+                                logger.info("Requests succeeding again; resetting poll interval.")
+                            backoff = POLL_INTERVAL
+
+                        logger.info(f"Batch complete. Sleeping for {backoff} seconds...")
+                        await asyncio.sleep(backoff)
 
         except Exception as e:
             logger.error(f"RabbitMQ connection error: {e}. Retrying in 10s...")

@@ -16,6 +16,7 @@ from shared.config import (
     RABBIT_PORT,
     RABBIT_USER,
     QUEUE_RAW_POSTS,
+    get_env_int,
 )
 from shared.schemas import RawPost
 from shared.symbols import tickers
@@ -26,9 +27,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("stocktwits-producer")
 
-POLL_INTERVAL = 60  # 1 minute
+POLL_INTERVAL = get_env_int("STOCKTWITS_POLL_INTERVAL", 60)
+MAX_BACKOFF = get_env_int("STOCKTWITS_MAX_BACKOFF", 3600)
 
-async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika.Channel, last_seen_ids: dict):
+async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika.Channel, last_seen_ids: dict) -> bool:
     try:
         url = f"https://api.stocktwits.com/api/2/streams/symbol/{symbol}.json"
         params_api = {}
@@ -36,9 +38,12 @@ async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika
             params_api["since"] = last_seen_ids[symbol]
 
         response = await client.get(url, params=params_api, timeout=10)
+        if response.status_code == 429:
+            logger.warning(f"Rate limited (429) fetching StockTwits for {symbol}")
+            return True
         if response.status_code != 200:
             logger.error(f"Error fetching {symbol} from StockTwits: {response.status_code}")
-            return
+            return False
 
         data = response.json()
         messages = data.get("messages", [])
@@ -80,9 +85,12 @@ async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika
 
         if new_count > 0:
             logger.info(f"Symbol '{symbol}': Published {new_count} new messages.")
+        
+        return False
             
     except Exception as e:
         logger.error(f"Error processing symbol {symbol}: {e}")
+        return False
 
 async def main():
     logger.info("Starting StockTwits Async Polling Producer...")
@@ -101,12 +109,22 @@ async def main():
                 await channel.declare_queue(QUEUE_RAW_POSTS, durable=True)
 
                 async with httpx.AsyncClient() as client:
+                    backoff = POLL_INTERVAL
                     while True:
                         tasks = [fetch_symbol(symbol, client, channel, last_seen_ids) for symbol in symbols]
-                        await asyncio.gather(*tasks)
+                        results = await asyncio.gather(*tasks)
+                        rate_limited = any(results)
 
-                        logger.info(f"Batch complete. Sleeping for {POLL_INTERVAL} seconds...")
-                        await asyncio.sleep(POLL_INTERVAL)
+                        if rate_limited:
+                            backoff = min(backoff * 2, MAX_BACKOFF)
+                            logger.warning(f"Rate limited by StockTwits (429). Backing off for {backoff}s.")
+                        else:
+                            if backoff != POLL_INTERVAL:
+                                logger.info("Requests succeeding again; resetting poll interval.")
+                            backoff = POLL_INTERVAL
+
+                        logger.info(f"Batch complete. Sleeping for {backoff} seconds...")
+                        await asyncio.sleep(backoff)
 
         except Exception as e:
             logger.error(f"Error in main loop: {e}. Retrying in 10s...")
