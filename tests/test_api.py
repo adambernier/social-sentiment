@@ -147,9 +147,13 @@ def test_leaderboard_endpoint(mock_db):
         assert data[2]["buzz_z"] is None
         assert data[2]["post_count_4h"] == 0
         # The endpoint seeds the universe from tracked symbols and passes the
-        # min-baseline-hours guard as the second query param.
+        # baseline-window and min-baseline-hours guards as query params (in order).
         called_args = mock_db.execute.call_args[0]
-        assert called_args[1] == [api_main.tickers(), api_main.LEADERBOARD_MIN_BASELINE_HOURS]
+        assert called_args[1] == [
+            api_main.tickers(),
+            api_main.LEADERBOARD_BASELINE_DAYS,
+            api_main.LEADERBOARD_MIN_BASELINE_HOURS,
+        ]
 
 def test_correlation_endpoint(mock_db):
     now = datetime.now(timezone.utc)
