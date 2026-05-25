@@ -23,6 +23,11 @@ ASTS:
   future: "RTY=F"
   sector: "XAR"
 
+AVGO:
+  keywords: ["Broadcom", "Hock Tan"]
+  future: "NQ=F"
+  sector: "XLK"
+
 CRWV:
   keywords: ["CoreWeave"]
   future: "NQ=F"
