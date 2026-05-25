@@ -154,10 +154,15 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
               stroke="#64748b" tickLine={false} axisLine={false} tick={{ fontSize: 12 }}
             />
 
-            <Tooltip 
+            <Tooltip
               contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.9)', borderColor: '#334155', borderRadius: '8px', backdropFilter: 'blur(8px)' }}
               labelFormatter={(l) => format(new Date(l), "MMM d, yyyy h:mm a")}
               itemStyle={{ fontSize: '13px' }}
+              formatter={(value: any, name: any) => {
+                if (typeof value !== 'number') return [value, name];
+                // Whole counts (post volumes) stay integers; floats cap at 1 decimal.
+                return [Number.isInteger(value) ? value : value.toFixed(1), name];
+              }}
             />
 
             {chartView === "volume" ? (
@@ -205,7 +210,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                 <CartesianGrid stroke="#1e293b" vertical={false} strokeDasharray="3 3" />
                 <XAxis dataKey="timestamp" tickFormatter={formatXAxis} stroke="#64748b" tickLine={false} axisLine={false} dy={6} minTickGap={40} tick={{ fontSize: 10 }} />
                 <YAxis stroke="#64748b" tickLine={false} axisLine={false} tick={{ fontSize: 10 }} domain={['auto', 'auto']} />
-                <Tooltip contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.9)', borderColor: '#334155', borderRadius: '8px', backdropFilter: 'blur(8px)' }} labelFormatter={(l) => format(new Date(l), "MMM d, yyyy h:mm a")} itemStyle={{ fontSize: '13px' }} formatter={(v) => [typeof v === 'number' ? v.toFixed(4) : v, "Momentum"]} />
+                <Tooltip contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.9)', borderColor: '#334155', borderRadius: '8px', backdropFilter: 'blur(8px)' }} labelFormatter={(l) => format(new Date(l), "MMM d, yyyy h:mm a")} itemStyle={{ fontSize: '13px' }} formatter={(v) => [typeof v === 'number' ? v.toFixed(2) : v, "Momentum"]} />
                 <ReferenceLine y={0} stroke="#475569" />
                 <Bar dataKey="sentimentHist" name="Sentiment Momentum">
                   {correlationData.data.map((entry: any, idx: number) => (

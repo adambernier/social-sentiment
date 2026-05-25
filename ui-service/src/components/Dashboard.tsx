@@ -7,6 +7,9 @@ import TickerActivity from "./dashboard/TickerActivity";
 import TelemetryGrid from "./dashboard/TelemetryGrid";
 import LagSweepChart from "./dashboard/LagSweepChart";
 import CorrelationChart from "./dashboard/CorrelationChart";
+import OpportunityScanner from "./dashboard/OpportunityScanner";
+import SourceHealthPanel from "./dashboard/SourceHealthPanel";
+import SectorScorecard from "./dashboard/SectorScorecard";
 import Feed from "./dashboard/Feed";
 import Sidebar from "./dashboard/Sidebar";
 
@@ -30,12 +33,17 @@ export default function Dashboard() {
         <Header {...dashboardData} />
         <TickerActivity {...dashboardData} />
         <TelemetryGrid {...dashboardData} />
-        <LagSweepChart {...dashboardData} />
         <CorrelationChart {...dashboardData} />
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+          <OpportunityScanner {...dashboardData} />
+          <SourceHealthPanel sources={dashboardData.state.sourceHealth || []} />
+          <SectorScorecard {...dashboardData} />
+        </div>
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
           <Feed {...dashboardData} />
           <Sidebar {...dashboardData} />
         </div>
+        <LagSweepChart {...dashboardData} />
       </div>
     </div>
   );
