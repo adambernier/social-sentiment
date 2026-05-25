@@ -18,6 +18,7 @@ from shared.schemas import StockQuote, StockMetrics
 from shared.futures import get_futures_session, all_polled_futures
 from shared.symbols import tickers, sector_map
 from storage_service.db import DB
+from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL
 
 # Initialize market calendar
 nyse = mcal.get_calendar('NYSE')
@@ -207,6 +208,7 @@ def fetch_and_store(db: DB):
         try:
             inserted = db.insert_quote(quote)
             if inserted:
+                POSTS_INGESTED_TOTAL.labels(platform="market", symbol=quote.symbol).inc()
                 print(f"SUCCESS: {quote.symbol} at {quote.timestamp.strftime('%H:%M:%S')} UTC -> ${quote.price:.2f} ({quote.market_session})")
             else:
                 print(f"INFO: {quote.symbol} quote already exists for {quote.timestamp}")
@@ -238,6 +240,7 @@ def main():
         return
 
     print(f"Market Producer started. Tracking: {SYMBOLS}")
+    start_metrics_server(8003)
     print(f"Polling interval: {POLL_INTERVAL}s")
     
     last_metrics_update = 0

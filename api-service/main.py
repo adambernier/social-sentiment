@@ -11,6 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from prometheus_fastapi_instrumentator import Instrumentator
 
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -92,6 +93,7 @@ async def lifespan(app: FastAPI):
     await db_pool.close()
 
 app = FastAPI(title="Social Sentiment API", lifespan=lifespan)
+Instrumentator().instrument(app).expose(app)
 
 app.add_middleware(
     CORSMiddleware,

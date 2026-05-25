@@ -20,6 +20,7 @@ from shared.config import (
     QUEUE_SCORED_POSTS as INPUT_QUEUE,
 )
 from db import DB
+from shared.metrics import start_metrics_server, MESSAGES_PROCESSED_TOTAL
 
 # Configure logging
 logging.basicConfig(
@@ -64,6 +65,8 @@ async def db_writer_worker(queue: asyncio.Queue, db: DB):
                     # Run database writes asynchronously
                     rows = await db.insert_scored_batch_async(batch_posts)
                     logger.info(f"Batch inserted: {len(batch_posts)} posts (affected rows: {rows}).")
+                    
+                    MESSAGES_PROCESSED_TOTAL.labels(service="storage").inc(len(batch_posts))
 
                     # Acknowledge all messages in the batch
                     for message in batch_messages:
@@ -141,6 +144,7 @@ async def rollup_scheduler(db: DB):
 
 async def main():
     logger.info("Initializing database and applying schema...")
+    start_metrics_server(8008)
     db = DB()
     logger.info("Database schema applied.")
 

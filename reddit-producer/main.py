@@ -24,6 +24,7 @@ from shared.config import (
 )
 from shared.schemas import RawPost
 from shared.symbols import keywords_map, match_symbol
+from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -116,6 +117,7 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
                         routing_key=QUEUE_RAW_POSTS,
                     )
                     
+                    POSTS_INGESTED_TOTAL.labels(platform="reddit", symbol=symbol).inc()
                     new_posts_count += 1
                     matched_symbols.add(symbol)
 
@@ -132,6 +134,7 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
 
 async def main():
     logger.info("Starting Reddit RSS Producer...")
+    start_metrics_server(8005)
     
     # Initialize seen_ids with a "drain" fetch to avoid re-publishing old posts on startup
     # We do one quick fetch to populate the deque.
@@ -165,6 +168,7 @@ async def main():
                         rate_limited, requested_backoff = await fetch_and_process(client, channel)
                         
                         if rate_limited:
+                            RATE_LIMITS_HIT_TOTAL.labels(platform="reddit").inc()
                             if requested_backoff > 0:
                                 backoff = min(requested_backoff, MAX_BACKOFF)
                             else:

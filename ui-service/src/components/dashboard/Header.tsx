@@ -39,8 +39,8 @@ export default function Header({ state, setters, computed }: DashboardDataProps)
           {leaderboard && leaderboard.length > 0 ? (
             leaderboard
               .slice()
-              .sort((a, b) => a.symbol.localeCompare(b.symbol))
-              .map((item) => (
+              .sort((a: any, b: any) => a.symbol.localeCompare(b.symbol))
+              .map((item: any) => (
                 <option key={item.symbol} value={item.symbol}>{item.symbol}</option>
               ))
           ) : (

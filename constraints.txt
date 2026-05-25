@@ -5,6 +5,10 @@
 # These are intent-level version pins; the per-service requirements.txt lockfiles
 # (compiled with uv, with hashes) are what actually get installed.
 #
+# WARNING: Adding a package here ONLY constraints its version! To actually install
+# a new dependency, you MUST also add it to the individual service's `requirements.in`
+# file, and then run `./scripts/lock.sh` to update the hashed lockfiles.
+#
 # Pinned to the known-good versions running as of 2026-05-24.
 # Used by every service
 pydantic==2.13.4
@@ -23,5 +27,8 @@ onnxruntime==1.26.0
 transformers==5.9.0
 numpy==2.4.6
 
+# Observability
+prometheus_client==0.20.0
+prometheus-fastapi-instrumentator==7.0.0
 # Configuration parsing
 PyYAML==6.0.2

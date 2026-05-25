@@ -19,6 +19,7 @@ from shared.config import (
     QUEUE_SCORED_POSTS as OUTPUT_QUEUE,
 )
 from model import SentimentModel
+from shared.metrics import start_metrics_server, MESSAGES_PROCESSED_TOTAL
 
 # Configure logging
 logging.basicConfig(
@@ -63,6 +64,8 @@ async def batch_worker(queue: asyncio.Queue, model: SentimentModel, channel: aio
 
                 # Run GPU/CPU bound inference in background thread executor
                 results = await asyncio.to_thread(model.predict_batch, texts)
+                
+                MESSAGES_PROCESSED_TOTAL.labels(service="sentiment").inc(len(batch_posts))
 
                 for post, (label, scores), message in zip(batch_posts, results, batch_messages):
                     try:
@@ -105,6 +108,7 @@ async def batch_worker(queue: asyncio.Queue, model: SentimentModel, channel: aio
 
 async def main():
     logger.info("Loading sentiment model...")
+    start_metrics_server(8009)
     model = SentimentModel()
     logger.info("Sentiment model loaded successfully.")
 

@@ -6,3 +6,4 @@ psycopg[binary,pool]
 aio-pika
 pydantic
 PyYAML
+prometheus_client

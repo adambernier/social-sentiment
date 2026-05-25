@@ -24,6 +24,7 @@ from shared.config import (
 )
 from shared.schemas import RawPost
 from shared.symbols import tickers
+from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,6 +108,7 @@ async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio
                 routing_key=QUEUE_RAW_POSTS,
             )
             
+            POSTS_INGESTED_TOTAL.labels(platform="yahoo", symbol=symbol).inc()
             seen_links.add(link)
             new_count += 1
 
@@ -120,6 +122,7 @@ async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio
 
 async def main():
     logger.info("Starting Yahoo Finance News Async Polling Producer...")
+    start_metrics_server(8004)
     
     symbols = tickers()
     logger.info(f"Tracking symbols: {symbols}")
@@ -153,6 +156,7 @@ async def main():
                         # Exponential backoff while throttled; reset once requests
                         # go through, so a transient limit doesn't slow us forever.
                         if rate_limited:
+                            RATE_LIMITS_HIT_TOTAL.labels(platform="yahoo").inc()
                             backoff = min(backoff * 2, MAX_BACKOFF)
                             logger.warning(
                                 f"Throttled by Yahoo (429). Backing off for {backoff}s "

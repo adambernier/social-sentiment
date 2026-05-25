@@ -20,6 +20,7 @@ from shared.config import (
 )
 from shared.schemas import RawPost
 from shared.symbols import tickers
+from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,6 +80,7 @@ async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika
                 routing_key=QUEUE_RAW_POSTS,
             )
             
+            POSTS_INGESTED_TOTAL.labels(platform="stocktwits", symbol=symbol).inc()
             new_count += 1
             if msg["id"] > last_seen_ids[symbol]:
                 last_seen_ids[symbol] = msg["id"]
@@ -94,6 +96,7 @@ async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika
 
 async def main():
     logger.info("Starting StockTwits Async Polling Producer...")
+    start_metrics_server(8006)
     
     symbols = tickers()
     logger.info(f"Tracking symbols: {symbols}")
@@ -116,6 +119,7 @@ async def main():
                         rate_limited = any(results)
 
                         if rate_limited:
+                            RATE_LIMITS_HIT_TOTAL.labels(platform="stocktwits").inc()
                             backoff = min(backoff * 2, MAX_BACKOFF)
                             logger.warning(f"Rate limited by StockTwits (429). Backing off for {backoff}s.")
                         else:

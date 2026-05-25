@@ -21,6 +21,7 @@ from shared.config import (
 )
 from shared.schemas import RawPost
 from shared.symbols import tickers, match_symbol
+from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,6 +118,7 @@ async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio
                 routing_key=QUEUE_RAW_POSTS,
             )
 
+            POSTS_INGESTED_TOTAL.labels(platform="finnhub", symbol=symbol).inc()
             seen_ids.add(post_id)
             new_count += 1
 
@@ -131,6 +133,7 @@ async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio
 
 async def main():
     logger.info("Starting Finnhub Company News Producer...")
+    start_metrics_server(8002)
 
     if not FINNHUB_API_KEY:
         logger.error(
@@ -167,6 +170,7 @@ async def main():
                             seen_ids = set(list(seen_ids)[-2000:])
 
                         if rate_limited:
+                            RATE_LIMITS_HIT_TOTAL.labels(platform="finnhub").inc()
                             backoff = min(backoff * 2, MAX_BACKOFF)
                             logger.warning(
                                 f"Rate limited by Finnhub (429). Backing off for {backoff}s."

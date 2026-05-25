@@ -6,3 +6,4 @@ httpx
 aio-pika
 pydantic
 PyYAML
+prometheus_client

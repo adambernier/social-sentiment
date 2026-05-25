@@ -1,0 +1,43 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'api-service'
+    static_configs:
+      - targets: ['api-service:8000']
+
+  - job_name: 'bluesky-producer'
+    static_configs:
+      - targets: ['bluesky-producer:8001']
+
+  - job_name: 'finnhub-producer'
+    static_configs:
+      - targets: ['finnhub-producer:8002']
+
+  - job_name: 'market-producer'
+    static_configs:
+      - targets: ['market-producer:8003']
+
+  - job_name: 'news-producer'
+    static_configs:
+      - targets: ['news-producer:8004']
+
+  - job_name: 'reddit-producer'
+    static_configs:
+      - targets: ['reddit-producer:8005']
+
+  - job_name: 'stocktwits-producer'
+    static_configs:
+      - targets: ['stocktwits-producer:8006']
+
+  - job_name: 'preprocessing-service'
+    static_configs:
+      - targets: ['preprocessing-service:8007']
+
+  - job_name: 'storage-service'
+    static_configs:
+      - targets: ['storage-service:8008']
+
+  - job_name: 'sentiment-service'
+    static_configs:
+      - targets: ['sentiment-service:8009']

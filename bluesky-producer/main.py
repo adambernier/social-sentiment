@@ -21,6 +21,7 @@ from shared.config import (
 )
 from shared.schemas import RawPost
 from shared.symbols import keywords_map, match_symbol
+from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,6 +34,7 @@ MAX_BACKOFF = get_env_int("BLUESKY_MAX_BACKOFF", 3600)
 
 async def main():
     logger.info("Starting Bluesky Polling Producer...")
+    start_metrics_server(8001)
     rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"
     client = AsyncClient(base_url='https://api.bsky.app')
     
@@ -99,6 +101,7 @@ async def main():
                                         ),
                                         routing_key=QUEUE_RAW_POSTS,
                                     )
+                                    POSTS_INGESTED_TOTAL.labels(platform="bluesky", symbol=symbol).inc()
                                     new_posts_count += 1
                                     
                                     if term not in last_seen or post.record.created_at > last_seen[term]:
@@ -111,6 +114,7 @@ async def main():
                                 rate_limited = True
 
                     if rate_limited:
+                        RATE_LIMITS_HIT_TOTAL.labels(platform="bluesky").inc()
                         backoff = min(backoff * 2, MAX_BACKOFF)
                         logger.warning(f"Error/Rate limit hit. Backing off for {backoff}s.")
                     else:

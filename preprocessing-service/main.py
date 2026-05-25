@@ -19,6 +19,7 @@ from shared.config import (
     QUEUE_CLEAN_POSTS as OUTPUT_QUEUE,
 )
 from preprocess import clean_text, is_valid
+from shared.metrics import start_metrics_server, MESSAGES_PROCESSED_TOTAL
 
 # Configure logger
 logging.basicConfig(
@@ -64,11 +65,13 @@ async def process_message(message: aio_pika.IncomingMessage, topic_model: TopicM
             ),
             routing_key=OUTPUT_QUEUE,
         )
+        MESSAGES_PROCESSED_TOTAL.labels(service="preprocessing").inc()
         logger.info(f"{raw.id} ({raw.symbol}): topic='{topic_label}', text='{cleaned[:70]}'")
 
 
 async def main():
     logger.info("Initializing Topic Model...")
+    start_metrics_server(8007)
     topic_model = TopicModel()
     logger.info("Topic Model loaded successfully.")
 
