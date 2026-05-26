@@ -21,6 +21,18 @@ CREATE INDEX IF NOT EXISTS posts_platform_idx ON posts (platform);
 CREATE INDEX IF NOT EXISTS posts_symbol_timestamp_idx ON posts (symbol, timestamp DESC);
 
 
+CREATE TABLE IF NOT EXISTS tracked_symbols (
+    symbol            TEXT PRIMARY KEY,
+    keywords          JSONB NOT NULL DEFAULT '[]'::jsonb,
+    future            TEXT,
+    sector            TEXT,
+    require_uppercase BOOLEAN NOT NULL DEFAULT FALSE,
+    block_phrases     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS stock_quotes (
     id          SERIAL PRIMARY KEY,
     symbol      TEXT NOT NULL,

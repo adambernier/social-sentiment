@@ -170,6 +170,7 @@ services:
       dockerfile: api-service/Dockerfile
     environment:
     - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
+    - ADMIN_API_KEY=${ADMIN_API_KEY:-antigravity}
     ports:
     - 8000:8000
     depends_on:

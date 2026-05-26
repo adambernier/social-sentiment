@@ -8,9 +8,12 @@ from typing import Optional
 
 import psycopg
 from psycopg_pool import AsyncConnectionPool
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Security, HTTPException, Depends, status
+from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import os
+import json
 from prometheus_fastapi_instrumentator import Instrumentator
 
 # Setup path for shared imports
@@ -102,6 +105,96 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def verify_api_key(api_key: str = Security(api_key_header)):
+    if not ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Admin API Key is not configured on the server")
+    if api_key != ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+    return api_key
+
+class TrackedSymbol(BaseModel):
+    symbol: str
+    keywords: list[str] = []
+    future: Optional[str] = None
+    sector: Optional[str] = None
+    require_uppercase: bool = False
+    block_phrases: list[str] = []
+    is_active: bool = True
+
+@app.get("/api/admin/symbols", response_model=list[TrackedSymbol])
+async def get_admin_symbols(api_key: str = Depends(verify_api_key)):
+    query = """
+        SELECT symbol, keywords, future, sector, require_uppercase, block_phrases, is_active
+        FROM tracked_symbols
+        ORDER BY symbol
+    """
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query)
+            rows = await cur.fetchall()
+            return rows
+
+@app.post("/api/admin/symbols")
+async def create_admin_symbol(symbol_data: TrackedSymbol, api_key: str = Depends(verify_api_key)):
+    query = """
+        INSERT INTO tracked_symbols (symbol, keywords, future, sector, require_uppercase, block_phrases, is_active)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """
+    params = (
+        symbol_data.symbol,
+        json.dumps(symbol_data.keywords),
+        symbol_data.future,
+        symbol_data.sector,
+        symbol_data.require_uppercase,
+        json.dumps(symbol_data.block_phrases),
+        symbol_data.is_active
+    )
+    try:
+        async with get_db_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, params)
+        return {"status": "success"}
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(status_code=400, detail="Symbol already exists")
+
+@app.put("/api/admin/symbols/{symbol}")
+async def update_admin_symbol(symbol: str, symbol_data: TrackedSymbol, api_key: str = Depends(verify_api_key)):
+    query = """
+        UPDATE tracked_symbols
+        SET keywords = %s, future = %s, sector = %s, require_uppercase = %s, block_phrases = %s, is_active = %s, updated_at = NOW()
+        WHERE symbol = %s
+    """
+    params = (
+        json.dumps(symbol_data.keywords),
+        symbol_data.future,
+        symbol_data.sector,
+        symbol_data.require_uppercase,
+        json.dumps(symbol_data.block_phrases),
+        symbol_data.is_active,
+        symbol
+    )
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, params)
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Symbol not found")
+    return {"status": "success"}
+
+@app.delete("/api/admin/symbols/{symbol}")
+async def delete_admin_symbol(symbol: str, api_key: str = Depends(verify_api_key)):
+    # Soft delete
+    query = "UPDATE tracked_symbols SET is_active = false, updated_at = NOW() WHERE symbol = %s"
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, (symbol,))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Symbol not found")
+    return {"status": "success"}
+
 
 class PostResponse(BaseModel):
     id: str

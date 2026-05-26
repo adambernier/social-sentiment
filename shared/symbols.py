@@ -1,81 +1,111 @@
 import re
-
 import yaml
 from pathlib import Path
+import threading
+import time
+import json
+import psycopg
+import sys
+import logging
 
-"""Source of truth for per-symbol configuration.
+# Fallback path for initial seed
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "symbols.yaml"
 
-Loads the tracker configuration dynamically from symbols.yaml at the project root.
-"""
+# Try to get database DSN directly or construct a fallback
+import os
+def get_env(key: str, default: str) -> str:
+    return os.environ.get(key, default)
+DATABASE_DSN = get_env("DATABASE_DSN", "postgresql://postgres:sentiment@localhost:5432/sentiment")
 
-def load_symbols() -> dict[str, dict]:
-    # Project root is two levels up from shared/symbols.py
-    # (i.e. /shared/symbols.py -> /)
-    config_path = Path(__file__).resolve().parent.parent / "symbols.yaml"
-    if not config_path.exists():
-        # Fallback for testing or if missing
+logger = logging.getLogger("shared-symbols")
+
+def load_symbols_fallback() -> dict[str, dict]:
+    if not CONFIG_PATH.exists():
         return {}
-        
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
-        
     return config if config else {}
 
-SYMBOLS: dict[str, dict] = load_symbols()
+# Initialize with fallback (so startup isn't completely empty before DB connects)
+SYMBOLS: dict[str, dict] = load_symbols_fallback()
+SYMBOLS_LOCK = threading.Lock()
 
+def fetch_symbols_from_db():
+    try:
+        with psycopg.connect(DATABASE_DSN) as conn:
+            with conn.cursor() as cur:
+                # We only fetch active symbols
+                cur.execute("""
+                    SELECT symbol, keywords, future, sector, require_uppercase, block_phrases 
+                    FROM tracked_symbols 
+                    WHERE is_active = true
+                """)
+                rows = cur.fetchall()
+                new_symbols = {}
+                for row in rows:
+                    new_symbols[row[0]] = {
+                        "keywords": row[1] if isinstance(row[1], list) else json.loads(row[1]),
+                        "future": row[2],
+                        "sector": row[3],
+                        "require_uppercase": row[4],
+                        "block_phrases": row[5] if isinstance(row[5], list) else json.loads(row[5]),
+                    }
+                
+                if new_symbols:
+                    global SYMBOLS
+                    with SYMBOLS_LOCK:
+                        SYMBOLS = new_symbols
+    except Exception as e:
+        logger.error(f"Failed to fetch symbols from DB: {e}")
+
+def _symbol_refresher_loop():
+    while True:
+        time.sleep(60) # Poll every 60 seconds
+        fetch_symbols_from_db()
+
+# Start background thread to keep symbols fresh automatically
+_refresher_thread = threading.Thread(target=_symbol_refresher_loop, daemon=True)
+_refresher_thread.start()
+# Do an initial synchronous fetch just in case the DB is ready
+fetch_symbols_from_db()
 
 def tickers() -> list[str]:
-    return sorted(SYMBOLS.keys())
-
+    with SYMBOLS_LOCK:
+        return sorted(SYMBOLS.keys())
 
 def keywords_map() -> dict[str, list[str]]:
-    # Auto-prepends ticker and $cashtag — assumes cashtag is always $<TICKER>,
-    # which holds for US equities and ETFs but would need adjustment for
-    # tickers containing dots or dashes.
-    return {
-        t: [t, f"${t}"] + cfg["keywords"]
-        for t, cfg in SYMBOLS.items()
-    }
-
+    with SYMBOLS_LOCK:
+        return {
+            t: [t, f"${t}"] + cfg.get("keywords", [])
+            for t, cfg in SYMBOLS.items()
+        }
 
 def primary_futures_map() -> dict[str, str]:
-    return {t: cfg["future"] for t, cfg in SYMBOLS.items()}
-
+    with SYMBOLS_LOCK:
+        return {t: cfg.get("future") for t, cfg in SYMBOLS.items()}
 
 def sector_map() -> dict[str, str]:
-    return {t: cfg["sector"] for t, cfg in SYMBOLS.items()}
-
+    with SYMBOLS_LOCK:
+        return {t: cfg.get("sector") for t, cfg in SYMBOLS.items()}
 
 def match_symbol(text: str, symbol: str) -> bool:
-    """
-    Returns True if the text contains a high-precision match for the symbol.
-    Applies case-sensitivity and block-phrase filtering for ambiguous tickers.
-    """
-    cfg = SYMBOLS.get(symbol)
+    with SYMBOLS_LOCK:
+        cfg = SYMBOLS.get(symbol)
     if not cfg:
         return False
     
-    # 1. Global Block Phrases (Case-Insensitive)
-    # If any block phrase is found anywhere in the text, it's a reject.
     for phrase in cfg.get("block_phrases", []):
         if phrase.lower() in text.lower():
             return False
             
-    # 2. Cashtag Match (Highest Precision, Case-Insensitive)
-    # $NVDA, $nvda, $MU, $mu are all high-signal.
     cashtag = f"${symbol}"
     if re.search(rf"(?<![a-zA-Z0-9]){re.escape(cashtag)}(?![a-zA-Z0-9])", text, re.I):
         return True
         
-    # 3. Company Keywords Match (High Precision, Case-Insensitive)
-    # "Nvidia", "Micron", "SpaceMobile" are high-signal regardless of case.
     for kw in cfg.get("keywords", []):
         if re.search(rf"(?<![a-zA-Z0-9]){re.escape(kw)}(?![a-zA-Z0-9])", text, re.I):
             return True
             
-    # 4. Bare Ticker Match
-    # If require_uppercase is set, we strictly match uppercase 'SYMBOL' (e.g. SMH)
-    # Otherwise, we match case-insensitively (e.g. asts).
     flags = 0 if cfg.get("require_uppercase") else re.I
     pattern = rf"(?<![a-zA-Z0-9]){re.escape(symbol)}(?![a-zA-Z0-9])"
     if re.search(pattern, text, flags):

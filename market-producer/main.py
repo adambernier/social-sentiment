@@ -23,9 +23,7 @@ from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL
 # Initialize market calendar
 nyse = mcal.get_calendar('NYSE')
 
-EQUITY_SYMBOLS = tickers()
-SYMBOLS = EQUITY_SYMBOLS + all_polled_futures()
-SECTOR_MAP = sector_map()
+SECTOR_MAP_CACHE = {}
 POLL_INTERVAL = 60  # 1 minute
 METRICS_INTERVAL = 3600 # 1 hour
 
@@ -40,7 +38,9 @@ def fetch_and_store_metrics(db: DB):
     print("Updating financial metrics...")
     sector_cache = {}
     
-    for symbol in SYMBOLS:
+    current_symbols = tickers() + all_polled_futures()
+    sector_mapping = sector_map()
+    for symbol in current_symbols:
         try:
             ticker = yf.Ticker(symbol)
             info = ticker.info
@@ -62,7 +62,7 @@ def fetch_and_store_metrics(db: DB):
             beta = info.get("beta")
             
             # Fetch sector baseline (with local execution caching)
-            sector_etf = SECTOR_MAP.get(symbol, "SPY")
+            sector_etf = sector_mapping.get(symbol, "SPY")
             if sector_etf not in sector_cache:
                 try:
                     print(f"Fetching sector baseline metrics for {sector_etf}...")
@@ -196,10 +196,11 @@ def fetch_single_quote(symbol: str, now_utc: datetime) -> StockQuote | None:
 def fetch_and_store(db: DB):
     now_utc = datetime.now(timezone.utc)
     
+    current_symbols = tickers() + all_polled_futures()
     # Run requests concurrently using a ThreadPoolExecutor
     # max_workers=10 balance speed and resource usage
-    with ThreadPoolExecutor(max_workers=min(len(SYMBOLS), 10)) as executor:
-        quotes = list(executor.map(lambda sym: fetch_single_quote(sym, now_utc), SYMBOLS))
+    with ThreadPoolExecutor(max_workers=min(len(current_symbols), 10)) as executor:
+        quotes = list(executor.map(lambda sym: fetch_single_quote(sym, now_utc), current_symbols))
         
     # Write to database sequentially to prevent concurrent psycopg connection issues
     for quote in quotes:
@@ -239,7 +240,7 @@ def main():
         print(f"CRITICAL: Could not connect to database: {e}")
         return
 
-    print(f"Market Producer started. Tracking: {SYMBOLS}")
+    print(f"Market Producer started.")
     start_metrics_server(8003)
     print(f"Polling interval: {POLL_INTERVAL}s")
     
