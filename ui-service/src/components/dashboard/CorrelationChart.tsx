@@ -7,16 +7,18 @@ import { DashboardDataProps } from "../types";
 
 const CustomizedOpportunityDot = (props: any) => {
   const { cx, cy, payload, value } = props;
-  // If there's no valid price data (null value) or no signal, don't render the dot.
-  // This prevents dots from floating at the top (cy=0) when markets are closed.
   if (!payload || !payload.buySignal || value == null) return null;
+  
+  // Good = Emerald Green, Bad = Rose Red, Pending = Amber Yellow
+  const dotColor = payload.signalQuality === "bad" ? "#f43f5e" : payload.signalQuality === "pending" ? "#fbbf24" : "#10b981";
+
   return (
     <g key={`buy-dot-${payload.timestamp}`}>
       <circle 
-        cx={cx} cy={cy} r={7} fill="none" stroke="#10b981" strokeWidth={1.5} strokeOpacity={0.8}
+        cx={cx} cy={cy} r={7} fill="none" stroke={dotColor} strokeWidth={1.5} strokeOpacity={0.8}
         className="animate-ping" style={{ transformOrigin: `${cx}px ${cy}px` }}
       />
-      <circle cx={cx} cy={cy} r={4.5} fill="#10b981" stroke="#0f172a" strokeWidth={1.5} />
+      <circle cx={cx} cy={cy} r={4.5} fill={dotColor} stroke="#0f172a" strokeWidth={1.5} />
     </g>
   );
 };
@@ -155,13 +157,44 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
             />
 
             <Tooltip
-              contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.9)', borderColor: '#334155', borderRadius: '8px', backdropFilter: 'blur(8px)' }}
-              labelFormatter={(l) => format(new Date(l), "MMM d, yyyy h:mm a")}
-              itemStyle={{ fontSize: '13px' }}
-              formatter={(value: any, name: any) => {
-                if (typeof value !== 'number') return [value, name];
-                // Whole counts (post volumes) stay integers; floats cap at 1 decimal.
-                return [Number.isInteger(value) ? value : value.toFixed(1), name];
+              content={({ active, payload, label }: any) => {
+                if (active && payload && payload.length) {
+                  const data = payload[0].payload;
+                  return (
+                    <div className="bg-slate-900/90 border border-slate-700 p-3 rounded-lg backdrop-blur-md shadow-xl text-sm min-w-[200px]">
+                      <p className="text-slate-300 font-medium mb-3 pb-2 border-b border-white/5">{format(new Date(label), "MMM d, yyyy h:mm a")}</p>
+                      {payload.map((p: any) => (
+                        <div key={p.name} className="flex justify-between items-center gap-4 mb-1.5">
+                          <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 rounded-full shadow-sm" style={{ backgroundColor: p.color }}></div>
+                            <span className="text-slate-400 text-xs">{p.name}</span>
+                          </div>
+                          <span className="text-white font-semibold text-xs">
+                            {typeof p.value === 'number' && !Number.isInteger(p.value) ? p.value.toFixed(2) : p.value}
+                            {p.name.includes('Change') || p.name.includes('Index') ? '%' : ''}
+                          </span>
+                        </div>
+                      ))}
+                      {data.buySignal && (
+                        <div className="mt-3 pt-3 border-t border-white/5">
+                          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Algorithmic Signal</div>
+                          <div className={cn(
+                            "flex items-center gap-2 text-xs font-semibold px-2.5 py-1.5 rounded-md", 
+                            data.signalQuality === 'good' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 
+                            data.signalQuality === 'bad' ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20' : 
+                            'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                          )}>
+                            <div className={cn("w-1.5 h-1.5 rounded-full", data.signalQuality === 'good' ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : data.signalQuality === 'bad' ? 'bg-rose-400' : 'bg-amber-400 animate-pulse')}></div>
+                            {data.signalQuality === 'good' ? 'Profitable (Price Rose)' : 
+                             data.signalQuality === 'bad' ? 'False Signal (Price Dropped)' : 
+                             'Pending (Awaiting Data)'}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+                return null;
               }}
             />
 
@@ -180,7 +213,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
 
             <Line 
               yAxisId="right" type="monotone" dataKey="priceChange" name={`${symbol} Price Change`} 
-              stroke="#fbbf24" strokeWidth={3} dot={<CustomizedOpportunityDot />} connectNulls={true}
+              stroke="#fbbf24" strokeWidth={3} dot={<CustomizedOpportunityDot fullData={correlationData.data} />} connectNulls={true}
             />
             <Line 
               yAxisId="right" type="monotone" dataKey="futureChange" name="NQ Futures Change" 

@@ -295,6 +295,7 @@ class CorrelationBucket(BaseModel):
     sentimentSMA: float
     rawPrice: Optional[float] = None
     buySignal: Optional[bool] = None
+    signalQuality: Optional[str] = None
     buyScore: Optional[float] = None
     # Sentiment momentum oscillator (MACD-style). Optional: None during warm-up
     # and leading empty hours, so 0.0 stays meaningful (the zero-cross).
@@ -1106,6 +1107,7 @@ async def get_correlation(
             "sentimentSMA": 0.0,
             "rawPrice": None,
             "buySignal": None,
+            "signalQuality": None,
             "buyScore": None
         }
 
@@ -1439,6 +1441,24 @@ async def get_correlation(
         )
         sorted_data[i]['buyScore'] = opp['score']
         sorted_data[i]['buySignal'] = opp['score'] >= 50.0
+        sorted_data[i]['signalQuality'] = "pending"
+
+    # Evaluate forward returns for signals
+    for i in range(len(sorted_data)):
+        if sorted_data[i]['buySignal']:
+            curr_price = sorted_data[i]['rawPrice']
+            if curr_price is not None:
+                # Look forward up to 12 hours for the trend
+                forward_prices = [
+                    sorted_data[k]['rawPrice'] 
+                    for k in range(i + 1, min(len(sorted_data), i + 13)) 
+                    if sorted_data[k]['rawPrice'] is not None
+                ]
+                if forward_prices:
+                    if forward_prices[-1] < curr_price:
+                        sorted_data[i]['signalQuality'] = "bad"
+                    else:
+                        sorted_data[i]['signalQuality'] = "good"
 
     # 10. Compute final current opportunity
     latest_item = sorted_data[-1] if len(sorted_data) > 0 else None
