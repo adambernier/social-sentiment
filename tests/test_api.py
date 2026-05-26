@@ -14,7 +14,7 @@ app = api_main.app
 def mock_db():
     # Patch postgres_listener to avoid starting background DB listener tasks
     # and patch AsyncConnectionPool so it doesn't open real connections
-    with patch.object(api_main, "postgres_listener", return_value=asyncio.sleep(0)) as mock_listener, \
+    with patch.object(api_main, "postgres_listener", new_callable=AsyncMock) as mock_listener, \
          patch.object(api_main, "AsyncConnectionPool") as mock_pool_cls:
         
         mock_pool = MagicMock()
