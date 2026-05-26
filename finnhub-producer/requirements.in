@@ -4,6 +4,7 @@
 
 httpx
 aio-pika
+psycopg[binary,pool]
 pydantic
 PyYAML
 prometheus_client
