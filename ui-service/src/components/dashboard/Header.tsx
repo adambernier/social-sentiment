@@ -71,8 +71,7 @@ export default function Header({ state, setters, computed }: DashboardDataProps)
           <option value="bluesky">Bluesky</option>
           <option value="reddit">Reddit</option>
           <option value="stocktwits">Stocktwits</option>
-          <option value="yahoo">Yahoo Finance News</option>
-          <option value="finnhub">Finnhub News</option>
+          <option value="finnhub">News Article</option>
         </select>
         <select 
           value={selectedTopic}

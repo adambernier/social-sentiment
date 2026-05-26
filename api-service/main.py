@@ -596,7 +596,7 @@ async def get_topic_stats(
 
 # Post-producing data sources we expect to be ingesting. Surfaced read-only so a
 # dead/blocked source (e.g. a rate-limited news feed) is obvious at a glance.
-INGESTION_SOURCES = ["bluesky", "reddit", "stocktwits", "yahoo", "finnhub"]
+INGESTION_SOURCES = ["bluesky", "reddit", "stocktwits", "finnhub"]
 
 # A source is "stalled" (unusually quiet for itself) when the gap since its last
 # post exceeds this multiple of its average gap (24h / posts_24h) AND an absolute

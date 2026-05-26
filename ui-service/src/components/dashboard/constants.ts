@@ -11,12 +11,11 @@ export const platformLabels: Record<string, string> = {
   twitter: 'X/Twitter',
   reddit: 'Reddit',
   bluesky: 'Bluesky',
-  yahoo: 'News Article',
   stocktwits: 'Stocktwits',
-  finnhub: 'Finnhub News',
+  finnhub: 'News Article',
 };
 
-export const NEWS_PLATFORMS = new Set(["yahoo", "finnhub"]);
+export const NEWS_PLATFORMS = new Set(["finnhub"]);
 export const isNewsPlatform = (platform: string) => NEWS_PLATFORMS.has(platform);
 
 export const topicColors: Record<string, string> = {
