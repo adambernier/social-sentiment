@@ -122,7 +122,15 @@ async def rollup_scheduler(db: DB):
         try:
             logger.info("Starting scheduled database rollup and prune...")
             now = datetime.now(timezone.utc)
-            post_cutoff = now - timedelta(days=retention_days)
+            # Align to the hour so only fully-elapsed hours are rolled up and pruned.
+            # An unaligned cutoff aggregates a partial boundary hour, then prunes its
+            # early posts; the next run re-aggregates that bucket from only the
+            # surviving (later) posts and overwrites it — permanently undercounting
+            # the hour. Truncating to the hour means a bucket is only ever touched
+            # once its hour is complete.
+            post_cutoff = (now - timedelta(days=retention_days)).replace(
+                minute=0, second=0, microsecond=0
+            )
             quote_cutoff = now - timedelta(days=quote_retention_days)
             
             # Execute database actions concurrently on default thread pool executor
