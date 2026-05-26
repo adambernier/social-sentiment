@@ -124,20 +124,7 @@ services:
         condition: service_healthy
     volumes:
     - ./symbols.yaml:/app/symbols.yaml:ro
-#  news-producer:
-#    build:
-#      context: .
-#      dockerfile: news-producer/Dockerfile
-#    environment:
-#    - RABBITMQ_HOST=rabbitmq
-#    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-#    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
-#    - PYTHONUNBUFFERED=1
-#    depends_on:
-#      rabbitmq:
-#        condition: service_healthy
-#    volumes:
-#    - ./symbols.yaml:/app/symbols.yaml:ro
+
   finnhub-producer:
     build:
       context: .
