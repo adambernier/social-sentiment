@@ -16,9 +16,14 @@ export default function Header({ state, setters, computed }: DashboardDataProps)
           <div className="w-1.5 h-3 bg-sky-500 rounded-full"></div>
           <div className="w-1.5 h-5 bg-rose-500 rounded-full"></div>
         </div>
-        <h1 className="text-2xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400">
-          Social Sentiment vs Market Price
-        </h1>
+        <div className="flex flex-col">
+          <h1 className="text-2xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400">
+            Social Sentiment vs Market Price
+          </h1>
+          <span className="text-[10px] text-slate-500 font-medium tracking-wide">
+            Built with <span className="text-rose-500">♥</span> by Adam & Antigravity
+          </span>
+        </div>
       </div>
       <div className="flex items-center gap-4 mt-4 md:mt-0">
         <div className="flex items-center gap-2">
