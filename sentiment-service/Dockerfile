@@ -4,6 +4,7 @@ WORKDIR /app
 
 # Copy requirements and install
 COPY sentiment-service/requirements.txt .
+RUN pip install --upgrade pip
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 # Copy shared and service code
