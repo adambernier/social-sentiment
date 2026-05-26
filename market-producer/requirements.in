@@ -8,3 +8,5 @@ psycopg[binary,pool]
 pydantic
 PyYAML
 prometheus_client
+defeatbeta-api
+duckdb
