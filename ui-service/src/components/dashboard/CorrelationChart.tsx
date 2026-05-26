@@ -27,6 +27,23 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
   const { symbol, hours, chartView, correlationData, showSR, selectedHour } = state;
   const { setChartView, setSelectedHour } = setters;
 
+  // The right axis auto-fits to the price-change series, which hugs 0. The
+  // support/resistance lines use a "% from latest price" baseline and can sit
+  // well outside that range (e.g. support gets clipped when a stock is near its
+  // range high). When S/R is shown, widen the domain to always include both.
+  const rightDomain = React.useMemo<[number | string, number | string]>(() => {
+    if (!showSR || !(correlationData?.supportPrice > 0)) return ["auto", "auto"];
+    const vals: number[] = [correlationData.supportPct, correlationData.resistancePct];
+    for (const d of correlationData.data ?? []) {
+      if (typeof d.priceChange === "number") vals.push(d.priceChange);
+      if (typeof d.futureChange === "number") vals.push(d.futureChange);
+    }
+    const lo = Math.min(...vals);
+    const hi = Math.max(...vals);
+    const pad = (hi - lo) * 0.08 || 1;
+    return [lo - pad, hi + pad];
+  }, [showSR, correlationData]);
+
   const formatXAxis = (t: string) => {
     if (hours <= 24) return format(new Date(t), "h:mm a");
     if (hours <= 168) return format(new Date(t), "MMM d, h a");
@@ -151,9 +168,10 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
               tickFormatter={chartView === 'sentiment' ? (v) => `${v > 0 ? '+' : ''}${Math.round(v * 100)}%` : undefined}
             />
             
-            <YAxis 
+            <YAxis
               yAxisId="right" orientation="right" tickFormatter={(v) => `${v > 0 ? '+' : ''}${v}%`}
               stroke="#64748b" tickLine={false} axisLine={false} tick={{ fontSize: 12 }}
+              domain={rightDomain}
             />
 
             <Tooltip
