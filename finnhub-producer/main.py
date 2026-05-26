@@ -21,6 +21,7 @@ from shared.config import (
 )
 from shared.schemas import RawPost
 from shared.symbols import tickers, match_symbol
+from shared.pacing import AsyncRateLimiter, paced_gather
 from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
 logging.basicConfig(
@@ -40,6 +41,11 @@ MAX_BACKOFF = get_env_int("FINNHUB_MAX_BACKOFF", 3600)
 # Days of history requested each poll; dedup keeps re-fetched articles out, so this
 # only controls how far back we'd pick up anything missed during downtime.
 LOOKBACK_DAYS = get_env_int("FINNHUB_LOOKBACK_DAYS", 3)
+# Request shaping: cap in-flight requests and pace new ones. The free tier is
+# ~60 req/min, so default RATE_PER_MIN stays just under that; concurrency keeps
+# the per-cycle burst small even as the symbol list grows.
+MAX_CONCURRENCY = get_env_int("FINNHUB_MAX_CONCURRENCY", 4)
+RATE_PER_MIN = get_env_int("FINNHUB_RATE_PER_MIN", 55)
 BASE_URL = "https://finnhub.io/api/v1/company-news"
 
 
@@ -149,6 +155,9 @@ async def main():
     rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"
     seen_ids = set()
 
+    # One limiter for the lifetime of the process (survives reconnects below).
+    limiter = AsyncRateLimiter(max_rate=RATE_PER_MIN, period=60.0)
+
     while True:
         try:
             connection = await aio_pika.connect_robust(rabbit_url)
@@ -162,8 +171,12 @@ async def main():
                         # Re-read each poll so runtime symbol additions are honored
                         # without a restart (shared.symbols refreshes from the DB).
                         symbols = tickers()
-                        tasks = [fetch_symbol_news(symbol, client, channel, seen_ids) for symbol in symbols]
-                        results = await asyncio.gather(*tasks)
+                        results = await paced_gather(
+                            symbols,
+                            lambda sym: fetch_symbol_news(sym, client, channel, seen_ids),
+                            max_concurrency=MAX_CONCURRENCY,
+                            limiter=limiter,
+                        )
                         rate_limited = any(results)
 
                         # Bound the dedup set (Finnhub returns far more articles than

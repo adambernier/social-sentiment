@@ -20,6 +20,7 @@ from shared.config import (
 )
 from shared.schemas import RawPost
 from shared.symbols import tickers
+from shared.pacing import AsyncRateLimiter, paced_gather
 from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
 logging.basicConfig(
@@ -30,6 +31,12 @@ logger = logging.getLogger("stocktwits-producer")
 
 POLL_INTERVAL = get_env_int("STOCKTWITS_POLL_INTERVAL", 60)
 MAX_BACKOFF = get_env_int("STOCKTWITS_MAX_BACKOFF", 3600)
+# Request shaping: cap in-flight requests and pace how fast new ones start so a
+# large symbol list doesn't fire one big burst per cycle. Defaults preserve
+# current behavior at small N (60/min easily covers ~dozens of symbols per 60s
+# cycle) while smoothing the burst; tighten RATE_PER_MIN if StockTwits 429s.
+MAX_CONCURRENCY = get_env_int("STOCKTWITS_MAX_CONCURRENCY", 4)
+RATE_PER_MIN = get_env_int("STOCKTWITS_RATE_PER_MIN", 60)
 
 async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika.Channel, last_seen_ids: dict) -> bool:
     try:
@@ -105,6 +112,9 @@ async def main():
     # at runtime via the admin API get a 0 cursor the first time they're seen.
     last_seen_ids: dict[str, int] = {}
 
+    # One limiter for the lifetime of the process (survives reconnects below).
+    limiter = AsyncRateLimiter(max_rate=RATE_PER_MIN, period=60.0)
+
     while True:
         try:
             connection = await aio_pika.connect_robust(rabbit_url)
@@ -120,8 +130,12 @@ async def main():
                         symbols = tickers()
                         for symbol in symbols:
                             last_seen_ids.setdefault(symbol, 0)
-                        tasks = [fetch_symbol(symbol, client, channel, last_seen_ids) for symbol in symbols]
-                        results = await asyncio.gather(*tasks)
+                        results = await paced_gather(
+                            symbols,
+                            lambda sym: fetch_symbol(sym, client, channel, last_seen_ids),
+                            max_concurrency=MAX_CONCURRENCY,
+                            limiter=limiter,
+                        )
                         rate_limited = any(results)
 
                         if rate_limited:
