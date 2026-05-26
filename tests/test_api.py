@@ -375,7 +375,7 @@ def test_source_health_volume_aware_status(mock_db):
         {"platform": "reddit", "posts_1h": 0, "posts_24h": 10, "last_ingest": now - timedelta(hours=2)},
         # posted within the hour → active
         {"platform": "bluesky", "posts_1h": 5, "posts_24h": 200, "last_ingest": now - timedelta(minutes=2)},
-        # yahoo + finnhub absent from rows → no data in 24h → silent
+        # finnhub absent from rows → no data in 24h → silent
     ]
     mock_db.fetchall = AsyncMock(return_value=mock_rows)
 
@@ -386,11 +386,10 @@ def test_source_health_volume_aware_status(mock_db):
         assert data["stocktwits"]["status"] == "stalled"
         assert data["reddit"]["status"] == "quiet"
         assert data["bluesky"]["status"] == "active"
-        assert data["yahoo"]["status"] == "silent"
         assert data["finnhub"]["status"] == "silent"
         # baseline rate is exposed for sources with volume, null when silent.
         assert data["stocktwits"]["baseline_per_hour"] == pytest.approx(1000 / 24)
-        assert data["yahoo"]["baseline_per_hour"] is None
+        assert data["finnhub"]["baseline_per_hour"] is None
         # Problems (silent/stalled) are sorted to the top.
         assert response.json()[0]["status"] in ("silent", "stalled")
 
