@@ -36,65 +36,102 @@ def calculate_relative(value, baseline, invert=False):
 
 def fetch_and_store_metrics(db: DB):
     print("Updating financial metrics...")
+    try:
+        from defeatbeta_api.data.ticker import Ticker as DbTicker
+    except ImportError:
+        print("defeatbeta_api not installed. Run pip install defeatbeta-api duckdb")
+        return
+
     sector_cache = {}
     
     current_symbols = tickers() + all_polled_futures()
     sector_mapping = sector_map()
+    
+    one_year_ago = pd.Timestamp.now() - pd.Timedelta(days=365)
+    
+    def get_db_metrics(symbol):
+        try:
+            t = DbTicker(symbol)
+            price_df = t.price()
+            if price_df.empty:
+                return None
+            
+            price_df['report_date'] = pd.to_datetime(price_df['report_date'])
+            hist = price_df[price_df['report_date'] >= one_year_ago].copy()
+            if hist.empty:
+                return None
+            
+            hist['return'] = hist['close'].pct_change()
+            start_price = hist.iloc[0]['close']
+            end_price = hist.iloc[-1]['close']
+            avg_return = (end_price - start_price) / start_price
+            
+            # Fetch PE
+            pe = None
+            try:
+                pe_df = t.ttm_pe()
+                if not pe_df.empty:
+                    pe = float(pe_df.iloc[-1]['ttm_pe'])
+            except Exception:
+                pass
+                
+            return {
+                "hist": hist,
+                "avg_return": avg_return,
+                "pe": pe
+            }
+        except Exception as e:
+            print(f"Error fetching data from defeatbeta-api for {symbol}: {e}")
+            return None
+
     for symbol in current_symbols:
         try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-            
-            # Fetch 1y history for returns
-            hist = ticker.history(period="1y")
-            if hist.empty:
+            # Skip futures for defeatbeta-api metrics
+            if symbol.endswith("=F"):
                 continue
-            
-            start_price = hist.iloc[0]["Close"]
-            end_price = hist.iloc[-1]["Close"]
-            avg_return = (end_price - start_price) / start_price
+
+            metrics_data = get_db_metrics(symbol)
+            if not metrics_data:
+                continue
+                
+            hist = metrics_data["hist"]
+            avg_return = metrics_data["avg_return"]
+            pe = metrics_data["pe"]
             
             # Simple inflation adjustment (e.g., 3%)
             inflation_rate = 0.03
             inflation_adj_return = avg_return - inflation_rate
             
-            pe = info.get("trailingPE")
-            beta = info.get("beta")
-            
             # Fetch sector baseline (with local execution caching)
             sector_etf = sector_mapping.get(symbol, "SPY")
             if sector_etf not in sector_cache:
-                try:
-                    print(f"Fetching sector baseline metrics for {sector_etf}...")
-                    s_ticker = yf.Ticker(sector_etf)
-                    s_info = s_ticker.info
-                    s_hist = s_ticker.history(period="1y")
-                    
-                    if s_hist.empty:
-                        sector_cache[sector_etf] = None
-                    else:
-                        s_start = s_hist.iloc[0]["Close"]
-                        s_end = s_hist.iloc[-1]["Close"]
-                        s_return = (s_end - s_start) / s_start
-                        sector_cache[sector_etf] = {
-                            "pe": s_info.get("trailingPE"),
-                            "beta": s_info.get("beta") or 1.0,
-                            "return": s_return
-                        }
-                except Exception as s_err:
-                    print(f"Error fetching baseline sector {sector_etf}: {s_err}")
-                    sector_cache[sector_etf] = None
-            
+                print(f"Fetching sector baseline metrics for {sector_etf} via defeatbeta-api...")
+                sector_cache[sector_etf] = get_db_metrics(sector_etf)
+                
             s_data = sector_cache.get(sector_etf)
             if not s_data:
                 print(f"Warning: No sector baseline data available for {sector_etf}, using defaults.")
                 s_pe = None
                 s_beta = 1.0
                 s_return = 0.0
+                beta = 1.0
             else:
                 s_pe = s_data["pe"]
-                s_beta = s_data["beta"]
-                s_return = s_data["return"]
+                s_return = s_data["avg_return"]
+                # Sector Beta is 1.0 by definition relative to itself
+                s_beta = 1.0
+                
+                # Calculate Beta manually (Covariance of stock vs sector)
+                s_hist = s_data["hist"]
+                
+                # Align dates to compute covariance
+                aligned = pd.merge(hist[['report_date', 'return']], s_hist[['report_date', 'return']], on='report_date', suffixes=('_stock', '_sector')).dropna()
+                if len(aligned) > 30:
+                    cov = aligned['return_stock'].cov(aligned['return_sector'])
+                    var = aligned['return_sector'].var()
+                    beta = cov / var if var != 0 else 1.0
+                else:
+                    beta = 1.0
             
             # Relative scores
             # For P/E, lower is better, so invert=True
