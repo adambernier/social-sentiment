@@ -98,11 +98,12 @@ async def main():
     logger.info("Starting StockTwits Async Polling Producer...")
     start_metrics_server(8006)
     
-    symbols = tickers()
-    logger.info(f"Tracking symbols: {symbols}")
+    logger.info(f"Tracking symbols: {tickers()}")
 
     rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"
-    last_seen_ids = {symbol: 0 for symbol in symbols}
+    # Per-symbol cursor (highest message id seen), kept across polls. Symbols added
+    # at runtime via the admin API get a 0 cursor the first time they're seen.
+    last_seen_ids: dict[str, int] = {}
 
     while True:
         try:
@@ -114,6 +115,11 @@ async def main():
                 async with httpx.AsyncClient() as client:
                     backoff = POLL_INTERVAL
                     while True:
+                        # Re-read each poll so runtime symbol additions are honored
+                        # without a restart (shared.symbols refreshes from the DB).
+                        symbols = tickers()
+                        for symbol in symbols:
+                            last_seen_ids.setdefault(symbol, 0)
                         tasks = [fetch_symbol(symbol, client, channel, last_seen_ids) for symbol in symbols]
                         results = await asyncio.gather(*tasks)
                         rate_limited = any(results)

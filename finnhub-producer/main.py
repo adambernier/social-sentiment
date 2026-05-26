@@ -144,8 +144,7 @@ async def main():
         while True:
             await asyncio.sleep(3600)
 
-    symbols = tickers()
-    logger.info(f"Tracking symbols: {symbols}")
+    logger.info(f"Tracking symbols: {tickers()}")
 
     rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"
     seen_ids = set()
@@ -160,6 +159,9 @@ async def main():
                 async with httpx.AsyncClient(timeout=10) as client:
                     backoff = POLL_INTERVAL
                     while True:
+                        # Re-read each poll so runtime symbol additions are honored
+                        # without a restart (shared.symbols refreshes from the DB).
+                        symbols = tickers()
                         tasks = [fetch_symbol_news(symbol, client, channel, seen_ids) for symbol in symbols]
                         results = await asyncio.gather(*tasks)
                         rate_limited = any(results)

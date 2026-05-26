@@ -29,7 +29,12 @@ def main():
     args = parser.parse_args()
 
     now = datetime.now(timezone.utc)
-    post_cutoff = now - timedelta(days=args.retention_days)
+    # Align to the hour so only fully-elapsed hours are rolled up and pruned; an
+    # unaligned cutoff would aggregate then prune a partial boundary hour, leaving
+    # the bucket permanently undercounted (see rollup_scheduler in main.py).
+    post_cutoff = (now - timedelta(days=args.retention_days)).replace(
+        minute=0, second=0, microsecond=0
+    )
     quote_cutoff = now - timedelta(days=args.quote_retention_days)
 
     print(f"{'[DRY RUN] ' if args.dry_run else ''}Rollup & Prune")
