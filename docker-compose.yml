@@ -89,9 +89,12 @@ services:
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER:-guest}
     - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
     - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     volumes:
     - ./symbols.yaml:/app/symbols.yaml:ro
@@ -103,9 +106,12 @@ services:
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER:-guest}
     - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
     - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     volumes:
     - ./symbols.yaml:/app/symbols.yaml:ro
@@ -117,10 +123,13 @@ services:
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER:-guest}
     - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
     - PYTHONUNBUFFERED=1
     - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-rss/0.1 (sentiment dashboard)}
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     volumes:
     - ./symbols.yaml:/app/symbols.yaml:ro
@@ -134,9 +143,12 @@ services:
     - RABBITMQ_USER=${RABBITMQ_USER:-guest}
     - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
     - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
     - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     volumes:
     - ./symbols.yaml:/app/symbols.yaml:ro
