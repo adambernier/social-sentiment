@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { ShieldAlert, Plus, Edit2, Trash2, Power, PowerOff, Save, X, ArrowLeft } from "lucide-react";
+import { ShieldAlert, Plus, Edit2, Trash2, Power, PowerOff, Save, X, ArrowLeft, Activity } from "lucide-react";
 import { cn } from "../dashboard/utils";
 import Link from "next/link";
 
@@ -195,6 +195,15 @@ export default function AdminDashboard() {
           <p className="text-slate-400 mt-2">Manage the symbols, keywords, and futures the producers actively ingest.</p>
         </div>
         <div className="flex items-center gap-3">
+          <a
+            href="http://localhost:3001"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2.5 rounded-xl font-semibold transition-colors border border-white/5"
+            title="Open Grafana Dashboards"
+          >
+            <Activity className="w-4 h-4" /> Grafana
+          </a>
           <button
             onClick={() => {
               localStorage.removeItem("ADMIN_API_KEY");
@@ -286,6 +295,20 @@ export default function AdminDashboard() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      <div className="bg-slate-900/60 rounded-2xl border border-white/10 overflow-hidden backdrop-blur-xl mt-8">
+        <div className="p-4 border-b border-white/5 bg-slate-950/50">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2">
+            <Activity className="w-5 h-5 text-indigo-400" /> System Metrics & Health
+          </h2>
+        </div>
+        <iframe 
+          src="http://localhost:3001/d/system-health/system-health?orgId=1&theme=dark&kiosk=tv" 
+          width="100%" 
+          height="800" 
+          className="border-none bg-slate-950"
+        />
       </div>
 
       {isModalOpen && (
