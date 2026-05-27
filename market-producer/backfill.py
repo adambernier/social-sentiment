@@ -123,7 +123,7 @@ async def main():
     
     with db.conn.cursor() as cur:
         cur.execute("SELECT symbol FROM tracked_symbols WHERE is_active = true")
-            symbols = [row[0] for row in cur.fetchall()]
+        symbols = [row[0] for row in cur.fetchall()]
             
     if not symbols:
         logger.warning("No active symbols found in tracked_symbols table.")
