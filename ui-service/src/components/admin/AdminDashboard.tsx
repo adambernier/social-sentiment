@@ -196,7 +196,7 @@ export default function AdminDashboard() {
         </div>
         <div className="flex items-center gap-3">
           <a
-            href="http://localhost:3001"
+            href="/grafana"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2.5 rounded-xl font-semibold transition-colors border border-white/5"
@@ -304,7 +304,7 @@ export default function AdminDashboard() {
           </h2>
         </div>
         <iframe 
-          src="http://localhost:3001/d/system-health/system-health?orgId=1&theme=dark&kiosk=tv" 
+          src="/grafana/d/system-health/system-health?orgId=1&theme=dark&kiosk=tv" 
           width="100%" 
           height="800" 
           className="border-none bg-slate-950"
