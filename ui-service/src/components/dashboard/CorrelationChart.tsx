@@ -24,8 +24,14 @@ const CustomizedOpportunityDot = (props: any) => {
 };
 
 export default function CorrelationChart({ state, setters }: DashboardDataProps) {
-  const { symbol, hours, chartView, correlationData, showSR, selectedHour } = state;
-  const { setChartView, setSelectedHour } = setters;
+  const { symbol, hours, chartView, correlationData, showSR, selectedHour, hideExtended } = state;
+  const { setChartView, setSelectedHour, setHideExtended } = setters;
+
+  const displayData = React.useMemo(() => {
+    if (!correlationData?.data) return [];
+    if (!hideExtended) return correlationData.data;
+    return correlationData.data.filter((d: any) => d.isMarketOpen);
+  }, [correlationData, hideExtended]);
 
   // The right axis auto-fits to the price-change series, which hugs 0. The
   // support/resistance lines use a "% from latest price" baseline and can sit
@@ -34,7 +40,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
   const rightDomain = React.useMemo<[number | string, number | string]>(() => {
     if (!showSR || !(correlationData?.supportPrice > 0)) return ["auto", "auto"];
     const vals: number[] = [correlationData.supportPct, correlationData.resistancePct];
-    for (const d of correlationData.data ?? []) {
+    for (const d of displayData ?? []) {
       if (typeof d.priceChange === "number") vals.push(d.priceChange);
       if (typeof d.futureChange === "number") vals.push(d.futureChange);
     }
@@ -42,7 +48,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
     const hi = Math.max(...vals);
     const pad = (hi - lo) * 0.08 || 1;
     return [lo - pad, hi + pad];
-  }, [showSR, correlationData]);
+  }, [showSR, correlationData, displayData]);
 
   const formatXAxis = (t: string) => {
     if (hours <= 24) return format(new Date(t), "h:mm a");
@@ -107,6 +113,16 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
             >
               Sentiment Trend
             </button>
+            <div className="w-px h-4 bg-slate-700/50 mx-1 my-auto"></div>
+            <button
+              onClick={() => setHideExtended(!hideExtended)}
+              className={cn(
+                "px-2.5 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer",
+                hideExtended ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shadow-md" : "text-slate-400 hover:text-slate-200"
+              )}
+            >
+              {hideExtended ? "Show All Hours" : "Hide Closed"}
+            </button>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-4 text-xs font-medium text-slate-400">
@@ -130,7 +146,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
       <div className="h-[400px]">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart 
-            data={correlationData.data} 
+            data={displayData} 
             margin={{ top: 10, right: 10, bottom: 0, left: -20 }}
             onClick={(e: any) => {
               // Recharts passes the chart state. We can use activeLabel or activePayload
@@ -150,7 +166,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
 
             <CartesianGrid stroke="#1e293b" vertical={false} strokeDasharray="3 3" />
             
-            {correlationData.closedRegions.map((region: any, idx: number) => (
+            {!hideExtended && correlationData.closedRegions.map((region: any, idx: number) => (
               <ReferenceArea key={idx} x1={region.start} x2={region.end} fill="#0f172a" fillOpacity={0.6} yAxisId="left" />
             ))}
 

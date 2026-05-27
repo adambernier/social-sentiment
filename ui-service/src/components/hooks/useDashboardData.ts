@@ -15,6 +15,7 @@ export function useDashboardData() {
   const [feedTab, setFeedTab] = useState<"social" | "news">("social");
   const [chartView, setChartView] = useState<"volume" | "sentiment">("volume");
   const [selectedHour, setSelectedHour] = useState<string | null>(null);
+  const [hideExtended, setHideExtended] = useState(false);
   const [drillDownPosts, setDrillDownPosts] = useState<Post[]>([]);
   const [isDrillDownLoading, setIsDrillDownLoading] = useState(false);
   const [hasHydrated, setHasHydrated] = useState(false);
@@ -279,10 +280,10 @@ export function useDashboardData() {
       symbol, hours, platform, selectedTopic, isConnected, showSR, feedTab, chartView,
       posts, sentimentStats, topicStats, leaderboard, sourceHealth, marketData, metrics,
       latestQuote, primaryDelta, futureSymbol, futureQuote, futureDelta, futureMarketData,
-      vixQuote, correlationData, selectedHour, isDrillDownLoading, hasHydrated, hasSetDefaultHours
+      vixQuote, correlationData, selectedHour, isDrillDownLoading, hasHydrated, hasSetDefaultHours, hideExtended
     },
     setters: {
-      setSymbol, setHours, setPlatform, setSelectedTopic, setShowSR, setFeedTab, setChartView, setSelectedHour
+      setSymbol, setHours, setPlatform, setSelectedTopic, setShowSR, setFeedTab, setChartView, setSelectedHour, setHideExtended
     },
     computed: {
       totalMentions, bullishPct, bearishPct, marketSession, divergenceStatus,
