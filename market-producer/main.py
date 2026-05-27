@@ -1,7 +1,7 @@
+import asyncio
 import time
 import threading
 import sys
-from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import pandas_market_calendars as mcal
@@ -9,16 +9,19 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import yfinance as yf
+from yfinance.exceptions import YFRateLimitError
 
 # Add root to sys.path for cross-service imports
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
 from shared.schemas import StockQuote, StockMetrics
+from shared.config import get_env_int
 from shared.futures import get_futures_session, all_polled_futures
 from shared.symbols import tickers, sector_map
+from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
 from storage_service.db import DB
-from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL
+from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
 # Initialize market calendar
 nyse = mcal.get_calendar('NYSE')
@@ -26,6 +29,12 @@ nyse = mcal.get_calendar('NYSE')
 SECTOR_MAP_CACHE = {}
 POLL_INTERVAL = 60  # 1 minute
 METRICS_INTERVAL = 3600 # 1 hour
+# Request shaping for the per-symbol quote fan-out. Yahoo/yfinance is the most
+# aggressive limiter we hit, so cap concurrency and pace request starts, and give
+# each symbol its own backoff — mirrors the stocktwits/finnhub producers.
+MARKET_MAX_CONCURRENCY = get_env_int("MARKET_MAX_CONCURRENCY", 6)
+MARKET_RATE_PER_MIN = get_env_int("MARKET_RATE_PER_MIN", 120)
+MARKET_MAX_BACKOFF = get_env_int("MARKET_MAX_BACKOFF", 3600)
 
 def calculate_relative(value, baseline, invert=False):
     if value is None or baseline is None or baseline == 0:
@@ -192,30 +201,39 @@ def get_market_session(now_utc: datetime) -> str:
         return 'closed'
 
 
-def fetch_single_quote(symbol: str, now_utc: datetime) -> StockQuote | None:
+def fetch_single_quote(symbol: str, now_utc: datetime) -> tuple[StockQuote | None, bool]:
+    """Fetch the latest quote for one symbol.
+
+    Returns ``(quote_or_None, was_rate_limited)``. The flag drives per-symbol
+    backoff: only a genuine Yahoo rate-limit (``YFRateLimitError``) counts —
+    empty data or other errors return ``(None, False)`` so a quiet or closed
+    symbol isn't penalized as though it were throttled.
+    """
     try:
         # Determine session based on instrument type
         if symbol.endswith("=F"):
             current_session = get_futures_session(symbol, now_utc)
         else:
             current_session = get_market_session(now_utc)
-            
+
         print(f"Fetching {symbol} (Session: {current_session})...")
         ticker = yf.Ticker(symbol)
         # Fetch last 1 day of 1-minute data to get the absolute latest close
         data = ticker.history(period="1d", interval="1m")
-        
+
         if data.empty:
             print(f"Warning: No data returned for {symbol}")
-            return None
-        
+            return None, False
+
         latest = data.iloc[-1]
         # Convert pandas Timestamp to UTC datetime
         ts = data.index[-1].to_pydatetime().astimezone(timezone.utc)
-        
+
         try:
             daily_volume = int(ticker.fast_info.get("lastVolume") or latest["Volume"])
         except Exception:
+            # fast_info is best-effort; we already have the price, so a hiccup
+            # here isn't a rate-limit.
             daily_volume = int(latest["Volume"])
 
         return StockQuote(
@@ -224,23 +242,36 @@ def fetch_single_quote(symbol: str, now_utc: datetime) -> StockQuote | None:
             price=float(latest["Close"]),
             volume=daily_volume,
             market_session=current_session
-        )
+        ), False
+    except YFRateLimitError as e:
+        print(f"RATE LIMITED by Yahoo fetching {symbol}: {e}")
+        return None, True
     except Exception as e:
         print(f"ERROR fetching {symbol}: {e}")
-        return None
+        return None, False
 
 
-def fetch_and_store(db: DB):
+async def fetch_and_store(db: DB, limiter: AsyncRateLimiter, backoff_tracker: PerSymbolBackoff):
     now_utc = datetime.now(timezone.utc)
-    
+
     current_symbols = tickers() + all_polled_futures()
-    # Run requests concurrently using a ThreadPoolExecutor
-    # max_workers=10 balance speed and resource usage
-    with ThreadPoolExecutor(max_workers=min(len(current_symbols), 10)) as executor:
-        quotes = list(executor.map(lambda sym: fetch_single_quote(sym, now_utc), current_symbols))
-        
+    # Skip symbols still in their own rate-limit cooldown so one throttled symbol
+    # doesn't stall the rest. Each yfinance call is blocking, so run it in a worker
+    # thread and shape the fan-out (concurrency cap + pacing) with the shared helper.
+    due = backoff_tracker.due(current_symbols)
+    results = await paced_gather(
+        due,
+        lambda sym: asyncio.to_thread(fetch_single_quote, sym, now_utc),
+        max_concurrency=MARKET_MAX_CONCURRENCY,
+        limiter=limiter,
+    )
+
     # Write to database sequentially to prevent concurrent psycopg connection issues
-    for quote in quotes:
+    for sym, (quote, was_limited) in zip(due, results):
+        backoff_tracker.record(sym, was_limited)
+        if was_limited:
+            RATE_LIMITS_HIT_TOTAL.labels(platform="market").inc()
+            continue
         if quote is None:
             continue
         try:
@@ -252,6 +283,13 @@ def fetch_and_store(db: DB):
                 print(f"INFO: {quote.symbol} quote already exists for {quote.timestamp}")
         except Exception as e:
             print(f"ERROR saving {quote.symbol}: {e}")
+
+    penalized = backoff_tracker.penalized()
+    if penalized:
+        print(
+            f"{len(penalized)} symbol(s) in rate-limit backoff, "
+            f"skipped {len(current_symbols) - len(due)} this cycle: {penalized}"
+        )
 
 
 def run_metrics_in_background():
@@ -269,7 +307,7 @@ def run_metrics_in_background():
     t.daemon = True
     t.start()
 
-def main():
+async def main():
     try:
         db = DB()
         print("Connected to database.")
@@ -280,22 +318,20 @@ def main():
     print(f"Market Producer started.")
     start_metrics_server(8003)
     print(f"Polling interval: {POLL_INTERVAL}s")
-    
-    last_metrics_update = 0
-    
+
+    limiter = AsyncRateLimiter(max_rate=MARKET_RATE_PER_MIN, period=60.0)
+    backoff_tracker = PerSymbolBackoff(base_interval=POLL_INTERVAL, max_backoff=MARKET_MAX_BACKOFF)
+    last_metrics_update = 0.0
+
     while True:
         now = time.time()
         if now - last_metrics_update > METRICS_INTERVAL:
             run_metrics_in_background()
             last_metrics_update = now
-            
-        fetch_and_store(db)
-        time.sleep(POLL_INTERVAL)
+
+        await fetch_and_store(db, limiter, backoff_tracker)
+        await asyncio.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
-    from shared.runtime import install_sigterm_handler
-    install_sigterm_handler()
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("Market producer stopped.")
+    from shared.runtime import run
+    run(main, name="market-producer")

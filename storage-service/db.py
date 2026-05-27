@@ -22,6 +22,14 @@ SCHEMA_FILE = Path(__file__).parent / "schema.sql"
 SCHEMA_APPLY_RETRIES = 5
 SCHEMA_LOCK_TIMEOUT_MS = 5000
 SCHEMA_RETRY_BASE_DELAY = 1.0
+# Several services (storage-service, market-producer, ...) construct DB() on boot
+# and each applies the schema, so on `compose up` multiple processes run the DDL
+# at once — and concurrent DDL (the DELETE self-join + ADD CONSTRAINT below) is
+# exactly what deadlocks. A session-level advisory lock on this fixed key
+# serializes the starters so only one runs the DDL at a time; the schema is
+# idempotent, so the others re-run it harmlessly. Released automatically if the
+# session drops. The key is arbitrary but must match across all callers.
+SCHEMA_ADVISORY_LOCK_KEY = 4815162342
 
 INSERT_POST_SQL = """
     INSERT INTO posts (id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, engagement)
@@ -111,10 +119,24 @@ class DB:
         for attempt in range(1, SCHEMA_APPLY_RETRIES + 1):
             try:
                 with self.conn.cursor() as cur:
-                    # Fail fast rather than block forever if a concurrent
-                    # reader/writer holds a lock the migration needs.
-                    cur.execute(f"SET lock_timeout = '{SCHEMA_LOCK_TIMEOUT_MS}ms'")
-                    cur.execute(sql)
+                    # Serialize concurrent starters so no two processes run the
+                    # DDL at once (the actual deadlock trigger). Acquired before
+                    # lock_timeout is set, so it waits for our turn rather than
+                    # failing fast; the holder finishes quickly when uncontended.
+                    cur.execute("SELECT pg_advisory_lock(%s)", (SCHEMA_ADVISORY_LOCK_KEY,))
+                    try:
+                        # Within our turn, still fail fast rather than block
+                        # forever if *live* pipeline traffic holds a table lock
+                        # the migration needs.
+                        cur.execute(f"SET lock_timeout = '{SCHEMA_LOCK_TIMEOUT_MS}ms'")
+                        cur.execute(sql)
+                    finally:
+                        # Best-effort: session close on reconnect/exit releases it
+                        # anyway, so don't let an unlock error mask a real failure.
+                        try:
+                            cur.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_ADVISORY_LOCK_KEY,))
+                        except Exception:
+                            pass
                 return
             except (psycopg.errors.DeadlockDetected, psycopg.errors.LockNotAvailable) as e:
                 last_err = e
