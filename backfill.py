@@ -32,7 +32,23 @@ logger = logging.getLogger("backfill")
 async def backfill_reddit(symbols, channel):
     logger.info("Backfilling Reddit posts...")
     
-    async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}) as client:
+    # Load .env manually if it exists
+    env_path = Path(__file__).resolve().parent / ".env"
+    if env_path.exists():
+        with open(env_path, "r") as f:
+            for line in f:
+                if line.strip() and not line.startswith("#"):
+                    key, *val = line.strip().split("=", 1)
+                    if val and key not in os.environ:
+                        os.environ[key] = val[0]
+
+    proxy_url = os.environ.get("REDDIT_PROXY_URL")
+    client_kwargs = {"headers": {"User-Agent": REDDIT_USER_AGENT}}
+    if proxy_url:
+        client_kwargs["proxy"] = proxy_url
+        logger.info("Using configured Reddit proxy.")
+        
+    async with httpx.AsyncClient(**client_kwargs) as client:
         for symbol in symbols:
             # We must use standard search to get historical posts for just this symbol
             url = f"https://www.reddit.com/search.json?q={symbol}&sort=new&limit=100"
