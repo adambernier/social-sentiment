@@ -199,7 +199,8 @@ def test_correlation_endpoint(mock_db):
         {"price": 12.5}               # Low VIX (options are cheap)
     ]
     
-    with TestClient(app) as client:
+    with patch.object(api_main, "primary_futures_map", return_value={"NVDA": "NQ"}), \
+         TestClient(app) as client:
         response = client.get("/stats/correlation?symbol=NVDA&hours=2")
         assert response.status_code == 200
         data = response.json()
