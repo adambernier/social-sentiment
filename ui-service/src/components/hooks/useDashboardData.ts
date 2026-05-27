@@ -77,6 +77,22 @@ export function useDashboardData() {
           fetch(`${apiBase}/stats/leaderboard`),
           fetch(`${apiBase}/stats/sources`)
         ]);
+        
+        let currentLeaderboard = [];
+        if (leaderRes.ok) {
+          currentLeaderboard = await leaderRes.json();
+          setLeaderboard(currentLeaderboard);
+        }
+
+        // Auto-switch away from default 'SMH' if it's not active
+        if (currentLeaderboard.length > 0) {
+          const symbolExists = currentLeaderboard.find((l: any) => l.symbol === symbol);
+          if (!symbolExists && symbol === "SMH") {
+            setSymbol(currentLeaderboard[0].symbol);
+            return; // Abort this fetch and let the symbol change trigger a new one
+          }
+        }
+
         if (dashRes.ok) {
           const data = await dashRes.json();
           setPosts(data.posts || []);
@@ -95,9 +111,6 @@ export function useDashboardData() {
         if (corrRes.ok) {
           const corrData = await corrRes.json();
           setCorrelationData(corrData);
-        }
-        if (leaderRes.ok) {
-          setLeaderboard(await leaderRes.json());
         }
         if (sourcesRes.ok) {
           setSourceHealth(await sourcesRes.json());
