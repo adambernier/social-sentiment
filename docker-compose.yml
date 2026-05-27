@@ -5,8 +5,8 @@ services:
     - 5672:5672
     - 15672:15672
     environment:
-    - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-guest}
-    - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS:-guest}
+    - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER}
+    - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS}
     healthcheck:
       test:
       - CMD
@@ -18,9 +18,9 @@ services:
   postgres:
     image: postgres:15
     environment:
-    - POSTGRES_DB=${POSTGRES_DB:-sentiment}
-    - POSTGRES_USER=${POSTGRES_USER:-postgres}
-    - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-sentiment}
+    - POSTGRES_DB=${POSTGRES_DB}
+    - POSTGRES_USER=${POSTGRES_USER}
+    - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     ports:
     - 5432:5432
     volumes:
@@ -41,9 +41,9 @@ services:
 
     environment:
     - RABBITMQ_HOST=rabbitmq
-    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
-    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    - RABBITMQ_USER=${RABBITMQ_USER}
+    - RABBITMQ_PASS=${RABBITMQ_PASS}
     - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
@@ -59,8 +59,8 @@ services:
 
     environment:
     - RABBITMQ_HOST=rabbitmq
-    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - RABBITMQ_USER=${RABBITMQ_USER}
+    - RABBITMQ_PASS=${RABBITMQ_PASS}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -70,9 +70,9 @@ services:
       dockerfile: storage-service/Dockerfile
     environment:
     - RABBITMQ_HOST=rabbitmq
-    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
-    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    - RABBITMQ_USER=${RABBITMQ_USER}
+    - RABBITMQ_PASS=${RABBITMQ_PASS}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -86,9 +86,9 @@ services:
       dockerfile: bluesky-producer/Dockerfile
     environment:
     - RABBITMQ_HOST=rabbitmq
-    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
-    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
+    - RABBITMQ_USER=${RABBITMQ_USER}
+    - RABBITMQ_PASS=${RABBITMQ_PASS}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
@@ -103,9 +103,9 @@ services:
       dockerfile: stocktwits-producer/Dockerfile
     environment:
     - RABBITMQ_HOST=rabbitmq
-    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
-    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
+    - RABBITMQ_USER=${RABBITMQ_USER}
+    - RABBITMQ_PASS=${RABBITMQ_PASS}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
@@ -120,11 +120,11 @@ services:
       dockerfile: reddit-producer/Dockerfile
     environment:
     - RABBITMQ_HOST=rabbitmq
-    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
-    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
+    - RABBITMQ_USER=${RABBITMQ_USER}
+    - RABBITMQ_PASS=${RABBITMQ_PASS}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - PYTHONUNBUFFERED=1
-    - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-rss/0.1 (sentiment dashboard)}
+    - REDDIT_USER_AGENT=${REDDIT_USER_AGENT}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -139,10 +139,10 @@ services:
       dockerfile: finnhub-producer/Dockerfile
     environment:
     - RABBITMQ_HOST=rabbitmq
-    - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-    - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
-    - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
-    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
+    - RABBITMQ_USER=${RABBITMQ_USER}
+    - RABBITMQ_PASS=${RABBITMQ_PASS}
+    - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - PYTHONUNBUFFERED=1
     depends_on:
       rabbitmq:
@@ -156,7 +156,7 @@ services:
       context: .
       dockerfile: market-producer/Dockerfile
     environment:
-    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     depends_on:
       postgres:
         condition: service_healthy
@@ -167,8 +167,8 @@ services:
       context: .
       dockerfile: api-service/Dockerfile
     environment:
-    - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
-    - ADMIN_API_KEY=${ADMIN_API_KEY:-antigravity}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    - ADMIN_API_KEY=${ADMIN_API_KEY}
     ports:
     - 8000:8000
     depends_on:
