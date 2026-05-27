@@ -15,7 +15,7 @@ export function useDashboardData() {
   const [feedTab, setFeedTab] = useState<"social" | "news">("social");
   const [chartView, setChartView] = useState<"volume" | "sentiment">("volume");
   const [selectedHour, setSelectedHour] = useState<string | null>(null);
-  const [hideExtended, setHideExtended] = useState(false);
+  const [hideExtended, setHideExtended] = useState(true);
   const [drillDownPosts, setDrillDownPosts] = useState<Post[]>([]);
   const [isDrillDownLoading, setIsDrillDownLoading] = useState(false);
   const [hasHydrated, setHasHydrated] = useState(false);
