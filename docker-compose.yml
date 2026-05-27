@@ -112,7 +112,7 @@ services:
     - RABBITMQ_PASS=${RABBITMQ_PASS}
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - PYTHONUNBUFFERED=1
-    - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36}
+    - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-bot/1.0 (DigitalOcean; +github.com/adambernier/social-sentiment)}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -143,7 +143,7 @@ services:
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER}
     - RABBITMQ_PASS=${RABBITMQ_PASS}
-    - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36}
+    - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-bot/1.0 (DigitalOcean; +github.com/adambernier/social-sentiment)}
     depends_on:
       postgres:
         condition: service_healthy
