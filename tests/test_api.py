@@ -379,6 +379,7 @@ def test_source_health_volume_aware_status(mock_db):
         # finnhub absent from rows → no data in 24h → silent
     ]
     mock_db.fetchall = AsyncMock(return_value=mock_rows)
+    mock_db.fetchone = AsyncMock(return_value=None)
 
     with TestClient(app) as client:
         response = client.get("/api/stats/sources")
