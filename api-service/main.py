@@ -1497,10 +1497,10 @@ async def get_correlation(
         if sorted_data[i]['buySignal']:
             curr_price = sorted_data[i]['rawPrice']
             if curr_price is not None:
-                # Look forward up to 4 hours for the trend
+                # Look forward up to 2 hours for the trend
                 forward_prices = [
                     sorted_data[k]['rawPrice'] 
-                    for k in range(i + 1, min(len(sorted_data), i + 5)) 
+                    for k in range(i + 1, min(len(sorted_data), i + 3)) 
                     if sorted_data[k]['rawPrice'] is not None
                 ]
                 if forward_prices:
