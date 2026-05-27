@@ -1497,17 +1497,19 @@ async def get_correlation(
         if sorted_data[i]['buySignal']:
             curr_price = sorted_data[i]['rawPrice']
             if curr_price is not None:
-                # Look forward up to 12 hours for the trend
+                # Look forward up to 4 hours for the trend
                 forward_prices = [
                     sorted_data[k]['rawPrice'] 
-                    for k in range(i + 1, min(len(sorted_data), i + 13)) 
+                    for k in range(i + 1, min(len(sorted_data), i + 5)) 
                     if sorted_data[k]['rawPrice'] is not None
                 ]
                 if forward_prices:
-                    if forward_prices[-1] < curr_price:
-                        sorted_data[i]['signalQuality'] = "bad"
-                    else:
+                    max_forward = max(forward_prices)
+                    # If max favorable excursion was > 0.2%, it's a good trade
+                    if max_forward > curr_price * 1.002:
                         sorted_data[i]['signalQuality'] = "good"
+                    else:
+                        sorted_data[i]['signalQuality'] = "bad"
 
     # 10. Compute final current opportunity
     latest_item = sorted_data[-1] if len(sorted_data) > 0 else None
