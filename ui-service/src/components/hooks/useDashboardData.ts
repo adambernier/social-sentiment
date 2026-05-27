@@ -46,7 +46,7 @@ export function useDashboardData() {
   const [metrics, setMetrics] = useState<MetricsData | null>(null);
   
   const [hasSetDefaultHours, setHasSetDefaultHours] = useState(false);
-  const [latestQuote, setLatestQuote] = useState<MarketQuote | null>(null);
+  const [latestQuote, setLatestQuote] = useState<MarketQuote | null | undefined>(undefined);
   const [primaryDelta, setPrimaryDelta] = useState<DeltaData | null>(null);
   const [futureSymbol, setFutureSymbol] = useState<string | null>(null);
   const [futureQuote, setFutureQuote] = useState<MarketQuote | null>(null);
@@ -143,46 +143,39 @@ export function useDashboardData() {
   useEffect(() => {
     if (!selectedHour) {
       setDrillDownPosts([]);
+      setIsDrillDownLoading(false);
       return;
     }
     const fetchDrillDown = async () => {
       setIsDrillDownLoading(true);
       try {
-        const start = new Date(selectedHour);
-        const end = new Date(start.getTime() + 60 * 60 * 1000);
         const platformParam = platform !== 'all' ? `&platform=${platform}` : '';
-        const res = await fetch(`${apiBase}/posts?symbol=${symbol}&start_time=${start.toISOString()}&end_time=${end.toISOString()}${platformParam}&limit=1000`);
+        const topicParam = selectedTopic !== 'all' ? `&topic=${encodeURIComponent(selectedTopic)}` : '';
+        const res = await fetch(`${apiBase}/stats/posts?symbol=${symbol}&hour=${selectedHour}${platformParam}${topicParam}`);
         if (res.ok) {
-          const data = await res.json();
-          setDrillDownPosts(data || []);
+          setDrillDownPosts(await res.json());
         }
       } catch (err) {
-        console.error("Failed to fetch historical posts", err);
-      } finally {
-        setIsDrillDownLoading(false);
+        console.error(err);
       }
+      setIsDrillDownLoading(false);
     };
     fetchDrillDown();
-  }, [selectedHour, symbol, platform, apiBase]);
+  }, [symbol, selectedHour, platform, selectedTopic, apiBase]);
 
-  // A stored "regular" label means the market was open at the quote's timestamp,
-  // not necessarily now. yfinance replays the last trading day's final bar on
-  // weekends/holidays, and ON CONFLICT keeps that stale 'regular' quote — so the
-  // market is only actually open if the latest quote is also fresh. Producer polls
-  // every 60s; 10 min tolerates a missed poll while still catching stale data.
-  const QUOTE_STALE_MS = 10 * 60 * 1000;
-  const latestQuoteFresh = latestQuote
+  const QUOTE_STALE_MS = 15 * 60 * 1000;
+  const latestQuoteFresh = latestQuote 
     ? Date.now() - new Date(latestQuote.timestamp).getTime() < QUOTE_STALE_MS
     : false;
 
   useEffect(() => {
-    if (!hasSetDefaultHours && latestQuote) {
-      if (latestQuote.market_session !== 'regular' || !latestQuoteFresh) {
+    if (!hasSetDefaultHours && latestQuote !== undefined) {
+      if (latestQuote && (latestQuote.market_session !== 'regular' || !latestQuoteFresh)) {
         setHours(168);
       }
       setHasSetDefaultHours(true);
     }
-  }, [latestQuote, hasSetDefaultHours]);
+  }, [latestQuote, hasSetDefaultHours, latestQuoteFresh]);
 
   const totalMentions = sentimentStats.reduce((sum, s) => sum + s.count, 0);
   const bullishCount = sentimentStats.find(s => s.sentiment === "positive")?.count || 0;
