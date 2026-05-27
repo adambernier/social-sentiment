@@ -66,12 +66,15 @@ def test_db_insert_quote_conflict(mock_psycopg_connect):
 
 
 def _schema_failing_side_effect(fail_times):
-    """cursor.execute side effect: the `SET lock_timeout` passes, but the schema
-    apply raises DeadlockDetected the first `fail_times` times, then succeeds."""
+    """cursor.execute side effect: the bookkeeping statements around the apply —
+    the advisory lock/unlock that serializes concurrent starters and the
+    `SET lock_timeout` guard — all pass, but the schema apply itself raises
+    DeadlockDetected the first `fail_times` times, then succeeds."""
     state = {"schema_calls": 0}
 
     def _side_effect(sql, *args, **kwargs):
-        if "lock_timeout" in str(sql):
+        s = str(sql)
+        if "lock_timeout" in s or "pg_advisory" in s:
             return None
         state["schema_calls"] += 1
         if state["schema_calls"] <= fail_times:
@@ -95,6 +98,10 @@ def test_apply_schema_retries_then_succeeds(mock_psycopg_connect, monkeypatch):
 
     assert state["schema_calls"] == 3
     assert db is not None
+    # The advisory lock that serializes concurrent starters is taken and released.
+    executed = [str(c.args[0]) for c in mock_cursor.execute.call_args_list]
+    assert any("pg_advisory_lock" in e for e in executed)
+    assert any("pg_advisory_unlock" in e for e in executed)
 
 
 def test_apply_schema_raises_after_exhausting_retries(mock_psycopg_connect, monkeypatch):
