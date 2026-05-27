@@ -4,11 +4,6 @@
 
 :80, :443 {
     # 1. API traffic routes to backend (FastAPI)
-    handle_path /api/* {
-        # Strip the /api prefix before forwarding to backend if the backend doesn't expect it?
-        # No, we refactored backend to expect /api, so we use `reverse_proxy /api/*` without `handle_path` stripping.
-    }
-
     # Better routing without stripping prefix:
     @api {
         path /api/*
