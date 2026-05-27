@@ -121,18 +121,8 @@ async def backfill_market(db, symbols):
 async def main():
     db = DB()
     
-    # Wait for DB to be ready
-    while True:
-        try:
-            db.get_conn()
-            break
-        except Exception:
-            logger.info("Waiting for database...")
-            await asyncio.sleep(2)
-            
-    with db.get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT symbol FROM tracked_symbols WHERE is_active = true")
+    with db.conn.cursor() as cur:
+        cur.execute("SELECT symbol FROM tracked_symbols WHERE is_active = true")
             symbols = [row[0] for row in cur.fetchall()]
             
     if not symbols:
