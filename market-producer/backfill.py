@@ -22,7 +22,7 @@ from shared.config import (
 )
 from shared.schemas import RawPost, StockQuote
 from storage_service.db import DB
-from market_producer.main import get_market_session
+from main import get_market_session
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("backfill")
