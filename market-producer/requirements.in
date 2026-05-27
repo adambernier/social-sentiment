@@ -10,3 +10,4 @@ PyYAML
 prometheus_client
 defeatbeta-api
 duckdb
+aio-pika
