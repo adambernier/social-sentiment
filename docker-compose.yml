@@ -38,7 +38,7 @@ services:
       dockerfile: preprocessing-service/Dockerfile
     volumes:
     - hf_cache:/root/.cache/huggingface
-    - ./symbols.yaml:/app/symbols.yaml:ro
+
     environment:
     - RABBITMQ_HOST=rabbitmq
     - HF_HOME=/root/.cache/huggingface
@@ -57,7 +57,7 @@ services:
       dockerfile: sentiment-service/Dockerfile
     volumes:
     - hf_cache:/root/.cache/huggingface
-    - ./symbols.yaml:/app/symbols.yaml:ro
+
     environment:
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER:-guest}
@@ -80,7 +80,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-    - ./symbols.yaml:/app/symbols.yaml:ro
+
   bluesky-producer:
     build:
       context: .
@@ -97,7 +97,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-    - ./symbols.yaml:/app/symbols.yaml:ro
+
   stocktwits-producer:
     build:
       context: .
@@ -114,7 +114,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-    - ./symbols.yaml:/app/symbols.yaml:ro
+
   reddit-producer:
     build:
       context: .
@@ -132,7 +132,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-    - ./symbols.yaml:/app/symbols.yaml:ro
+
 
   finnhub-producer:
     build:
@@ -151,7 +151,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-    - ./symbols.yaml:/app/symbols.yaml:ro
+
   market-producer:
     build:
       context: .
@@ -162,7 +162,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-    - ./symbols.yaml:/app/symbols.yaml:ro
+
   api-service:
     build:
       context: .
@@ -176,7 +176,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-    - ./symbols.yaml:/app/symbols.yaml:ro
+
   ui-service:
     build:
       context: ui-service

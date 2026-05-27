@@ -8,10 +8,6 @@ import psycopg
 import sys
 import logging
 
-# Fallback path for initial seed
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "symbols.yaml"
-
-# Try to get database DSN directly or construct a fallback
 import os
 def get_env(key: str, default: str) -> str:
     return os.environ.get(key, default)
@@ -19,15 +15,8 @@ DATABASE_DSN = get_env("DATABASE_DSN", "postgresql://postgres:sentiment@localhos
 
 logger = logging.getLogger("shared-symbols")
 
-def load_symbols_fallback() -> dict[str, dict]:
-    if not CONFIG_PATH.exists():
-        return {}
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    return config if config else {}
-
-# Initialize with fallback (so startup isn't completely empty before DB connects)
-SYMBOLS: dict[str, dict] = load_symbols_fallback()
+# Initialize empty dict. fetch_symbols_from_db() will populate this on startup
+SYMBOLS: dict[str, dict] = {}
 SYMBOLS_LOCK = threading.Lock()
 
 def fetch_symbols_from_db():
