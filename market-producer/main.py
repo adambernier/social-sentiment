@@ -95,8 +95,9 @@ def fetch_and_store_metrics(db: DB):
 
     for symbol in current_symbols:
         try:
-            # Skip futures for defeatbeta-api metrics
-            if symbol.endswith("=F"):
+            # Skip non-equity instruments (futures, the ^VIX index) — defeatbeta
+            # has no fundamentals (P/E, beta, ...) for them.
+            if symbol.endswith("=F") or symbol.startswith("^"):
                 continue
 
             metrics_data = get_db_metrics(symbol)

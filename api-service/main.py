@@ -19,7 +19,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from shared.config import DATABASE_DSN
+from shared.config import DATABASE_DSN, VIX_SYMBOL
 from shared.symbols import primary_futures_map, tickers
 
 
@@ -908,7 +908,7 @@ async def get_dashboard(
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     futures_map = primary_futures_map()
     primary_future_symbol = futures_map.get(symbol)
-    vix_symbol = "VX=F"
+    vix_symbol = VIX_SYMBOL
     
     async with get_db_conn() as conn:
         async with conn.cursor() as cur:
@@ -1252,7 +1252,7 @@ async def get_correlation(
             # 7. Fetch VIX quote
             await cur.execute(
                 "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
-                ["VX=F"]
+                [VIX_SYMBOL]
             )
             vix_row = await cur.fetchone()
             vix_price = vix_row['price'] if vix_row else 15.0

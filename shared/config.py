@@ -36,3 +36,9 @@ REDDIT_USER_AGENT = get_env(
 
 # Finnhub Config (news producer) — free API key from https://finnhub.io
 FINNHUB_API_KEY = get_env("FINNHUB_API_KEY", "")
+
+# Market-wide volatility signal. Spot VIX index (^VIX) — has rich 1-minute data,
+# and the 15/25 stress thresholds in shared.futures are spot-VIX levels. Defined
+# here (a dependency-light module) so the producers and the API share one source
+# of truth for the symbol stored in / queried from stock_quotes.
+VIX_SYMBOL = get_env("VIX_SYMBOL", "^VIX")

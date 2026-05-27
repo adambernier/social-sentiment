@@ -2,21 +2,23 @@ import pandas_market_calendars as mcal
 from datetime import datetime, timedelta
 
 from shared.symbols import primary_futures_map
+from shared.config import VIX_SYMBOL
 
 # Per-symbol primary index future. Used for the chart overlay + the
 # context-aware tile that shows up beside the selected equity.
 PRIMARY_FUTURES_MAP = primary_futures_map()
 
-# Futures shown for all symbols (different signal type, not a price proxy).
-GLOBAL_FUTURES = ["VX=F"]
+# Market-wide volatility signal shown beside every symbol (different signal type,
+# not a price proxy). Spot VIX (^VIX) is a cash-session index, so the market
+# producer fetches it via the equity market session — not a futures session — and
+# it isn't listed in FUTURES_CALENDAR_MAP below.
+GLOBAL_FUTURES = [VIX_SYMBOL]
 
-# Map ticker -> market-calendar name. CME_Equity covers NQ/ES/RTY/YM.
-# CFE covers VIX futures. Both have ~23h sessions with a daily break,
-# but the exact break boundaries differ slightly.
+# Map ticker -> market-calendar name. CME_Equity covers NQ/ES/RTY/YM; these have
+# ~23h sessions with a daily break.
 FUTURES_CALENDAR_MAP = {
     "NQ=F": "CME_Equity",
     "RTY=F": "CME_Equity",
-    "VX=F": "CFE",
 }
 
 # VIX stress thresholds
@@ -26,7 +28,6 @@ VIX_STRESS_HIGH = 25.0
 # Initialize calendars once
 _calendars = {
     "CME_Equity": mcal.get_calendar("CME_Equity"),
-    "CFE": mcal.get_calendar("CFE"),
 }
 
 def get_futures_session(symbol: str, now_utc: datetime) -> str:
