@@ -41,7 +41,7 @@ export default function AdminDashboard() {
   const fetchSymbols = async (key: string) => {
     setLoading(true);
     try {
-      const res = await fetch("http://localhost:8000/api/admin/symbols", {
+      const res = await fetch("/api/admin/symbols", {
         headers: { "X-API-Key": key },
       });
       if (res.status === 403) {
@@ -88,8 +88,8 @@ export default function AdminDashboard() {
   const saveSymbol = async () => {
     const method = editingSymbol ? "PUT" : "POST";
     const url = editingSymbol 
-      ? `http://localhost:8000/api/admin/symbols/${editingSymbol.symbol}`
-      : `http://localhost:8000/api/admin/symbols`;
+      ? `/api/admin/symbols/${editingSymbol.symbol}`
+      : `/api/admin/symbols`;
 
     const payload = {
       ...formData,
@@ -120,7 +120,7 @@ export default function AdminDashboard() {
 
   const toggleActive = async (symbol: TrackedSymbol) => {
     try {
-      await fetch(`http://localhost:8000/api/admin/symbols/${symbol.symbol}`, {
+      await fetch(`/api/admin/symbols/${symbol.symbol}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
         body: JSON.stringify({ ...symbol, is_active: !symbol.is_active })
@@ -134,7 +134,7 @@ export default function AdminDashboard() {
   const deleteSymbol = async (symbolStr: string) => {
     if (!confirm("Are you sure you want to disable this symbol?")) return;
     try {
-      await fetch(`http://localhost:8000/api/admin/symbols/${symbolStr}`, {
+      await fetch(`/api/admin/symbols/${symbolStr}`, {
         method: "DELETE",
         headers: { "X-API-Key": apiKey },
       });

@@ -500,7 +500,7 @@ def get_db_conn():
         raise RuntimeError("Database pool not initialized")
     return db_pool.connection()
 
-@app.get("/posts", response_model=list[PostResponse])
+@app.get("/api/posts", response_model=list[PostResponse])
 async def get_posts(
     symbol: Optional[str] = None,
     platform: Optional[str] = None,
@@ -541,7 +541,7 @@ async def get_posts(
             await cur.execute(query, params)
             return await cur.fetchall()
 
-@app.get("/stats/sentiment", response_model=list[SentimentStats])
+@app.get("/api/stats/sentiment", response_model=list[SentimentStats])
 async def get_sentiment_stats(
     symbol: Optional[str] = None,
     platform: Optional[str] = None,
@@ -568,7 +568,7 @@ async def get_sentiment_stats(
             await cur.execute(query, params)
             return await cur.fetchall()
 
-@app.get("/stats/topics", response_model=list[TopicStats])
+@app.get("/api/stats/topics", response_model=list[TopicStats])
 async def get_topic_stats(
     symbol: Optional[str] = None,
     platform: Optional[str] = None,
@@ -607,7 +607,7 @@ INGESTION_SOURCES = ["bluesky", "reddit", "stocktwits", "finnhub"]
 SOURCE_STALL_RATIO = 12.0
 SOURCE_STALL_FLOOR_SECONDS = 1800  # 30 min
 
-@app.get("/stats/sources", response_model=list[SourceHealth])
+@app.get("/api/stats/sources", response_model=list[SourceHealth])
 async def get_source_health():
     """Read-only ingestion health per source: recency + volume from `posts`.
 
@@ -679,7 +679,7 @@ LEADERBOARD_MIN_BASELINE_HOURS = 8
 # only yields ~2 comparable days per week, so 7d was too sparse once matched.
 LEADERBOARD_BASELINE_DAYS = 28
 
-@app.get("/stats/leaderboard", response_model=list[LeaderboardEntry])
+@app.get("/api/stats/leaderboard", response_model=list[LeaderboardEntry])
 async def get_leaderboard():
     """Cross-symbol discovery: how unusual each tracked ticker's chatter is right now.
 
@@ -800,7 +800,7 @@ async def get_leaderboard():
             )
             return await cur.fetchall()
 
-@app.get("/stats/market", response_model=list[MarketQuote])
+@app.get("/api/stats/market", response_model=list[MarketQuote])
 async def get_market_stats(
     symbol: str,
     hours: int = Query(24, gt=0, le=8760)
@@ -818,7 +818,7 @@ async def get_market_stats(
             await cur.execute(query, params)
             return await cur.fetchall()
 
-@app.get("/stats/market/latest", response_model=Optional[MarketQuote])
+@app.get("/api/stats/market/latest", response_model=Optional[MarketQuote])
 async def get_latest_market_quote(symbol: str):
     query = """
         SELECT symbol, timestamp, price, volume, market_session 
@@ -831,7 +831,7 @@ async def get_latest_market_quote(symbol: str):
             await cur.execute(query, [symbol])
             return await cur.fetchone()
 
-@app.get("/stats/market/delta", response_model=Optional[MarketDelta])
+@app.get("/api/stats/market/delta", response_model=Optional[MarketDelta])
 async def get_market_delta(
     symbol: str,
     since: datetime = Query(...)
@@ -886,7 +886,7 @@ async def get_market_delta(
                 "abs_change": abs_change
             }
 
-@app.get("/stats/metrics", response_model=Optional[StockMetricsResponse])
+@app.get("/api/stats/metrics", response_model=Optional[StockMetricsResponse])
 async def get_stock_metrics(symbol: str):
     query = """
         SELECT symbol, pe_ratio, beta, avg_return_1y, inflation_adj_return_1y,
@@ -899,7 +899,7 @@ async def get_stock_metrics(symbol: str):
             await cur.execute(query, [symbol])
             return await cur.fetchone()
 
-@app.get("/stats/dashboard", response_model=DashboardResponse)
+@app.get("/api/stats/dashboard", response_model=DashboardResponse)
 async def get_dashboard(
     symbol: str,
     hours: int = Query(24, gt=0, le=8760),
@@ -1072,7 +1072,7 @@ async def get_dashboard(
                 "vix_delta": vix_delta
             }
 
-@app.get("/stats/correlation", response_model=CorrelationResponse)
+@app.get("/api/stats/correlation", response_model=CorrelationResponse)
 async def get_correlation(
     symbol: str,
     hours: int = Query(24, gt=0, le=8760),
@@ -1495,7 +1495,7 @@ async def get_correlation(
         "opportunity": current_opp
     }
 
-@app.get("/health")
+@app.get("/api/health")
 async def health():
     try:
         async with get_db_conn() as conn:
@@ -1505,7 +1505,7 @@ async def health():
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
-@app.websocket("/stats/stream")
+@app.websocket("/api/stats/stream")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:

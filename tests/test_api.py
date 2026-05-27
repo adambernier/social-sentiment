@@ -47,7 +47,7 @@ def test_health_endpoint_healthy(mock_db):
     mock_db.fetchall = AsyncMock(return_value=[(1,)])
     
     with TestClient(app) as client:
-        response = client.get("/health")
+        response = client.get("/api/health")
         assert response.status_code == 200
         assert response.json() == {"status": "healthy", "database": "connected"}
 
@@ -56,7 +56,7 @@ def test_health_endpoint_unhealthy(mock_db):
     mock_db.execute = AsyncMock(side_effect=Exception("Connection lost"))
     
     with TestClient(app) as client:
-        response = client.get("/health")
+        response = client.get("/api/health")
         assert response.status_code == 200
         assert response.json()["status"] == "unhealthy"
         assert "Connection lost" in response.json()["error"]
@@ -82,7 +82,7 @@ def test_posts_endpoint(mock_db):
     mock_db.fetchall = AsyncMock(return_value=mock_posts)
     
     with TestClient(app) as client:
-        response = client.get("/posts?symbol=AAPL")
+        response = client.get("/api/posts?symbol=AAPL")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
@@ -98,7 +98,7 @@ def test_sentiment_stats_endpoint(mock_db):
     mock_db.fetchall = AsyncMock(return_value=mock_stats)
     
     with TestClient(app) as client:
-        response = client.get("/stats/sentiment?symbol=AAPL")
+        response = client.get("/api/stats/sentiment?symbol=AAPL")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 2
@@ -113,7 +113,7 @@ def test_topic_stats_endpoint(mock_db):
     mock_db.fetchall = AsyncMock(return_value=mock_topics)
     
     with TestClient(app) as client:
-        response = client.get("/stats/topics")
+        response = client.get("/api/stats/topics")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 2
@@ -134,7 +134,7 @@ def test_leaderboard_endpoint(mock_db):
     mock_db.fetchall = AsyncMock(return_value=mock_rows)
 
     with TestClient(app) as client:
-        response = client.get("/stats/leaderboard")
+        response = client.get("/api/stats/leaderboard")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 3
@@ -201,7 +201,7 @@ def test_correlation_endpoint(mock_db):
     
     with patch.object(api_main, "primary_futures_map", return_value={"NVDA": "NQ"}), \
          TestClient(app) as client:
-        response = client.get("/stats/correlation?symbol=NVDA&hours=2")
+        response = client.get("/api/stats/correlation?symbol=NVDA&hours=2")
         assert response.status_code == 200
         data = response.json()
         assert "data" in data
@@ -381,7 +381,7 @@ def test_source_health_volume_aware_status(mock_db):
     mock_db.fetchall = AsyncMock(return_value=mock_rows)
 
     with TestClient(app) as client:
-        response = client.get("/stats/sources")
+        response = client.get("/api/stats/sources")
         assert response.status_code == 200
         data = {d["platform"]: d for d in response.json()}
         assert data["stocktwits"]["status"] == "stalled"

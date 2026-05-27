@@ -169,8 +169,6 @@ services:
     environment:
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - ADMIN_API_KEY=${ADMIN_API_KEY}
-    ports:
-    - 8000:8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -188,8 +186,6 @@ services:
     - API_URL=http://api-service:8000
     - WATCHPACK_POLLING=true
     command: npm run dev
-    ports:
-    - 3000:3000
     depends_on:
     - api-service
   prometheus:
@@ -200,8 +196,6 @@ services:
     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
   grafana:
     image: grafana/grafana:10.0.3
-    ports:
-    - 3001:3000
     environment:
     - GF_AUTH_ANONYMOUS_ENABLED=true
     - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
@@ -212,5 +206,21 @@ services:
     - ./grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
     - prometheus
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+    - "80:80"
+    - "443:443"
+    volumes:
+    - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    - caddy_data:/data
+    - caddy_config:/config
+    depends_on:
+    - ui-service
+    - api-service
+    - grafana
 volumes:
   postgres_data: null
+  caddy_data: null
+  caddy_config: null

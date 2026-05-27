@@ -1,0 +1,26 @@
+# Caddy configuration for reverse proxy and auto-HTTPS
+# When a real domain is used, Caddy will automatically provision Let's Encrypt certificates.
+# For now, it listens on all interfaces.
+
+:80, :443 {
+    # 1. API traffic routes to backend (FastAPI)
+    handle_path /api/* {
+        # Strip the /api prefix before forwarding to backend if the backend doesn't expect it?
+        # No, we refactored backend to expect /api, so we use `reverse_proxy /api/*` without `handle_path` stripping.
+    }
+
+    # Better routing without stripping prefix:
+    @api {
+        path /api/*
+    }
+    reverse_proxy @api api-service:8000
+
+    # 2. Grafana traffic routes to Grafana
+    @grafana {
+        path /grafana/*
+    }
+    reverse_proxy @grafana grafana:3000
+
+    # 3. Everything else routes to Frontend (Next.js)
+    reverse_proxy ui-service:3000
+}

@@ -60,13 +60,11 @@ export function useDashboardData() {
     opportunity: null
   });
 
-  const apiBase = typeof window !== 'undefined' 
-    ? `${window.location.protocol}//${window.location.hostname}:8000` 
-    : 'http://localhost:8000';
+  const apiBase = '/api';
 
   const wsBase = typeof window !== 'undefined' 
-    ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8000` 
-    : 'ws://localhost:8000';
+    ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api` 
+    : 'ws://localhost:3000/api';
 
   useEffect(() => {
     const fetchData = async () => {
