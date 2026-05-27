@@ -140,8 +140,13 @@ services:
       dockerfile: market-producer/Dockerfile
     environment:
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    - RABBITMQ_HOST=rabbitmq
+    - RABBITMQ_USER=${RABBITMQ_USER}
+    - RABBITMQ_PASS=${RABBITMQ_PASS}
     depends_on:
       postgres:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
   api-service:
     build:
