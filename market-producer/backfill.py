@@ -30,7 +30,7 @@ logger = logging.getLogger("backfill")
 async def backfill_reddit(symbols, channel):
     logger.info("Backfilling Reddit posts...")
     
-    async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}) as client:
+    async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}) as client:
         for symbol in symbols:
             # We must use standard search to get historical posts for just this symbol
             url = f"https://www.reddit.com/search.json?q={symbol}&sort=new&limit=100"
