@@ -33,9 +33,15 @@ export default function Dashboard() {
         <Header {...dashboardData} />
         <TickerActivity {...dashboardData} />
         <TelemetryGrid {...dashboardData} />
-        <CorrelationChart {...dashboardData} />
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-          <OpportunityScanner {...dashboardData} />
+        <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
+          <div className="xl:col-span-3">
+            <CorrelationChart {...dashboardData} />
+          </div>
+          <div className="xl:col-span-1">
+            <OpportunityScanner {...dashboardData} />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
           <SourceHealthPanel sources={dashboardData.state.sourceHealth || []} />
           <SectorScorecard {...dashboardData} />
         </div>
