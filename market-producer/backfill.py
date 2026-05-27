@@ -32,7 +32,15 @@ async def backfill_reddit(symbols, channel):
     logger.info("Backfilling Reddit posts...")
     
     proxy_url = os.environ.get("REDDIT_PROXY_URL")
-    async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}, proxy=proxy_url) as client:
+    if proxy_url:
+        logger.info(f"Using configured Reddit proxy: {proxy_url[:15]}...")
+    else:
+        logger.warning("NO PROXY URL FOUND in environment!")
+        
+    # Use a normal browser user-agent to avoid Cloudflare blocks
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    
+    async with httpx.AsyncClient(headers={"User-Agent": user_agent}, proxy=proxy_url) as client:
         for symbol in symbols:
             # We must use standard search to get historical posts for just this symbol
             url = f"https://www.reddit.com/search.json?q={symbol}&sort=new&limit=100"
