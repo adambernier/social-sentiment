@@ -5,6 +5,7 @@ export const platformColors: Record<string, string> = {
   yahoo: 'bg-purple-500/20 text-purple-400 border border-purple-500/10',
   stocktwits: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/10',
   finnhub: 'bg-blue-500/20 text-blue-400 border border-blue-500/10',
+  yfinance: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/10',
 };
 
 export const platformLabels: Record<string, string> = {
@@ -13,6 +14,7 @@ export const platformLabels: Record<string, string> = {
   bluesky: 'Bluesky',
   stocktwits: 'Stocktwits',
   finnhub: 'News Article',
+  yfinance: 'Market Data (YF)',
 };
 
 export const NEWS_PLATFORMS = new Set(["finnhub"]);

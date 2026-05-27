@@ -609,7 +609,7 @@ SOURCE_STALL_FLOOR_SECONDS = 1800  # 30 min
 
 @app.get("/api/stats/sources", response_model=list[SourceHealth])
 async def get_source_health():
-    """Read-only ingestion health per source: recency + volume from `posts`.
+    """Read-only ingestion health per source: recency + volume from `posts` and `stock_quotes`.
 
     status is descriptive, not a hard up/down verdict:
       • active  — at least one post in the last hour
@@ -630,13 +630,33 @@ async def get_source_health():
         WHERE platform = ANY(%s) AND timestamp > NOW() - INTERVAL '7 days'
         GROUP BY platform
     """
+    
+    market_query = """
+        SELECT COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 hour')   AS posts_1h,
+               COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '24 hours') AS posts_24h,
+               MAX(timestamp) AS last_ingest
+        FROM stock_quotes
+        WHERE timestamp > NOW() - INTERVAL '7 days'
+    """
+    
+    session_query = "SELECT market_session FROM stock_quotes ORDER BY timestamp DESC LIMIT 1"
+    
     async with get_db_conn() as conn:
         async with conn.cursor() as cur:
             await cur.execute(query, [INGESTION_SOURCES])
             rows = {r["platform"]: r for r in await cur.fetchall()}
+            
+            await cur.execute(market_query)
+            market_row = await cur.fetchone()
+            
+            await cur.execute(session_query)
+            session_row = await cur.fetchone()
+            market_session = session_row["market_session"] if session_row else "closed"
 
     now = datetime.now(timezone.utc)
     out = []
+    
+    # Process Social Sources
     for platform in INGESTION_SOURCES:
         r = rows.get(platform)
         posts_1h = r["posts_1h"] if r else 0
@@ -647,8 +667,6 @@ async def get_source_health():
         if posts_24h == 0:
             status = "silent"
         else:
-            # Average gap between posts over the last 24h; flag a silence that's
-            # both far longer than that and past the absolute floor.
             expected_gap = 86400 / posts_24h
             if age is not None and age > SOURCE_STALL_FLOOR_SECONDS and age > SOURCE_STALL_RATIO * expected_gap:
                 status = "stalled"
@@ -659,13 +677,44 @@ async def get_source_health():
 
         out.append(SourceHealth(
             platform=platform,
+            status=status,
+            age_seconds=age,
             posts_1h=posts_1h,
             posts_24h=posts_24h,
-            last_ingest=last_ingest,
-            age_seconds=age,
-            baseline_per_hour=(posts_24h / 24.0) if posts_24h > 0 else None,
-            status=status,
+            baseline_per_hour=posts_24h / 24.0 if posts_24h else None
         ))
+        
+    # Process Market Data Source (yfinance)
+    if market_row:
+        m_posts_1h = market_row["posts_1h"] or 0
+        m_posts_24h = market_row["posts_24h"] or 0
+        m_last_ingest = market_row["last_ingest"]
+        m_age = (now - m_last_ingest).total_seconds() if m_last_ingest else None
+        
+        if m_posts_24h == 0:
+            m_status = "silent"
+        else:
+            m_expected_gap = 86400 / m_posts_24h
+            if m_age is not None and m_age > SOURCE_STALL_FLOOR_SECONDS and m_age > SOURCE_STALL_RATIO * m_expected_gap:
+                m_status = "stalled"
+            elif m_posts_1h > 0:
+                m_status = "active"
+            else:
+                m_status = "quiet"
+                
+        # Handle market closed gracefully
+        if market_session != 'regular' and (m_status == 'stalled' or m_status == 'silent'):
+            m_status = "quiet"
+            
+        out.append(SourceHealth(
+            platform="yfinance",
+            status=m_status,
+            age_seconds=m_age,
+            posts_1h=m_posts_1h,
+            posts_24h=m_posts_24h,
+            baseline_per_hour=m_posts_24h / 24.0 if m_posts_24h else None
+        ))
+
     # Surface problem sources first: silent (dead) and stalled (degraded) on top.
     rank = {"silent": 0, "stalled": 1, "quiet": 2, "active": 3}
     out.sort(key=lambda s: (rank[s.status], -s.posts_24h))
