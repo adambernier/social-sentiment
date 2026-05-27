@@ -86,3 +86,46 @@ async def paced_gather(
             return await fetch_fn(item)
 
     return await asyncio.gather(*(_run(item) for item in items))
+
+
+class PerSymbolBackoff:
+    """Tracks an independent exponential backoff per symbol.
+
+    A symbol that reports rate-limiting is put into a cooldown that doubles on
+    each consecutive hit (capped at ``max_backoff``); a symbol that succeeds
+    resets immediately. Each poll cycle, call :meth:`due` to pick the symbols
+    eligible to poll, then feed every result back via :meth:`record`. This
+    decouples one throttled ticker from the rest of the batch — the others keep
+    polling on cadence instead of all sharing a single global backoff.
+
+    Cooldowns are measured against ``time.monotonic``; ``base_interval`` is the
+    first penalty (one poll cycle is the natural unit), so a penalty of N means
+    roughly "skip the next N/base cycles".
+    """
+
+    def __init__(self, base_interval: float, max_backoff: float):
+        self.base = max(float(base_interval), 1e-9)
+        self.max_backoff = max(float(max_backoff), self.base)
+        self._penalty: dict[str, float] = {}  # current cooldown length, seconds
+        self._next_ok: dict[str, float] = {}  # monotonic time eligible again
+
+    def due(self, symbols: Sequence[str], now: Optional[float] = None) -> list[str]:
+        """Return the subset of ``symbols`` not currently in cooldown."""
+        t = time.monotonic() if now is None else now
+        return [s for s in symbols if t >= self._next_ok.get(s, 0.0)]
+
+    def record(self, symbol: str, rate_limited: bool, now: Optional[float] = None) -> None:
+        """Update one symbol's state from its latest poll outcome."""
+        if not rate_limited:
+            self._penalty.pop(symbol, None)
+            self._next_ok.pop(symbol, None)
+            return
+        t = time.monotonic() if now is None else now
+        prev = self._penalty.get(symbol, 0.0)
+        nxt = min(self.max_backoff, prev * 2 if prev > 0 else self.base)
+        self._penalty[symbol] = nxt
+        self._next_ok[symbol] = t + nxt
+
+    def penalized(self) -> list[str]:
+        """Symbols currently carrying a cooldown (for logging/metrics)."""
+        return sorted(self._penalty)

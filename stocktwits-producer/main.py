@@ -20,7 +20,7 @@ from shared.config import (
 )
 from shared.schemas import RawPost
 from shared.symbols import tickers
-from shared.pacing import AsyncRateLimiter, paced_gather
+from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
 from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
 logging.basicConfig(
@@ -114,6 +114,8 @@ async def main():
 
     # One limiter for the lifetime of the process (survives reconnects below).
     limiter = AsyncRateLimiter(max_rate=RATE_PER_MIN, period=60.0)
+    # Independent per-symbol backoff so one throttled ticker can't stall the rest.
+    backoff_tracker = PerSymbolBackoff(base_interval=POLL_INTERVAL, max_backoff=MAX_BACKOFF)
 
     while True:
         try:
@@ -123,32 +125,35 @@ async def main():
                 await channel.declare_queue(QUEUE_RAW_POSTS, durable=True)
 
                 async with httpx.AsyncClient() as client:
-                    backoff = POLL_INTERVAL
                     while True:
                         # Re-read each poll so runtime symbol additions are honored
                         # without a restart (shared.symbols refreshes from the DB).
                         symbols = tickers()
                         for symbol in symbols:
                             last_seen_ids.setdefault(symbol, 0)
+                        # Skip symbols still in their own rate-limit cooldown.
+                        due = backoff_tracker.due(symbols)
                         results = await paced_gather(
-                            symbols,
+                            due,
                             lambda sym: fetch_symbol(sym, client, channel, last_seen_ids),
                             max_concurrency=MAX_CONCURRENCY,
                             limiter=limiter,
                         )
-                        rate_limited = any(results)
+                        for sym, was_limited in zip(due, results):
+                            backoff_tracker.record(sym, was_limited)
+                            if was_limited:
+                                RATE_LIMITS_HIT_TOTAL.labels(platform="stocktwits").inc()
 
-                        if rate_limited:
-                            RATE_LIMITS_HIT_TOTAL.labels(platform="stocktwits").inc()
-                            backoff = min(backoff * 2, MAX_BACKOFF)
-                            logger.warning(f"Rate limited by StockTwits (429). Backing off for {backoff}s.")
-                        else:
-                            if backoff != POLL_INTERVAL:
-                                logger.info("Requests succeeding again; resetting poll interval.")
-                            backoff = POLL_INTERVAL
-
-                        logger.info(f"Batch complete. Sleeping for {backoff} seconds...")
-                        await asyncio.sleep(backoff)
+                        penalized = backoff_tracker.penalized()
+                        if penalized:
+                            logger.warning(
+                                f"{len(penalized)} symbol(s) in rate-limit backoff, "
+                                f"skipped {len(symbols) - len(due)} this cycle: {penalized}"
+                            )
+                        logger.info(
+                            f"Batch complete ({len(due)} polled). Sleeping {POLL_INTERVAL}s..."
+                        )
+                        await asyncio.sleep(POLL_INTERVAL)
 
         except Exception as e:
             logger.error(f"Error in main loop: {e}. Retrying in 10s...")
