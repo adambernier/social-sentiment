@@ -30,7 +30,7 @@ logger = logging.getLogger("backfill")
 async def backfill_reddit(symbols, channel):
     logger.info("Backfilling Reddit posts...")
     
-    async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}) as client:
+    async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}) as client:
         for symbol in symbols:
             # We must use standard search to get historical posts for just this symbol
             url = f"https://www.reddit.com/search.json?q={symbol}&sort=new&limit=100"
@@ -132,8 +132,7 @@ async def main():
     logger.info(f"Backfilling data for symbols: {symbols}")
     
     # 1. Backfill Market Data
-    # Run synchronously as it writes to Postgres
-    await asyncio.to_thread(backfill_market, db, symbols)
+    await backfill_market(db, symbols)
     
     # 2. Backfill Reddit Data
     rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"
