@@ -113,6 +113,7 @@ services:
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - PYTHONUNBUFFERED=1
     - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-bot/1.0 (DigitalOcean; +github.com/adambernier/social-sentiment)}
+    - REDDIT_PROXY_URL=${REDDIT_PROXY_URL}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -144,6 +145,7 @@ services:
     - RABBITMQ_USER=${RABBITMQ_USER}
     - RABBITMQ_PASS=${RABBITMQ_PASS}
     - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-bot/1.0 (DigitalOcean; +github.com/adambernier/social-sentiment)}
+    - REDDIT_PROXY_URL=${REDDIT_PROXY_URL}
     depends_on:
       postgres:
         condition: service_healthy

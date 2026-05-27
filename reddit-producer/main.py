@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+import os
 import re
 import html
 from datetime import datetime, timezone
@@ -138,7 +139,8 @@ async def main():
     
     # Initialize seen_ids with a "drain" fetch to avoid re-publishing old posts on startup
     # We do one quick fetch to populate the deque.
-    async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}) as client:
+    proxy_url = os.environ.get("REDDIT_PROXY_URL")
+    async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}, proxy=proxy_url) as client:
         try:
             logger.info("Performing startup drain fetch to populate seen_ids...")
             resp = await client.get(FEED_URL, timeout=10)
@@ -162,7 +164,8 @@ async def main():
                 channel = await connection.channel()
                 await channel.declare_queue(QUEUE_RAW_POSTS, durable=True)
 
-                async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}) as client:
+                proxy_url = os.environ.get("REDDIT_PROXY_URL")
+                async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}, proxy=proxy_url) as client:
                     backoff = POLL_INTERVAL
                     while True:
                         rate_limited, requested_backoff = await fetch_and_process(client, channel)

@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
+import os
 from shared.config import (
     RABBIT_HOST,
     RABBIT_PASS,
@@ -30,7 +31,8 @@ logger = logging.getLogger("backfill")
 async def backfill_reddit(symbols, channel):
     logger.info("Backfilling Reddit posts...")
     
-    async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}) as client:
+    proxy_url = os.environ.get("REDDIT_PROXY_URL")
+    async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}, proxy=proxy_url) as client:
         for symbol in symbols:
             # We must use standard search to get historical posts for just this symbol
             url = f"https://www.reddit.com/search.json?q={symbol}&sort=new&limit=100"
