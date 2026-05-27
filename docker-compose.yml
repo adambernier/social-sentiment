@@ -37,11 +37,10 @@ services:
       context: .
       dockerfile: preprocessing-service/Dockerfile
     volumes:
-    - hf_cache:/root/.cache/huggingface
+
 
     environment:
     - RABBITMQ_HOST=rabbitmq
-    - HF_HOME=/root/.cache/huggingface
     - DATABASE_DSN=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-sentiment}@postgres:5432/${POSTGRES_DB:-sentiment}
     - RABBITMQ_USER=${RABBITMQ_USER:-guest}
     - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
@@ -56,7 +55,7 @@ services:
       context: .
       dockerfile: sentiment-service/Dockerfile
     volumes:
-    - hf_cache:/root/.cache/huggingface
+
 
     environment:
     - RABBITMQ_HOST=rabbitmq
@@ -215,4 +214,3 @@ services:
     - prometheus
 volumes:
   postgres_data: null
-  hf_cache: null
