@@ -98,9 +98,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Social Sentiment API", lifespan=lifespan)
 Instrumentator().instrument(app).expose(app)
 
+# Set CORS_ALLOW_ORIGINS (comma-separated) in the droplet .env for the real
+# origin. Default is localhost-only for dev; production traffic is same-origin.
+_default_cors_origins = "http://localhost:3000"
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("CORS_ALLOW_ORIGINS", _default_cors_origins).split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

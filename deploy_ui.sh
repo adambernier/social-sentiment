@@ -12,7 +12,7 @@ docker compose stop
 echo "🏗️ Rebuilding and starting the ui-service..."
 docker compose up -d --build ui-service
 
-echo "▶️ Restarting all other containers..."
-docker compose start
+echo "▶️ Starting all containers (recreating any with changed config)..."
+docker compose up -d
 
 echo "✅ UI successfully deployed!"
