@@ -2,8 +2,8 @@ services:
   rabbitmq:
     image: rabbitmq:3-management
     ports:
-    - 5672:5672
-    - 15672:15672
+    - 127.0.0.1:5672:5672
+    - 127.0.0.1:15672:15672
     environment:
     - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER}
     - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS}
@@ -22,7 +22,7 @@ services:
     - POSTGRES_USER=${POSTGRES_USER}
     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     ports:
-    - 5432:5432
+    - 127.0.0.1:5432:5432
     volumes:
     - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -173,15 +173,17 @@ services:
   prometheus:
     image: prom/prometheus:v2.45.0
     ports:
-    - 9090:9090
+    - 127.0.0.1:9090:9090
     volumes:
     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
   grafana:
     image: grafana/grafana:10.0.3
     environment:
     - GF_AUTH_ANONYMOUS_ENABLED=true
-    - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-    - GF_AUTH_DISABLE_LOGIN_FORM=true
+    - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    - GF_AUTH_DISABLE_LOGIN_FORM=false
+    - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+    - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
     - GF_SECURITY_ALLOW_EMBEDDING=true
     - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/provisioning/dashboards/SystemHealth.json
     - GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s:%(http_port)s/grafana/
@@ -193,6 +195,9 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
+    environment:
+    - SITE_ADDRESS=${SITE_ADDRESS}
+    - ACME_EMAIL=${ACME_EMAIL}
     ports:
     - "80:80"
     - "443:443"
