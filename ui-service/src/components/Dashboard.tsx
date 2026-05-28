@@ -32,7 +32,10 @@ export default function Dashboard() {
       <div className="max-w-[1600px] mx-auto space-y-6">
         <Header {...dashboardData} />
         <TickerActivity {...dashboardData} />
-        <TelemetryGrid {...dashboardData} />
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+          <TelemetryGrid {...dashboardData} />
+          <SectorScorecard {...dashboardData} />
+        </div>
         <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
           <div className="xl:col-span-3">
             <CorrelationChart {...dashboardData} />
@@ -41,10 +44,7 @@ export default function Dashboard() {
             <OpportunityScanner {...dashboardData} />
           </div>
         </div>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-          <SourceHealthPanel sources={dashboardData.state.sourceHealth || []} />
-          <SectorScorecard {...dashboardData} />
-        </div>
+        <SourceHealthPanel sources={dashboardData.state.sourceHealth || []} />
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
           <Feed {...dashboardData} />
           <Sidebar {...dashboardData} />

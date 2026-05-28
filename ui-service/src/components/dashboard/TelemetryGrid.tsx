@@ -8,7 +8,7 @@ export default function TelemetryGrid({ state, computed }: DashboardDataProps) {
   const { totalMentions, bullishPct, bearishPct, divergenceStatus, vixRegime } = computed;
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-2 2xl:grid-cols-4 gap-4 w-full">
       {/* ROW 1: Basics (Price, Volume, Bullish, Bearish) */}
       <div className="bg-white/5 backdrop-blur-md border border-blue-500/20 rounded-2xl p-4 hover:bg-white/10 transition-colors col-span-1">
         <div className="flex flex-col text-slate-400 mb-1">
