@@ -31,19 +31,17 @@ export default function Dashboard() {
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black text-slate-100 p-4 md:p-8 font-sans selection:bg-indigo-500/30">
       <div className="max-w-[1600px] mx-auto space-y-6">
         <Header {...dashboardData} />
-        <TickerActivity {...dashboardData} />
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
-          <TelemetryGrid {...dashboardData} />
-          <FundamentalMetrics {...dashboardData} />
-        </div>
-        <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
-          <div className="xl:col-span-3">
-            <CorrelationChart {...dashboardData} />
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+          <div className="xl:col-span-7 flex flex-col gap-6">
+            <TickerActivity {...dashboardData} />
+            <TelemetryGrid {...dashboardData} />
           </div>
-          <div className="xl:col-span-1">
+          <div className="xl:col-span-5 grid grid-cols-1 md:grid-cols-2 gap-6 h-full">
+            <FundamentalMetrics {...dashboardData} />
             <OpportunityScanner {...dashboardData} />
           </div>
         </div>
+        <CorrelationChart {...dashboardData} />
         <SourceHealthPanel sources={dashboardData.state.sourceHealth || []} />
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
           <Feed {...dashboardData} />

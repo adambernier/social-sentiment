@@ -8,7 +8,7 @@ export default function OpportunityScanner({ state }: DashboardDataProps) {
 
   return (
     <section className={cn(
-      "bg-slate-900/40 backdrop-blur-xl border rounded-2xl p-6 shadow-2xl relative overflow-hidden flex flex-col transition-all duration-300",
+      "bg-slate-900/40 backdrop-blur-xl border rounded-2xl p-6 shadow-2xl relative overflow-hidden flex flex-col h-full transition-all duration-300",
       correlationData.opportunity
         ? (correlationData.opportunity.color === 'emerald' ? 'border-emerald-500/25 shadow-[0_0_20px_rgba(16,185,129,0.08)]' :
            correlationData.opportunity.color === 'teal' ? 'border-teal-500/25 shadow-[0_0_20px_rgba(20,184,166,0.08)]' :
