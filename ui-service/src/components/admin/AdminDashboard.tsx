@@ -4,6 +4,8 @@ import React, { useState, useEffect } from "react";
 import { ShieldAlert, Plus, Edit2, Trash2, Power, PowerOff, Save, X, ArrowLeft, Activity } from "lucide-react";
 import { cn } from "../dashboard/utils";
 import Link from "next/link";
+import { SourceHealth } from "../types";
+import SourceHealthPanel from "../dashboard/SourceHealthPanel";
 
 interface TrackedSymbol {
   symbol: string;
@@ -17,6 +19,7 @@ interface TrackedSymbol {
 
 export default function AdminDashboard() {
   const [symbols, setSymbols] = useState<TrackedSymbol[]>([]);
+  const [sourceHealth, setSourceHealth] = useState<SourceHealth[]>([]);
   const [loading, setLoading] = useState(true);
   const [apiKey, setApiKey] = useState("");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -28,6 +31,18 @@ export default function AdminDashboard() {
   const [rawKeywords, setRawKeywords] = useState("");
   const [rawBlockPhrases, setRawBlockPhrases] = useState("");
 
+  const fetchHealth = async () => {
+    try {
+      const res = await fetch("/api/stats/sources");
+      if (res.ok) {
+        const data = await res.json();
+        setSourceHealth(data);
+      }
+    } catch (err) {
+      console.error("Error fetching source health", err);
+    }
+  };
+
   useEffect(() => {
     const storedKey = localStorage.getItem("ADMIN_API_KEY");
     if (storedKey) {
@@ -36,6 +51,12 @@ export default function AdminDashboard() {
     } else {
       setLoading(false);
     }
+    
+    // Initial fetch
+    fetchHealth();
+    // Poll every 30 seconds
+    const interval = setInterval(fetchHealth, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   const fetchSymbols = async (key: string) => {
@@ -296,6 +317,8 @@ export default function AdminDashboard() {
           </tbody>
         </table>
       </div>
+
+      <SourceHealthPanel sources={sourceHealth} />
 
       <div className="bg-slate-900/60 rounded-2xl border border-white/10 overflow-hidden backdrop-blur-xl mt-8">
         <div className="p-4 border-b border-white/5 bg-slate-950/50">
