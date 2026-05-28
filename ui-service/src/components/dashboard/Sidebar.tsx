@@ -5,7 +5,7 @@ import { topicProgressColors } from "./constants";
 import { DashboardDataProps } from "../types";
 import SectorScorecard from "./SectorScorecard";
 
-export default function Sidebar({ state, computed }: DashboardDataProps) {
+export default function Sidebar({ state, computed, setters }: DashboardDataProps) {
   const { metrics } = state;
   const { sortedTopics, totalTopicCount } = computed;
 
