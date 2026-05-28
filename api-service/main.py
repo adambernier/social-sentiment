@@ -98,12 +98,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Social Sentiment API", lifespan=lifespan)
 Instrumentator().instrument(app).expose(app)
 
-# Set CORS_ALLOW_ORIGINS (comma-separated) in the droplet .env for the real
-# origin. Default is localhost-only for dev; production traffic is same-origin.
-_default_cors_origins = "http://localhost:3000"
+# The UI calls the API same-origin via relative /api (proxied by Next.js
+# rewrites), so CORS is normally never exercised. Default is empty (no
+# cross-origin allowed); set CORS_ALLOW_ORIGINS only if an external browser
+# client must call the API cross-origin.
 ALLOWED_ORIGINS = [
     o.strip()
-    for o in os.environ.get("CORS_ALLOW_ORIGINS", _default_cors_origins).split(",")
+    for o in os.environ.get("CORS_ALLOW_ORIGINS", "").split(",")
     if o.strip()
 ]
 
