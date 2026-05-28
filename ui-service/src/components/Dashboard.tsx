@@ -9,7 +9,7 @@ import LagSweepChart from "./dashboard/LagSweepChart";
 import CorrelationChart from "./dashboard/CorrelationChart";
 import OpportunityScanner from "./dashboard/OpportunityScanner";
 import SourceHealthPanel from "./dashboard/SourceHealthPanel";
-import SectorScorecard from "./dashboard/SectorScorecard";
+import FundamentalMetrics from "./dashboard/FundamentalMetrics";
 import Feed from "./dashboard/Feed";
 import Sidebar from "./dashboard/Sidebar";
 
@@ -34,7 +34,7 @@ export default function Dashboard() {
         <TickerActivity {...dashboardData} />
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
           <TelemetryGrid {...dashboardData} />
-          <SectorScorecard {...dashboardData} />
+          <FundamentalMetrics {...dashboardData} />
         </div>
         <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
           <div className="xl:col-span-3">
