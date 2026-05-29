@@ -135,6 +135,24 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+  alpaca-producer:
+    build:
+      context: .
+      dockerfile: alpaca-producer/Dockerfile
+    environment:
+    - RABBITMQ_HOST=rabbitmq
+    - RABBITMQ_USER=${RABBITMQ_USER}
+    - RABBITMQ_PASS=${RABBITMQ_PASS}
+    - ALPACA_API_KEY=${ALPACA_API_KEY}
+    - ALPACA_API_SECRET=${ALPACA_API_SECRET}
+    - ALPACA_URL=${ALPACA_URL}
+    - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    - PYTHONUNBUFFERED=1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
   market-producer:
     build:
       context: .

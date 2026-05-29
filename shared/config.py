@@ -42,3 +42,8 @@ FINNHUB_API_KEY = get_env("FINNHUB_API_KEY", "")
 # here (a dependency-light module) so the producers and the API share one source
 # of truth for the symbol stored in / queried from stock_quotes.
 VIX_SYMBOL = get_env("VIX_SYMBOL", "^VIX")
+
+# Alpaca Config (news producer)
+ALPACA_API_KEY = get_env("ALPACA_API_KEY", "")
+ALPACA_API_SECRET = get_env("ALPACA_API_SECRET", "")
+ALPACA_URL = get_env("ALPACA_URL", "https://data.alpaca.markets/v1beta1/news")
