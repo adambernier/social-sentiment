@@ -126,7 +126,7 @@ async def main():
         sys.exit(1)
 
     # Start metrics
-    await start_metrics_server(8003)
+    start_metrics_server(8003)
 
     connection = await aio_pika.connect_robust(
         host=RABBIT_HOST,
