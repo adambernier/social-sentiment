@@ -137,34 +137,41 @@ async def main():
     channel = await connection.channel()
     await channel.declare_queue(QUEUE_RAW_POSTS, durable=True)
 
-    limiter = AsyncRateLimiter(RATE_PER_MIN, 60.0)
+    limiter = AsyncRateLimiter(max_rate=RATE_PER_MIN, period=60.0)
+    backoff_tracker = PerSymbolBackoff(base_interval=POLL_INTERVAL, max_backoff=MAX_BACKOFF)
     seen_ids = set()
-    backoffs = PerSymbolBackoff(base_delay=60, max_delay=MAX_BACKOFF)
 
     logger.info(f"Starting Alpaca producer loop using {ALPACA_URL}")
     while True:
         try:
-            start_t = asyncio.get_running_loop().time()
-            all_symbols = tickers()
-            
             async with httpx.AsyncClient(timeout=10.0) as client:
-                async def worker(symbol):
-                    if not backoffs.is_ready(symbol):
-                        return
-                    await limiter.acquire()
-                    was_limited = await fetch_symbol_news(symbol, client, channel, seen_ids)
+                # Re-read each poll so runtime symbol additions are honored
+                # without a restart (shared.symbols refreshes from the DB).
+                symbols = tickers()
+                # Skip symbols still in their own rate-limit cooldown.
+                due = backoff_tracker.due(symbols)
+                results = await paced_gather(
+                    due,
+                    lambda sym: fetch_symbol_news(sym, client, channel, seen_ids),
+                    max_concurrency=MAX_CONCURRENCY,
+                    limiter=limiter,
+                )
+                for sym, was_limited in zip(due, results):
+                    backoff_tracker.record(sym, was_limited)
                     if was_limited:
                         RATE_LIMITS_HIT_TOTAL.labels(platform="alpaca").inc()
-                        backoffs.record_failure(symbol)
-                    else:
-                        backoffs.record_success(symbol)
 
-                await paced_gather(worker, all_symbols, MAX_CONCURRENCY)
+                if len(seen_ids) > 2000:
+                    seen_ids = set(list(seen_ids)[-2000:])
 
-            elapsed = asyncio.get_running_loop().time() - start_t
-            sleep_time = max(0, POLL_INTERVAL - elapsed)
-            logger.info(f"Cycle complete. Sleeping {sleep_time:.1f}s.")
-            await asyncio.sleep(sleep_time)
+                penalized = backoff_tracker.penalized()
+                if penalized:
+                    logger.warning(
+                        f"{len(penalized)} symbol(s) in rate-limit backoff, "
+                        f"skipped {len(symbols) - len(due)} this cycle: {penalized}"
+                    )
+                logger.info(f"Cycle complete ({len(due)} polled). Sleeping {POLL_INTERVAL}s.")
+                await asyncio.sleep(POLL_INTERVAL)
 
         except Exception as e:
             logger.exception(f"Error in producer loop: {e}")
