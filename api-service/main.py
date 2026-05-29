@@ -607,7 +607,9 @@ async def get_topic_stats(
 
 # Post-producing data sources we expect to be ingesting. Surfaced read-only so a
 # dead/blocked source (e.g. a rate-limited news feed) is obvious at a glance.
-INGESTION_SOURCES = ["bluesky", "reddit", "stocktwits", "finnhub", "alpaca"]
+# "reddit" is omitted while reddit-producer is parked (Reddit 403s unauthenticated
+# .json); re-add it when the OAuth switch re-enables that producer.
+INGESTION_SOURCES = ["bluesky", "stocktwits", "finnhub", "alpaca"]
 
 # A source is "stalled" (unusually quiet for itself) when the gap since its last
 # post exceeds this multiple of its average gap (24h / posts_24h) AND an absolute
