@@ -39,7 +39,7 @@ SUBREDDITS = (
     "+options+StockMarket+semiconductors+Spacestocks"
 )
 FEED_URL = f"https://www.reddit.com/r/{SUBREDDITS}/comments.json?limit=100"
-POLL_INTERVAL = get_env_int("REDDIT_POLL_INTERVAL", 300)
+POLL_INTERVAL = get_env_int("REDDIT_POLL_INTERVAL", 900)
 MAX_BACKOFF = get_env_int("REDDIT_MAX_BACKOFF", 3600)
 
 # Global deque for ID-based deduplication
@@ -51,8 +51,11 @@ async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel
         resp = await client.get(FEED_URL, timeout=15)
         
         if resp.status_code == 403:
-            logger.error("Reddit 403 Forbidden. Check User-Agent or IP block.")
-            return True, 300
+            # 403 = unauthenticated .json blocked / proxy IP flagged. Return 0 so
+            # the caller escalates backoff (doubles, up to MAX_BACKOFF) instead of
+            # re-poking a blocked IP every POLL_INTERVAL, which keeps it flagged.
+            logger.error("Reddit 403 Blocked (unauthenticated .json or flagged IP). Escalating backoff.")
+            return True, 0
         elif resp.status_code == 429:
             retry_after = int(resp.headers.get("Retry-After", 60))
             logger.warning(f"Reddit 429 Rate Limited. Retry-After header: {retry_after}s.")
