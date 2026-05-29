@@ -5,6 +5,7 @@ export const platformColors: Record<string, string> = {
   yahoo: 'bg-purple-500/20 text-purple-400 border border-purple-500/10',
   stocktwits: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/10',
   finnhub: 'bg-blue-500/20 text-blue-400 border border-blue-500/10',
+  alpaca: 'bg-teal-500/20 text-teal-400 border border-teal-500/10',
   yfinance: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/10',
 };
 
@@ -14,10 +15,11 @@ export const platformLabels: Record<string, string> = {
   bluesky: 'Bluesky',
   stocktwits: 'Stocktwits',
   finnhub: 'News Article',
+  alpaca: 'Alpaca News',
   yfinance: 'Market Data (YF)',
 };
 
-export const NEWS_PLATFORMS = new Set(["finnhub"]);
+export const NEWS_PLATFORMS = new Set(["finnhub", "alpaca"]);
 export const isNewsPlatform = (platform: string) => NEWS_PLATFORMS.has(platform);
 
 export const topicColors: Record<string, string> = {
