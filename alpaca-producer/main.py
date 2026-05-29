@@ -108,7 +108,7 @@ async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio
             )
             seen_ids.add(post_id)
             new_count += 1
-            POSTS_INGESTED_TOTAL.labels(platform="alpaca").inc()
+            POSTS_INGESTED_TOTAL.labels(platform="alpaca", symbol=symbol).inc()
 
         logger.info(f"[{symbol}] Queued {new_count} new Alpaca posts (skipped {skipped})")
         return False
