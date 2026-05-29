@@ -103,6 +103,10 @@ services:
       postgres:
         condition: service_healthy
   reddit-producer:
+    # Disabled by default -- Reddit can 403-block unauthenticated .json 
+    # Re-enable with `docker compose --profile reddit up -d`
+    # if we can get OAuth (oauth.reddit.com) is wired up
+    profiles: ["reddit"]
     build:
       context: .
       dockerfile: reddit-producer/Dockerfile
