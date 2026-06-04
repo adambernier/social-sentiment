@@ -185,7 +185,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
             />
             
             <YAxis
-              yAxisId="right" orientation="right" tickFormatter={(v) => `${v > 0 ? '+' : ''}${v}%`}
+              yAxisId="right" orientation="right" tickFormatter={(v) => `${v > 0 ? '+' : ''}${Number(v).toFixed(2)}%`}
               stroke="#64748b" tickLine={false} axisLine={false} tick={{ fontSize: 12 }}
               domain={rightDomain}
             />
