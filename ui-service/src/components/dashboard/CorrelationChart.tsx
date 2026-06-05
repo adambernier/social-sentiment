@@ -9,9 +9,9 @@ import { DashboardDataProps } from "../types";
 // GLYPH (not its color) reports how that signal turned out, so it never reads as
 // the emerald/rose the sentiment bars use. The accent is a deliberately
 // non-sentiment sky/amber/slate, secondary to the shape:
-//   check (sky)   = good    -> price rose after the signal (profitable)
-//   cross (amber) = bad     -> price dropped (false signal)
-//   dot (slate)   = pending -> not enough forward data yet (pulses)
+//   up-arrow (sky)    = good    -> price rose after the signal (profitable)
+//   down-arrow (amber)= bad     -> price dropped (false signal)
+//   dot (slate)       = pending -> not enough forward data yet (pulses)
 const CustomizedOpportunityDot = (props: any) => {
   const { cx, cy, payload, value } = props;
   if (!payload || !payload.buySignal || value == null) return null;
@@ -33,15 +33,15 @@ const CustomizedOpportunityDot = (props: any) => {
       <circle cx={cx} cy={cy} r={r} fill="#0f172a" stroke={accent} strokeWidth={1.5} />
       {quality === "good" && (
         <path
-          d={`M ${cx - 3} ${cy + 0.2} L ${cx - 1} ${cy + 2.4} L ${cx + 3.2} ${cy - 2.6}`}
-          fill="none" stroke={accent} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round"
+          d={`M ${cx} ${cy - 3.3} L ${cx - 3.2} ${cy + 2.4} L ${cx + 3.2} ${cy + 2.4} Z`}
+          fill={accent} stroke={accent} strokeWidth={0.5} strokeLinejoin="round"
         />
       )}
       {quality === "bad" && (
-        <g stroke={accent} strokeWidth={1.6} strokeLinecap="round">
-          <line x1={cx - 2.4} y1={cy - 2.4} x2={cx + 2.4} y2={cy + 2.4} />
-          <line x1={cx + 2.4} y1={cy - 2.4} x2={cx - 2.4} y2={cy + 2.4} />
-        </g>
+        <path
+          d={`M ${cx} ${cy + 3.3} L ${cx - 3.2} ${cy - 2.4} L ${cx + 3.2} ${cy - 2.4} Z`}
+          fill={accent} stroke={accent} strokeWidth={0.5} strokeLinejoin="round"
+        />
       )}
       {quality === "pending" && (
         <circle cx={cx} cy={cy} r={1.7} fill={accent} />
@@ -143,15 +143,14 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
           <div className="flex items-center gap-1" title="Buy signal that paid off — price rose within 2h">
             <svg width="13" height="13" viewBox="0 0 13 13" className="shrink-0">
               <circle cx="6.5" cy="6.5" r="5.6" fill="#0f172a" stroke="#38bdf8" strokeWidth="1.2" />
-              <path d="M4 6.7 L5.5 8.4 L9 4.6" fill="none" stroke="#38bdf8" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M6.5 3.2 L4 9 L9 9 Z" fill="#38bdf8" stroke="#38bdf8" strokeWidth="0.4" strokeLinejoin="round" />
             </svg>
             Signal hit
           </div>
           <div className="flex items-center gap-1" title="Buy signal that failed — price dropped within 2h">
             <svg width="13" height="13" viewBox="0 0 13 13" className="shrink-0">
               <circle cx="6.5" cy="6.5" r="5.6" fill="#0f172a" stroke="#fb923c" strokeWidth="1.2" />
-              <line x1="4.5" y1="4.5" x2="8.5" y2="8.5" stroke="#fb923c" strokeWidth="1.3" strokeLinecap="round" />
-              <line x1="8.5" y1="4.5" x2="4.5" y2="8.5" stroke="#fb923c" strokeWidth="1.3" strokeLinecap="round" />
+              <path d="M6.5 9.8 L4 4 L9 4 Z" fill="#fb923c" stroke="#fb923c" strokeWidth="0.4" strokeLinejoin="round" />
             </svg>
             Signal missed
           </div>
@@ -266,7 +265,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                             'bg-slate-500/10 text-slate-300 border border-slate-500/20'
                           )}>
                             <span className={cn("w-3 text-center text-sm font-bold leading-none", data.signalQuality === 'pending' && 'animate-pulse')}>
-                              {data.signalQuality === 'good' ? '✓' : data.signalQuality === 'bad' ? '✗' : '⋯'}
+                              {data.signalQuality === 'good' ? '▲' : data.signalQuality === 'bad' ? '▼' : '⋯'}
                             </span>
                             {data.signalQuality === 'good' ? 'Profitable (Price Rose)' :
                              data.signalQuality === 'bad' ? 'False Signal (Price Dropped)' :
