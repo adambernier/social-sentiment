@@ -56,35 +56,8 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
     return format(new Date(t), "MMM d");
   };
 
-  const renderSupportLabel = (props: any) => {
-    const { viewBox } = props;
-    if (!viewBox) return null;
-    const x = viewBox.x + viewBox.width - 130;
-    const y = viewBox.y;
-    return (
-      <g transform={`translate(${x}, ${y - 18})`}>
-        <rect width={125} height={16} rx={4} fill="#090d16" fillOpacity={0.9} stroke="#10b981" strokeWidth={1} strokeOpacity={0.3} />
-        <text x={6} y={11} fill="#10b981" fontSize={9} fontWeight="bold" letterSpacing="0.05em">
-          SUPPORT: ${correlationData.supportPrice.toFixed(2)}
-        </text>
-      </g>
-    );
-  };
-
-  const renderResistanceLabel = (props: any) => {
-    const { viewBox } = props;
-    if (!viewBox) return null;
-    const x = viewBox.x + viewBox.width - 145;
-    const y = viewBox.y;
-    return (
-      <g transform={`translate(${x}, ${y + 2})`}>
-        <rect width={140} height={16} rx={4} fill="#090d16" fillOpacity={0.9} stroke="#f43f5e" strokeWidth={1} strokeOpacity={0.3} />
-        <text x={6} y={11} fill="#f43f5e" fontSize={9} fontWeight="bold" letterSpacing="0.05em">
-          RESISTANCE: ${correlationData.resistancePrice.toFixed(2)}
-        </text>
-      </g>
-    );
-  };
+  // Dynamic Support and Resistance lines are now rendered as curve series,
+  // and their local values are displayed inside the tooltip for each bucket.
 
   return (
     <section className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl p-6 shadow-2xl">
@@ -141,6 +114,13 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
           <div className="hidden sm:block h-4 w-px bg-slate-700 mx-1"></div>
           <div className="flex items-center gap-1"><div className="w-3 h-0.5 bg-[#fbbf24]"></div> {symbol} Price</div>
           <div className="flex items-center gap-1"><div className="w-3 border-t-2 border-dashed border-[#8b5cf6]"></div> NQ Futures</div>
+          {showSR && (
+            <>
+              <div className="hidden sm:block h-4 w-px bg-slate-700 mx-1"></div>
+              <div className="flex items-center gap-1"><div className="w-3 border-t border-dashed border-[#10b981]"></div> Support</div>
+              <div className="flex items-center gap-1"><div className="w-3 border-t border-dashed border-[#f43f5e]"></div> Resistance</div>
+            </>
+          )}
         </div>
       </div>
       <div className="h-[400px]">
@@ -197,18 +177,29 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                   return (
                     <div className="bg-slate-900/90 border border-slate-700 p-3 rounded-lg backdrop-blur-md shadow-xl text-sm min-w-[200px]">
                       <p className="text-slate-300 font-medium mb-3 pb-2 border-b border-white/5">{format(new Date(label), "MMM d, yyyy h:mm a")}</p>
-                      {payload.map((p: any) => (
-                        <div key={p.name} className="flex justify-between items-center gap-4 mb-1.5">
-                          <div className="flex items-center gap-2">
-                            <div className="w-2 h-2 rounded-full shadow-sm" style={{ backgroundColor: p.color }}></div>
-                            <span className="text-slate-400 text-xs">{p.name}</span>
+                      {payload.map((p: any) => {
+                        const isSupport = p.name === "Support Level";
+                        const isResistance = p.name === "Resistance Level";
+                        let priceSuffix = "";
+                        if (isSupport && data.supportPrice) {
+                          priceSuffix = ` ($${data.supportPrice.toFixed(2)})`;
+                        } else if (isResistance && data.resistancePrice) {
+                          priceSuffix = ` ($${data.resistancePrice.toFixed(2)})`;
+                        }
+                        return (
+                          <div key={p.name} className="flex justify-between items-center gap-4 mb-1.5">
+                            <div className="flex items-center gap-2">
+                              <div className="w-2 h-2 rounded-full shadow-sm" style={{ backgroundColor: p.color }}></div>
+                              <span className="text-slate-400 text-xs">{p.name}</span>
+                            </div>
+                            <span className="text-white font-semibold text-xs">
+                              {typeof p.value === 'number' && !Number.isInteger(p.value) ? p.value.toFixed(2) : p.value}
+                              {p.name.includes('Change') || p.name.includes('Index') || isSupport || isResistance ? '%' : ''}
+                              {priceSuffix}
+                            </span>
                           </div>
-                          <span className="text-white font-semibold text-xs">
-                            {typeof p.value === 'number' && !Number.isInteger(p.value) ? p.value.toFixed(2) : p.value}
-                            {p.name.includes('Change') || p.name.includes('Index') ? '%' : ''}
-                          </span>
-                        </div>
-                      ))}
+                        );
+                      })}
                       {data.buySignal && (
                         <div className="mt-3 pt-3 border-t border-white/5">
                           <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Algorithmic Signal</div>
@@ -254,10 +245,16 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
               stroke="#8b5cf6" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={true}
             />
             {showSR && correlationData.supportPrice > 0 && (
-              <ReferenceLine yAxisId="right" y={correlationData.supportPct} stroke="#10b981" strokeDasharray="3 3" strokeWidth={1.5} strokeOpacity={0.5} label={renderSupportLabel} />
+              <Line 
+                yAxisId="right" type="monotone" dataKey="supportPct" name="Support Level" 
+                stroke="#10b981" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls={true}
+              />
             )}
             {showSR && correlationData.resistancePrice > 0 && (
-              <ReferenceLine yAxisId="right" y={correlationData.resistancePct} stroke="#f43f5e" strokeDasharray="3 3" strokeWidth={1.5} strokeOpacity={0.5} label={renderResistanceLabel} />
+              <Line 
+                yAxisId="right" type="monotone" dataKey="resistancePct" name="Resistance Level" 
+                stroke="#f43f5e" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls={true}
+              />
             )}
           </ComposedChart>
         </ResponsiveContainer>

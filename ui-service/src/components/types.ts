@@ -37,6 +37,8 @@ export interface CorrelationBucket {
   priceChange: number | null; futureChange: number | null;
   isMarketOpen: boolean; sentimentIndex: number; sentimentSMA: number;
   rawPrice: number | null; buySignal: boolean | null; buyScore: number | null;
+  supportPrice?: number | null; supportPct?: number | null;
+  resistancePrice?: number | null; resistancePct?: number | null;
   sentimentMACD?: number | null; sentimentSignal?: number | null; sentimentHist?: number | null;
 }
 export interface ClosedRegion { start: string; end: string; }

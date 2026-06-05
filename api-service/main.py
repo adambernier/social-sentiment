@@ -307,6 +307,10 @@ class CorrelationBucket(BaseModel):
     buySignal: Optional[bool] = None
     signalQuality: Optional[str] = None
     buyScore: Optional[float] = None
+    supportPrice: Optional[float] = None
+    supportPct: Optional[float] = None
+    resistancePrice: Optional[float] = None
+    resistancePct: Optional[float] = None
     # Sentiment momentum oscillator (MACD-style). Optional: None during warm-up
     # and leading empty hours, so 0.0 stays meaningful (the zero-cross).
     sentimentMACD: Optional[float] = None
@@ -1475,6 +1479,28 @@ async def get_correlation(
         if latest_price and latest_price != 0:
             support_pct = ((support_price - latest_price) / latest_price) * 100
             resistance_pct = ((resistance_price - latest_price) / latest_price) * 100
+
+    # Calculate dynamic support and resistance for each bucket (trailing 24 periods)
+    rolling_window = 24
+    for i in range(len(sorted_data)):
+        window_data = sorted_data[max(0, i - rolling_window + 1) : i + 1]
+        window_prices = [d['rawPrice'] for d in window_data if d['rawPrice'] is not None]
+        if len(window_prices) > 0:
+            sorted_window = sorted(window_prices)
+            w_idx5 = int((len(sorted_window) - 1) * 0.05)
+            w_idx95 = int((len(sorted_window) - 1) * 0.95)
+            local_support = sorted_window[w_idx5]
+            local_resistance = sorted_window[w_idx95]
+            if latest_price and latest_price != 0:
+                sorted_data[i]['supportPrice'] = local_support
+                sorted_data[i]['supportPct'] = ((local_support - latest_price) / latest_price) * 100
+                sorted_data[i]['resistancePrice'] = local_resistance
+                sorted_data[i]['resistancePct'] = ((local_resistance - latest_price) / latest_price) * 100
+        else:
+            sorted_data[i]['supportPrice'] = support_price
+            sorted_data[i]['supportPct'] = support_pct
+            sorted_data[i]['resistancePrice'] = resistance_price
+            sorted_data[i]['resistancePct'] = resistance_pct
 
     # 9. Compute historical buy signals
     for i in range(len(sorted_data)):
