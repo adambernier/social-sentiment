@@ -41,7 +41,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
     if (!showSR || !(correlationData?.supportPrice > 0)) return ["auto", "auto"];
     const vals: number[] = [correlationData.supportPct, correlationData.resistancePct];
     for (const d of displayData ?? []) {
-      if (typeof d.priceChange === "number") vals.push(d.priceChange);
+      if (typeof d.pricePct === "number") vals.push(d.pricePct);
       if (typeof d.futureChange === "number") vals.push(d.futureChange);
     }
     const lo = Math.min(...vals);
@@ -180,11 +180,14 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                       {payload.map((p: any) => {
                         const isSupport = p.name === "Support Level";
                         const isResistance = p.name === "Resistance Level";
+                        const isPrice = p.dataKey === "pricePct";
                         let priceSuffix = "";
                         if (isSupport && data.supportPrice) {
                           priceSuffix = ` ($${data.supportPrice.toFixed(2)})`;
                         } else if (isResistance && data.resistancePrice) {
                           priceSuffix = ` ($${data.resistancePrice.toFixed(2)})`;
+                        } else if (isPrice && data.rawPrice) {
+                          priceSuffix = ` ($${data.rawPrice.toFixed(2)})`;
                         }
                         return (
                           <div key={p.name} className="flex justify-between items-center gap-4 mb-1.5">
@@ -194,7 +197,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                             </div>
                             <span className="text-white font-semibold text-xs">
                               {typeof p.value === 'number' && !Number.isInteger(p.value) ? p.value.toFixed(2) : p.value}
-                              {p.name.includes('Change') || p.name.includes('Index') || isSupport || isResistance ? '%' : ''}
+                              {p.name.includes('Change') || p.name.includes('Index') || isSupport || isResistance || isPrice ? '%' : ''}
                               {priceSuffix}
                             </span>
                           </div>
@@ -237,7 +240,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
             )}
 
             <Line 
-              yAxisId="right" type="monotone" dataKey="priceChange" name={`${symbol} Price Change`} 
+              yAxisId="right" type="monotone" dataKey="pricePct" name={`${symbol} Price`}
               stroke="#fbbf24" strokeWidth={3} dot={<CustomizedOpportunityDot fullData={correlationData.data} />} connectNulls={true}
             />
             <Line 

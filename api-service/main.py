@@ -299,6 +299,7 @@ class CorrelationBucket(BaseModel):
     neutral: int
     negative: int
     priceChange: Optional[float] = None
+    pricePct: Optional[float] = None
     futureChange: Optional[float] = None
     isMarketOpen: bool
     sentimentIndex: float
@@ -1163,6 +1164,7 @@ async def get_correlation(
             "negative": 0,
             "priceChange": None,
             "futureChange": None,
+            "pricePct": None,
             "isMarketOpen": False,
             "positiveWeighted": 0.0,
             "neutralWeighted": 0.0,
@@ -1496,6 +1498,12 @@ async def get_correlation(
                 sorted_data[i]['supportPct'] = ((local_support - latest_price) / latest_price) * 100
                 sorted_data[i]['resistancePrice'] = local_resistance
                 sorted_data[i]['resistancePct'] = ((local_resistance - latest_price) / latest_price) * 100
+                # Price line plotted on the same basis as S/R: cumulative % vs the
+                # latest price, so the yellow line tracks the actual price trajectory
+                # (priceChange, the hourly return, stays reserved for the Pearson math).
+                bucket_raw = sorted_data[i]['rawPrice']
+                if bucket_raw is not None:
+                    sorted_data[i]['pricePct'] = ((bucket_raw - latest_price) / latest_price) * 100
         else:
             sorted_data[i]['supportPrice'] = support_price
             sorted_data[i]['supportPct'] = support_pct
