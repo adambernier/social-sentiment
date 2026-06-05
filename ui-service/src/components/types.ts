@@ -34,7 +34,8 @@ export interface OpportunityData {
 }
 export interface CorrelationBucket {
   timestamp: string; positive: number; neutral: number; negative: number;
-  priceChange: number | null; pricePct: number | null; futureChange: number | null;
+  priceChange: number | null; pricePct: number | null;
+  futureChange: number | null; futurePct: number | null;
   isMarketOpen: boolean; sentimentIndex: number; sentimentSMA: number;
   rawPrice: number | null; buySignal: boolean | null; buyScore: number | null;
   supportPrice?: number | null; supportPct?: number | null;

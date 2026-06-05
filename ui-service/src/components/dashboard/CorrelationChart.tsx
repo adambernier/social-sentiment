@@ -33,22 +33,20 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
     return correlationData.data.filter((d: any) => d.isMarketOpen);
   }, [correlationData, hideExtended]);
 
-  // The right axis auto-fits to the price-change series, which hugs 0. The
-  // support/resistance lines use a "% from latest price" baseline and can sit
-  // well outside that range (e.g. support gets clipped when a stock is near its
-  // range high). When S/R is shown, widen the domain to always include both.
+  // The right axis now carries only the NQ Futures line (cumulative % vs the
+  // latest future price). Fit it to that series with a little padding; price and
+  // support/resistance moved to the left dollar axis.
   const rightDomain = React.useMemo<[number | string, number | string]>(() => {
-    if (!showSR || !(correlationData?.supportPrice > 0)) return ["auto", "auto"];
-    const vals: number[] = [correlationData.supportPct, correlationData.resistancePct];
+    const vals: number[] = [];
     for (const d of displayData ?? []) {
-      if (typeof d.pricePct === "number") vals.push(d.pricePct);
-      if (typeof d.futureChange === "number") vals.push(d.futureChange);
+      if (typeof d.futurePct === "number") vals.push(d.futurePct);
     }
+    if (vals.length === 0) return ["auto", "auto"];
     const lo = Math.min(...vals);
     const hi = Math.max(...vals);
-    const pad = (hi - lo) * 0.08 || 1;
+    const pad = (hi - lo) * 0.1 || 1;
     return [lo - pad, hi + pad];
-  }, [showSR, correlationData, displayData]);
+  }, [displayData]);
 
   const formatXAxis = (t: string) => {
     if (hours <= 24) return format(new Date(t), "h:mm a");
@@ -158,14 +156,24 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
               dataKey="timestamp" tickFormatter={formatXAxis} stroke="#64748b" tickLine={false} axisLine={false} dy={10} minTickGap={40} tick={{ fontSize: 12 }}
             />
 
-            <YAxis 
-              yAxisId="left" stroke="#64748b" tickLine={false} axisLine={false} tick={{ fontSize: 12 }}
-              domain={chartView === 'sentiment' ? [-1.1, 1.1] : ['auto', 'auto']}
-              tickFormatter={chartView === 'sentiment' ? (v) => `${v > 0 ? '+' : ''}${Math.round(v * 100)}%` : undefined}
+            {/* Volume view: left axis is the price in whole dollars. */}
+            <YAxis
+              yAxisId="dollar" orientation="left" hide={chartView === 'sentiment'}
+              stroke="#64748b" tickLine={false} axisLine={false} tick={{ fontSize: 12 }}
+              domain={['auto', 'auto']} tickFormatter={(v) => `$${Math.round(v)}`}
             />
+            {/* Sentiment view: left axis is the sentiment index (±100%). */}
+            <YAxis
+              yAxisId="left" orientation="left" hide={chartView !== 'sentiment'}
+              stroke="#64748b" tickLine={false} axisLine={false} tick={{ fontSize: 12 }}
+              domain={[-1.1, 1.1]}
+              tickFormatter={(v) => `${v > 0 ? '+' : ''}${Math.round(v * 100)}%`}
+            />
+            {/* Hidden scale for the de-emphasized social-volume bars. */}
+            <YAxis yAxisId="volume" orientation="left" hide domain={[0, 'auto']} />
             
             <YAxis
-              yAxisId="right" orientation="right" tickFormatter={(v) => `${v > 0 ? '+' : ''}${Number(v).toFixed(2)}%`}
+              yAxisId="right" orientation="right" tickFormatter={(v) => `${v > 0 ? '+' : ''}${Number(v).toFixed(1)}%`}
               stroke="#64748b" tickLine={false} axisLine={false} tick={{ fontSize: 12 }}
               domain={rightDomain}
             />
@@ -178,16 +186,22 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                     <div className="bg-slate-900/90 border border-slate-700 p-3 rounded-lg backdrop-blur-md shadow-xl text-sm min-w-[200px]">
                       <p className="text-slate-300 font-medium mb-3 pb-2 border-b border-white/5">{format(new Date(label), "MMM d, yyyy h:mm a")}</p>
                       {payload.map((p: any) => {
-                        const isSupport = p.name === "Support Level";
-                        const isResistance = p.name === "Resistance Level";
-                        const isPrice = p.dataKey === "pricePct";
-                        let priceSuffix = "";
-                        if (isSupport && data.supportPrice) {
-                          priceSuffix = ` ($${data.supportPrice.toFixed(2)})`;
-                        } else if (isResistance && data.resistancePrice) {
-                          priceSuffix = ` ($${data.resistancePrice.toFixed(2)})`;
-                        } else if (isPrice && data.rawPrice) {
-                          priceSuffix = ` ($${data.rawPrice.toFixed(2)})`;
+                        const dk = p.dataKey;
+                        // Price + Support/Resistance live on the left axis in whole dollars.
+                        const isDollar = dk === "rawPrice" || dk === "supportPrice" || dk === "resistancePrice";
+                        const isFuture = dk === "futurePct";
+                        const isSentIndex = typeof p.name === "string" && p.name.includes("Index");
+                        let display: string;
+                        if (typeof p.value !== "number") {
+                          display = `${p.value}`;
+                        } else if (isDollar) {
+                          display = `$${Math.round(p.value)}`;
+                        } else if (isFuture) {
+                          display = `${p.value > 0 ? "+" : ""}${p.value.toFixed(1)}%`;
+                        } else if (isSentIndex) {
+                          display = `${p.value.toFixed(2)}%`;
+                        } else {
+                          display = Number.isInteger(p.value) ? `${p.value}` : p.value.toFixed(2);
                         }
                         return (
                           <div key={p.name} className="flex justify-between items-center gap-4 mb-1.5">
@@ -195,11 +209,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                               <div className="w-2 h-2 rounded-full shadow-sm" style={{ backgroundColor: p.color }}></div>
                               <span className="text-slate-400 text-xs">{p.name}</span>
                             </div>
-                            <span className="text-white font-semibold text-xs">
-                              {typeof p.value === 'number' && !Number.isInteger(p.value) ? p.value.toFixed(2) : p.value}
-                              {p.name.includes('Change') || p.name.includes('Index') || isSupport || isResistance || isPrice ? '%' : ''}
-                              {priceSuffix}
-                            </span>
+                            <span className="text-white font-semibold text-xs">{display}</span>
                           </div>
                         );
                       })}
@@ -228,9 +238,9 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
 
             {chartView === "volume" ? (
               <>
-                <Bar yAxisId="left" dataKey="positive" name="Positive Posts" stackId="a" fill="#10b981" barSize={12} radius={[0, 0, 0, 0]} />
-                <Bar yAxisId="left" dataKey="neutral" name="Neutral Posts" stackId="a" fill="#64748b" radius={[0, 0, 0, 0]} />
-                <Bar yAxisId="left" dataKey="negative" name="Negative Posts" stackId="a" fill="#f43f5e" radius={[4, 4, 0, 0]} />
+                <Bar yAxisId="volume" dataKey="positive" name="Positive Posts" stackId="a" fill="#10b981" fillOpacity={0.35} barSize={12} radius={[0, 0, 0, 0]} />
+                <Bar yAxisId="volume" dataKey="neutral" name="Neutral Posts" stackId="a" fill="#64748b" fillOpacity={0.35} radius={[0, 0, 0, 0]} />
+                <Bar yAxisId="volume" dataKey="negative" name="Negative Posts" stackId="a" fill="#f43f5e" fillOpacity={0.35} radius={[4, 4, 0, 0]} />
               </>
             ) : (
               <>
@@ -239,23 +249,23 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
               </>
             )}
 
-            <Line 
-              yAxisId="right" type="monotone" dataKey="pricePct" name={`${symbol} Price`}
+            <Line
+              yAxisId="dollar" type="monotone" dataKey="rawPrice" name={`${symbol} Price`}
               stroke="#fbbf24" strokeWidth={3} dot={<CustomizedOpportunityDot fullData={correlationData.data} />} connectNulls={true}
             />
-            <Line 
-              yAxisId="right" type="monotone" dataKey="futureChange" name="NQ Futures Change" 
+            <Line
+              yAxisId="right" type="monotone" dataKey="futurePct" name="NQ Futures"
               stroke="#8b5cf6" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={true}
             />
             {showSR && correlationData.supportPrice > 0 && (
-              <Line 
-                yAxisId="right" type="monotone" dataKey="supportPct" name="Support Level" 
+              <Line
+                yAxisId="dollar" type="monotone" dataKey="supportPrice" name="Support Level"
                 stroke="#10b981" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls={true}
               />
             )}
             {showSR && correlationData.resistancePrice > 0 && (
-              <Line 
-                yAxisId="right" type="monotone" dataKey="resistancePct" name="Resistance Level" 
+              <Line
+                yAxisId="dollar" type="monotone" dataKey="resistancePrice" name="Resistance Level"
                 stroke="#f43f5e" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls={true}
               />
             )}

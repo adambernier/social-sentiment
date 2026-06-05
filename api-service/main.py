@@ -301,6 +301,7 @@ class CorrelationBucket(BaseModel):
     priceChange: Optional[float] = None
     pricePct: Optional[float] = None
     futureChange: Optional[float] = None
+    futurePct: Optional[float] = None
     isMarketOpen: bool
     sentimentIndex: float
     sentimentSMA: float
@@ -1165,6 +1166,7 @@ async def get_correlation(
             "priceChange": None,
             "futureChange": None,
             "pricePct": None,
+            "futurePct": None,
             "isMarketOpen": False,
             "positiveWeighted": 0.0,
             "neutralWeighted": 0.0,
@@ -1213,6 +1215,8 @@ async def get_correlation(
                 await cur.execute(market_query, [primary_future_symbol, db_cutoff])
                 future_market_data = await cur.fetchall()
                 future_market_data = sorted(future_market_data, key=lambda x: x['timestamp'])
+                # Anchor for the cumulative futures line: most recent future price.
+                latest_future_price = future_market_data[-1]['price'] if future_market_data else None
                 for idx in range(1, len(future_market_data)):
                     prev_q = future_market_data[idx - 1]
                     curr_q = future_market_data[idx]
@@ -1224,6 +1228,10 @@ async def get_correlation(
                             buckets[curr_ts_str]['futureChange'] = ((curr_q['price'] - prev_price) / prev_price) * 100
                         else:
                             buckets[curr_ts_str]['futureChange'] = 0.0
+                        # Cumulative % vs the latest future price, mirroring pricePct
+                        # so the futures overlay tracks the index trajectory.
+                        if latest_future_price and latest_future_price != 0:
+                            buckets[curr_ts_str]['futurePct'] = ((curr_q['price'] - latest_future_price) / latest_future_price) * 100
 
             # 3. Load pre-aggregated data from hourly_sentiment_agg (cold tier).
             # This covers hours where raw posts may have been pruned.
