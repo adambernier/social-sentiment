@@ -5,20 +5,47 @@ import { format } from "date-fns";
 import { cn } from "./utils";
 import { DashboardDataProps } from "../types";
 
+// A buy signal fires wherever the algo score clears its threshold; the marker's
+// GLYPH (not its color) reports how that signal turned out, so it never reads as
+// the emerald/rose the sentiment bars use. The accent is a deliberately
+// non-sentiment sky/amber/slate, secondary to the shape:
+//   check (sky)   = good    -> price rose after the signal (profitable)
+//   cross (amber) = bad     -> price dropped (false signal)
+//   dot (slate)   = pending -> not enough forward data yet (pulses)
 const CustomizedOpportunityDot = (props: any) => {
   const { cx, cy, payload, value } = props;
   if (!payload || !payload.buySignal || value == null) return null;
-  
-  // Good = Emerald Green, Bad = Rose Red, Pending = Amber Yellow
-  const dotColor = payload.signalQuality === "bad" ? "#f43f5e" : payload.signalQuality === "pending" ? "#fbbf24" : "#10b981";
+  if (cx == null || cy == null) return null;
+
+  const quality = payload.signalQuality === "bad" ? "bad" : payload.signalQuality === "pending" ? "pending" : "good";
+  const accent = quality === "good" ? "#38bdf8" : quality === "bad" ? "#fb923c" : "#94a3b8";
+  const r = 6.5;
 
   return (
     <g key={`buy-dot-${payload.timestamp}`}>
-      <circle 
-        cx={cx} cy={cy} r={7} fill="none" stroke={dotColor} strokeWidth={1.5} strokeOpacity={0.8}
-        className="animate-ping" style={{ transformOrigin: `${cx}px ${cy}px` }}
-      />
-      <circle cx={cx} cy={cy} r={4.5} fill={dotColor} stroke="#0f172a" strokeWidth={1.5} />
+      {quality === "pending" && (
+        <circle
+          cx={cx} cy={cy} r={r} fill="none" stroke={accent} strokeWidth={1.5} strokeOpacity={0.7}
+          className="animate-ping" style={{ transformOrigin: `${cx}px ${cy}px` }}
+        />
+      )}
+      {/* Dark badge so the glyph reads against both the yellow price line and the chart background. */}
+      <circle cx={cx} cy={cy} r={r} fill="#0f172a" stroke={accent} strokeWidth={1.5} />
+      {quality === "good" && (
+        <path
+          d={`M ${cx - 3} ${cy + 0.2} L ${cx - 1} ${cy + 2.4} L ${cx + 3.2} ${cy - 2.6}`}
+          fill="none" stroke={accent} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round"
+        />
+      )}
+      {quality === "bad" && (
+        <g stroke={accent} strokeWidth={1.6} strokeLinecap="round">
+          <line x1={cx - 2.4} y1={cy - 2.4} x2={cx + 2.4} y2={cy + 2.4} />
+          <line x1={cx + 2.4} y1={cy - 2.4} x2={cx - 2.4} y2={cy + 2.4} />
+        </g>
+      )}
+      {quality === "pending" && (
+        <circle cx={cx} cy={cy} r={1.7} fill={accent} />
+      )}
     </g>
   );
 };
@@ -112,6 +139,22 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
           <div className="hidden sm:block h-4 w-px bg-slate-700 mx-1"></div>
           <div className="flex items-center gap-1"><div className="w-3 h-0.5 bg-[#fbbf24]"></div> {symbol} Price</div>
           <div className="flex items-center gap-1"><div className="w-3 border-t-2 border-dashed border-[#8b5cf6]"></div> NQ Futures</div>
+          <div className="hidden sm:block h-4 w-px bg-slate-700 mx-1"></div>
+          <div className="flex items-center gap-1" title="Buy signal that paid off — price rose within 2h">
+            <svg width="13" height="13" viewBox="0 0 13 13" className="shrink-0">
+              <circle cx="6.5" cy="6.5" r="5.6" fill="#0f172a" stroke="#38bdf8" strokeWidth="1.2" />
+              <path d="M4 6.7 L5.5 8.4 L9 4.6" fill="none" stroke="#38bdf8" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            Signal hit
+          </div>
+          <div className="flex items-center gap-1" title="Buy signal that failed — price dropped within 2h">
+            <svg width="13" height="13" viewBox="0 0 13 13" className="shrink-0">
+              <circle cx="6.5" cy="6.5" r="5.6" fill="#0f172a" stroke="#fb923c" strokeWidth="1.2" />
+              <line x1="4.5" y1="4.5" x2="8.5" y2="8.5" stroke="#fb923c" strokeWidth="1.3" strokeLinecap="round" />
+              <line x1="8.5" y1="4.5" x2="4.5" y2="8.5" stroke="#fb923c" strokeWidth="1.3" strokeLinecap="round" />
+            </svg>
+            Signal missed
+          </div>
           {showSR && (
             <>
               <div className="hidden sm:block h-4 w-px bg-slate-700 mx-1"></div>
@@ -217,14 +260,16 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                         <div className="mt-3 pt-3 border-t border-white/5">
                           <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Algorithmic Signal</div>
                           <div className={cn(
-                            "flex items-center gap-2 text-xs font-semibold px-2.5 py-1.5 rounded-md", 
-                            data.signalQuality === 'good' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 
-                            data.signalQuality === 'bad' ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20' : 
-                            'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                            "flex items-center gap-2 text-xs font-semibold px-2.5 py-1.5 rounded-md",
+                            data.signalQuality === 'good' ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20' :
+                            data.signalQuality === 'bad' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' :
+                            'bg-slate-500/10 text-slate-300 border border-slate-500/20'
                           )}>
-                            <div className={cn("w-1.5 h-1.5 rounded-full", data.signalQuality === 'good' ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : data.signalQuality === 'bad' ? 'bg-rose-400' : 'bg-amber-400 animate-pulse')}></div>
-                            {data.signalQuality === 'good' ? 'Profitable (Price Rose)' : 
-                             data.signalQuality === 'bad' ? 'False Signal (Price Dropped)' : 
+                            <span className={cn("w-3 text-center text-sm font-bold leading-none", data.signalQuality === 'pending' && 'animate-pulse')}>
+                              {data.signalQuality === 'good' ? '✓' : data.signalQuality === 'bad' ? '✗' : '⋯'}
+                            </span>
+                            {data.signalQuality === 'good' ? 'Profitable (Price Rose)' :
+                             data.signalQuality === 'bad' ? 'False Signal (Price Dropped)' :
                              'Pending (Awaiting Data)'}
                           </div>
                         </div>
