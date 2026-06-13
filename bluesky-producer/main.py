@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bluesky-producer")
 
-POLL_INTERVAL = get_env_int("BLUESKY_POLL_INTERVAL", 60)
+POLL_INTERVAL = get_env_int("BLUESKY_POLL_INTERVAL", 900)
 MAX_BACKOFF = get_env_int("BLUESKY_MAX_BACKOFF", 3600)
 
 async def main():
@@ -109,6 +109,9 @@ async def main():
 
                                 if new_posts_count > 0:
                                     logger.info(f"Term '{term}' ({symbol}): Published {new_posts_count} new posts.")
+
+                                # Rate limiting safety: Sleep between queries to the public API
+                                await asyncio.sleep(2.0)
                             except Exception as e:
                                 logger.error(f"Error searching for term '{term}': {e}")
                                 rate_limited = True
