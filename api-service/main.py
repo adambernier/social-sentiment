@@ -1551,12 +1551,18 @@ async def get_correlation(
         if sorted_data[i]['buySignal']:
             curr_price = sorted_data[i]['rawPrice']
             if curr_price is not None:
-                # Look forward up to 2 hours for the trend
-                forward_prices = [
-                    sorted_data[k]['rawPrice'] 
-                    for k in range(i + 1, min(len(sorted_data), i + 3)) 
-                    if sorted_data[k]['rawPrice'] is not None
-                ]
+                # Walk forward until we collect 2 buckets with real prices.
+                # Skips non-market hours (after-hours, weekends, holidays) where
+                # rawPrice is None, capped at 24 calendar hours so we don't drift
+                # arbitrarily far chasing a long gap.
+                forward_prices = []
+                end = min(len(sorted_data), i + 1 + 24)
+                for k in range(i + 1, end):
+                    rp = sorted_data[k]['rawPrice']
+                    if rp is not None:
+                        forward_prices.append(rp)
+                        if len(forward_prices) >= 2:
+                            break
                 if forward_prices:
                     max_forward = max(forward_prices)
                     # If max favorable excursion was > 0.2%, it's a good trade
