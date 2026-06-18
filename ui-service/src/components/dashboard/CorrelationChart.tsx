@@ -56,8 +56,28 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
 
   const displayData = React.useMemo(() => {
     if (!correlationData?.data) return [];
-    if (!hideExtended) return correlationData.data;
-    return correlationData.data.filter((d: any) => d.isMarketOpen);
+    const rows = hideExtended
+      ? correlationData.data.filter((d: any) => d.isMarketOpen)
+      : correlationData.data;
+    // Volume bars render as a 100% stacked chart: normalize the sentiment mix to
+    // percentages so each hour's bar is the same height and the positive/neutral/
+    // negative split is directly comparable regardless of absolute volume. The raw
+    // counts are preserved as *Count for the tooltip.
+    return rows.map((d: any) => {
+      const pos = d.positive ?? 0;
+      const neu = d.neutral ?? 0;
+      const neg = d.negative ?? 0;
+      const total = pos + neu + neg;
+      return {
+        ...d,
+        positiveCount: pos,
+        neutralCount: neu,
+        negativeCount: neg,
+        positive: total ? (pos / total) * 100 : 0,
+        neutral: total ? (neu / total) * 100 : 0,
+        negative: total ? (neg / total) * 100 : 0,
+      };
+    });
   }, [correlationData, hideExtended]);
 
   // The right axis now carries only the NQ Futures line (cumulative % vs the
@@ -211,8 +231,9 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
               domain={[-1.1, 1.1]}
               tickFormatter={(v) => `${v > 0 ? '+' : ''}${Math.round(v * 100)}%`}
             />
-            {/* Hidden scale for the de-emphasized social-volume bars. */}
-            <YAxis yAxisId="volume" orientation="left" hide domain={[0, 'auto']} />
+            {/* Hidden scale for the de-emphasized social-volume bars. Bars are
+                normalized to a 100% stack, so the domain is fixed at 0–100. */}
+            <YAxis yAxisId="volume" orientation="left" hide domain={[0, 100]} />
             
             <YAxis
               yAxisId="right" orientation="right" tickFormatter={(v) => `${v > 0 ? '+' : ''}${Number(v).toFixed(1)}%`}
@@ -233,6 +254,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                         const isDollar = dk === "rawPrice" || dk === "supportPrice" || dk === "resistancePrice";
                         const isFuture = dk === "futurePct";
                         const isSentIndex = typeof p.name === "string" && p.name.includes("Index");
+                        const isVolume = dk === "positive" || dk === "neutral" || dk === "negative";
                         let display: string;
                         if (typeof p.value !== "number") {
                           display = `${p.value}`;
@@ -242,6 +264,10 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                           display = `${p.value > 0 ? "+" : ""}${p.value.toFixed(1)}%`;
                         } else if (isSentIndex) {
                           display = `${p.value.toFixed(2)}%`;
+                        } else if (isVolume) {
+                          // Bars are proportions; pair the % with the raw count stashed in displayData.
+                          const count = data[`${dk}Count`] ?? 0;
+                          display = `${Math.round(p.value)}% (${count} ${count === 1 ? "post" : "posts"})`;
                         } else {
                           display = Number.isInteger(p.value) ? `${p.value}` : p.value.toFixed(2);
                         }
