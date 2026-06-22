@@ -2,7 +2,7 @@
 # Regenerate: uv pip compile market-producer/requirements.in --generate-hashes -o market-producer/requirements.txt
 -c ../constraints.txt
 
-yfinance==1.4.0
+yfinance>=1.4.1
 pandas_market_calendars==5.3.2
 psycopg[binary,pool]
 pydantic

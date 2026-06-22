@@ -217,6 +217,11 @@ def fetch_single_quote(symbol: str, now_utc: datetime) -> tuple[StockQuote | Non
         else:
             current_session = get_market_session(now_utc)
 
+        # Skip fetching from yfinance if the market/futures session is closed or on break
+        if current_session in ("closed", "futures_closed", "futures_break"):
+            print(f"Skipping fetch for {symbol} (Session: {current_session} is closed/inactive)")
+            return None, False
+
         print(f"Fetching {symbol} (Session: {current_session})...")
         ticker = yf.Ticker(symbol)
         # Fetch last 1 day of 1-minute data to get the absolute latest close
@@ -224,7 +229,8 @@ def fetch_single_quote(symbol: str, now_utc: datetime) -> tuple[StockQuote | Non
 
         if data.empty:
             print(f"Warning: No data returned for {symbol}")
-            return None, False
+            # Treat empty data as potential rate limit/block to trigger backoff
+            return None, True
 
         latest = data.iloc[-1]
         # Convert pandas Timestamp to UTC datetime
@@ -249,7 +255,8 @@ def fetch_single_quote(symbol: str, now_utc: datetime) -> tuple[StockQuote | Non
         return None, True
     except Exception as e:
         print(f"ERROR fetching {symbol}: {e}")
-        return None, False
+        # Treat general exceptions (like 403 Forbidden, connection errors) as rate limit/block to trigger backoff
+        return None, True
 
 
 async def fetch_and_store(db: DB, limiter: AsyncRateLimiter, backoff_tracker: PerSymbolBackoff):
