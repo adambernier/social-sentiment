@@ -49,7 +49,7 @@ docker run --rm -v "$PWD:/work" -w /work \
     for s in $TARGETS; do
       if [ "$MODE" = "check" ]; then
         tmp="$(mktemp)"
-        uv pip compile "$s/requirements.in" --generate-hashes -o "$tmp" 1>&2
+        uv pip compile --no-cache "$s/requirements.in" --generate-hashes -o "$tmp" 1>&2
         # Compare ignoring the header comment (it records the output path/command).
         out="$(diff -u <(grep -v "^#" "$s/requirements.txt") <(grep -v "^#" "$tmp") || true)"
         if [ -n "$out" ]; then
@@ -61,7 +61,7 @@ docker run --rm -v "$PWD:/work" -w /work \
         fi
       else
         echo ">>> compiling $s" 1>&2
-        uv pip compile "$s/requirements.in" --generate-hashes -o "$s/requirements.txt" 1>&2
+        uv pip compile --no-cache "$s/requirements.in" --generate-hashes -o "$s/requirements.txt" 1>&2
       fi
     done
     if [ "$MODE" = "generate" ]; then
