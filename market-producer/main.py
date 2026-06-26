@@ -59,13 +59,19 @@ def fetch_and_store_metrics(db: DB):
     one_year_ago = pd.Timestamp.now() - pd.Timedelta(days=365)
     
     def get_db_metrics(symbol):
+        def make_tz_naive(series):
+            converted = pd.to_datetime(series)
+            if converted.dt.tz is not None:
+                return converted.dt.tz_convert(None).dt.normalize()
+            return converted.dt.normalize()
+
         try:
             t = DbTicker(symbol)
             price_df = t.price()
             if price_df.empty:
-                return None
+                raise ValueError("Empty price data from defeatbeta-api")
             
-            price_df['report_date'] = pd.to_datetime(price_df['report_date'])
+            price_df['report_date'] = make_tz_naive(price_df['report_date'])
             hist = price_df[price_df['report_date'] >= one_year_ago].copy()
             if hist.empty:
                 return None
@@ -90,8 +96,48 @@ def fetch_and_store_metrics(db: DB):
                 "pe": pe
             }
         except Exception as e:
-            print(f"Error fetching data from defeatbeta-api for {symbol}: {e}")
-            return None
+            print(f"Error fetching data from defeatbeta-api for {symbol}: {e}. Trying yfinance fallback...")
+            try:
+                yf_ticker = yf.Ticker(symbol)
+                yf_df = yf_ticker.history(period="1y")
+                if yf_df.empty:
+                    return None
+                
+                yf_df = yf_df.reset_index()
+                yf_df['report_date'] = make_tz_naive(yf_df['Date'])
+                yf_df = yf_df.rename(columns={
+                    "Open": "open",
+                    "Close": "close",
+                    "High": "high",
+                    "Low": "low",
+                    "Volume": "volume"
+                })
+                yf_df['symbol'] = symbol
+                
+                hist = yf_df[['symbol', 'report_date', 'open', 'close', 'high', 'low', 'volume']].copy()
+                hist['return'] = hist['close'].pct_change()
+                
+                start_price = hist.iloc[0]['close']
+                end_price = hist.iloc[-1]['close']
+                avg_return = (end_price - start_price) / start_price
+                
+                pe = None
+                try:
+                    pe = yf_ticker.info.get('trailingPE') or yf_ticker.info.get('forwardPE')
+                    if pe:
+                        pe = float(pe)
+                except Exception:
+                    pass
+                    
+                return {
+                    "hist": hist,
+                    "avg_return": avg_return,
+                    "pe": pe
+                }
+            except Exception as yf_err:
+                print(f"Failed to fetch data from yfinance fallback for {symbol}: {yf_err}")
+                return None
+
 
     for symbol in current_symbols:
         try:
