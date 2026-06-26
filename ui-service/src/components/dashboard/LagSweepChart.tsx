@@ -20,7 +20,7 @@ export default function LagSweepChart({ state }: DashboardDataProps) {
         </span>
       </div>
       {correlationData.lagSweeps.some((s: any) => s.r !== 0) ? (
-        <ResponsiveContainer width="100%" height={150}>
+        <ResponsiveContainer width="100%" height={220}>
           <BarChart data={correlationData.lagSweeps} margin={{ top: 4, right: 12, bottom: 0, left: -16 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
             <XAxis
@@ -48,12 +48,13 @@ export default function LagSweepChart({ state }: DashboardDataProps) {
           </BarChart>
         </ResponsiveContainer>
       ) : (
-        <div className="flex flex-col items-center justify-center text-center gap-1.5 h-[150px] text-slate-500">
+        <div className="flex flex-col items-center justify-center text-center gap-1.5 h-[220px] text-slate-500">
           <AlertCircle className="w-5 h-5 text-slate-600" />
           <p className="text-xs font-medium text-slate-400">No market-hours price data in this window</p>
           <p className="text-[10px] max-w-xs">Correlation needs overlapping price moves — none in range (markets closed). Try a wider window.</p>
         </div>
       )}
+
     </section>
   );
 }
