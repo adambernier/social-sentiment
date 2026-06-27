@@ -73,7 +73,7 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
         <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
           <div className="flex flex-col gap-4 items-center">
             {/* Modal Header & Tabs */}
-            <div className="flex justify-between items-center w-full max-w-[500px]">
+            <div className="flex justify-between items-center w-full max-w-[520px]">
               <div className="flex gap-2">
                 <button 
                   onClick={() => setShareTab("scorecard")}
@@ -108,7 +108,7 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
 
             {/* Tab 1: The 1:1 Scorecard Share Card */}
             {shareTab === "scorecard" && (
-              <div className="w-[500px] h-[500px] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black border border-white/10 rounded-3xl p-8 flex flex-col justify-between shadow-2xl relative overflow-hidden select-none">
+              <div className="w-[520px] h-[520px] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black border border-white/10 rounded-3xl p-6 flex flex-col justify-between shadow-2xl relative overflow-hidden select-none">
                 
                 {/* Glow Accent */}
                 <div className="absolute top-0 right-0 w-48 h-48 bg-indigo-500/10 rounded-full blur-[80px] pointer-events-none" />
@@ -202,7 +202,7 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
 
             {/* Tab 2: The 1:1 Opportunity Share Card */}
             {shareTab === "opportunity" && (
-              <div className="w-[500px] h-[500px] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black border border-white/10 rounded-3xl p-8 flex flex-col justify-between shadow-2xl relative overflow-hidden select-none">
+              <div className="w-[520px] h-[520px] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black border border-white/10 rounded-3xl p-6 flex flex-col justify-between shadow-2xl relative overflow-hidden select-none">
                 
                 {/* Glow Accent */}
                 <div className="absolute top-0 right-0 w-48 h-48 bg-indigo-500/10 rounded-full blur-[80px] pointer-events-none" />
@@ -232,42 +232,42 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
                 </div>
 
                 {/* Strategy Box */}
-                <div className="bg-slate-950/40 border border-white/5 rounded-2xl p-4 flex items-center justify-between gap-4">
+                <div className="bg-slate-950/40 border border-white/5 rounded-2xl p-3 flex items-center justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Strategy Target</span>
-                    <h3 className="text-lg font-black text-white mt-1 leading-snug truncate">
+                    <h3 className="text-lg font-black text-white mt-0.5 leading-snug truncate">
                       {opp?.strategy || "NO STRATEGY ACTIVE"}
                     </h3>
                   </div>
-                  <div className="flex flex-col items-center justify-center bg-indigo-500/10 border border-indigo-500/25 rounded-xl w-16 h-16 shrink-0">
-                    <span className="text-base font-black text-indigo-400">{opp ? Math.round(opp.score) : 0}%</span>
-                    <span className="text-[8px] text-slate-400 font-bold uppercase mt-0.5">Score</span>
+                  <div className="flex flex-col items-center justify-center bg-indigo-500/10 border border-indigo-500/25 rounded-xl w-14 h-14 shrink-0">
+                    <span className="text-base font-black text-indigo-400 leading-none">{opp ? Math.round(opp.score) : 0}%</span>
+                    <span className="text-[8px] text-slate-400 font-bold uppercase mt-0.5 leading-none">Score</span>
                   </div>
                 </div>
 
                 {/* Hard Measures Grid */}
-                <div className="grid grid-cols-2 gap-3 my-2">
-                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col justify-between">
+                <div className="grid grid-cols-2 gap-2.5 my-1.5">
+                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-2.5 flex flex-col justify-between">
                     <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Support Zone</span>
-                    <span className="text-base font-extrabold text-white mt-1">
+                    <span className="text-base font-extrabold text-white mt-0.5">
                       {correlationData?.supportPrice > 0 ? `$${correlationData.supportPrice.toFixed(2)}` : '---'}
                     </span>
                     <span className="text-[9px] text-slate-400 font-medium mt-0.5">
                       {correlationData?.supportPct !== undefined ? `Price is ${correlationData.supportPct >= 0 ? '+' : ''}${correlationData.supportPct.toFixed(1)}%` : ''}
                     </span>
                   </div>
-                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col justify-between">
+                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-2.5 flex flex-col justify-between">
                     <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Resistance Zone</span>
-                    <span className="text-base font-extrabold text-white mt-1">
+                    <span className="text-base font-extrabold text-white mt-0.5">
                       {correlationData?.resistancePrice > 0 ? `$${correlationData.resistancePrice.toFixed(2)}` : '---'}
                     </span>
                     <span className="text-[9px] text-slate-400 font-medium mt-0.5">
                       {correlationData?.resistancePct !== undefined ? `Price is ${correlationData.resistancePct >= 0 ? '+' : ''}${correlationData.resistancePct.toFixed(1)}%` : ''}
                     </span>
                   </div>
-                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col justify-between">
+                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-2.5 flex flex-col justify-between">
                     <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Correlation (r)</span>
-                    <span className="text-base font-extrabold text-white mt-1">
+                    <span className="text-base font-extrabold text-white mt-0.5">
                       {correlationData?.maxR !== undefined && correlationData?.maxR !== null 
                         ? `${correlationData.maxR >= 0 ? '+' : ''}${correlationData.maxR.toFixed(3)}` 
                         : '0.000'}
@@ -276,9 +276,9 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
                       {correlationData?.correlationStrength || "none"} correlation
                     </span>
                   </div>
-                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col justify-between">
+                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-2.5 flex flex-col justify-between">
                     <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Lead/Lag Offset</span>
-                    <span className="text-base font-extrabold text-white mt-1">
+                    <span className="text-base font-extrabold text-white mt-0.5">
                       {correlationData?.bestLag !== undefined && correlationData?.bestLag !== null
                         ? (correlationData.bestLag > 0 ? `+${correlationData.bestLag}h` : correlationData.bestLag < 0 ? `${correlationData.bestLag}h` : "0h")
                         : "0h"}
@@ -290,7 +290,7 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
                 </div>
 
                 {/* Strategy Outlook Description */}
-                <div className="bg-slate-950/30 border border-white/5 rounded-xl p-3">
+                <div className="bg-slate-950/30 border border-white/5 rounded-xl p-2.5">
                   <span className="text-[8px] text-slate-500 font-bold uppercase tracking-wider">Strategy Outlook</span>
                   <p className="text-xs text-slate-300 leading-relaxed font-medium mt-0.5 line-clamp-2">
                     {opp?.description || "No active trade signal or strategic outlook identified for this timeframe."}
@@ -298,7 +298,7 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
                 </div>
 
                 {/* Footer & Disclaimer */}
-                <div className="border-t border-white/5 pt-4 flex flex-col gap-2">
+                <div className="border-t border-white/5 pt-3.5 flex flex-col gap-1.5">
                   <div className="flex justify-between items-center text-[9px] text-slate-500 font-medium">
                     <span>LAST UPDATED: {metrics?.updated_at ? format(new Date(metrics.updated_at), "MMM d, h:mm a 'ET'") : '---'}</span>
                     <span>social-sentiment-dashboard</span>
