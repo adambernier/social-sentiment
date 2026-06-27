@@ -1,13 +1,17 @@
 import React, { useState } from "react";
 import { ResponsiveContainer, BarChart, XAxis, YAxis, Tooltip, ReferenceLine, Bar, Cell } from "recharts";
 import { Share2, X } from "lucide-react";
+import { cn } from "./utils";
 import { DashboardDataProps } from "../types";
 import { format } from "date-fns";
 
 export default function SectorScorecard({ state, computed }: DashboardDataProps) {
   const { scorecardData } = computed;
-  const { symbol, metrics, latestQuote } = state;
+  const { symbol, metrics, latestQuote, correlationData } = state;
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [shareTab, setShareTab] = useState<"scorecard" | "opportunity">("scorecard");
+
+  const opp = correlationData?.opportunity;
 
   return (
     <>
@@ -68,9 +72,32 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
       {isShareModalOpen && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
           <div className="flex flex-col gap-4 items-center">
-            {/* Modal Header */}
+            {/* Modal Header & Tabs */}
             <div className="flex justify-between items-center w-full max-w-[500px]">
-              <span className="text-xs text-slate-400 font-semibold uppercase tracking-widest">Social Media Scorecard Preview</span>
+              <div className="flex gap-2">
+                <button 
+                  onClick={() => setShareTab("scorecard")}
+                  className={cn(
+                    "text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg border transition-colors",
+                    shareTab === "scorecard" 
+                      ? "bg-indigo-500 border-indigo-500 text-white" 
+                      : "bg-white/5 border-white/5 text-slate-400 hover:text-white"
+                  )}
+                >
+                  Scorecard
+                </button>
+                <button 
+                  onClick={() => setShareTab("opportunity")}
+                  className={cn(
+                    "text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg border transition-colors",
+                    shareTab === "opportunity" 
+                      ? "bg-indigo-500 border-indigo-500 text-white" 
+                      : "bg-white/5 border-white/5 text-slate-400 hover:text-white"
+                  )}
+                >
+                  Opportunity
+                </button>
+              </div>
               <button 
                 onClick={() => setIsShareModalOpen(false)}
                 className="p-1.5 text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors"
@@ -79,97 +106,210 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
               </button>
             </div>
 
-            {/* The 1:1 Share Card */}
-            <div className="w-[500px] h-[500px] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black border border-white/10 rounded-3xl p-8 flex flex-col justify-between shadow-2xl relative overflow-hidden select-none">
-              
-              {/* Glow Accent */}
-              <div className="absolute top-0 right-0 w-48 h-48 bg-indigo-500/10 rounded-full blur-[80px] pointer-events-none" />
-              <div className="absolute bottom-0 left-0 w-48 h-48 bg-emerald-500/5 rounded-full blur-[80px] pointer-events-none" />
+            {/* Tab 1: The 1:1 Scorecard Share Card */}
+            {shareTab === "scorecard" && (
+              <div className="w-[500px] h-[500px] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black border border-white/10 rounded-3xl p-8 flex flex-col justify-between shadow-2xl relative overflow-hidden select-none">
+                
+                {/* Glow Accent */}
+                <div className="absolute top-0 right-0 w-48 h-48 bg-indigo-500/10 rounded-full blur-[80px] pointer-events-none" />
+                <div className="absolute bottom-0 left-0 w-48 h-48 bg-emerald-500/5 rounded-full blur-[80px] pointer-events-none" />
 
-              {/* Card Header */}
-              <div className="flex justify-between items-start">
-                <div>
-                  <h2 className="text-4xl font-extrabold text-white tracking-tight">{symbol}</h2>
-                  <p className="text-xs text-slate-400 font-semibold tracking-wider uppercase mt-1">Sector: {metrics?.sector || "General Market"}</p>
+                {/* Card Header */}
+                <div className="flex justify-between items-start">
+                  <div>
+                    <h2 className="text-4xl font-extrabold text-white tracking-tight">{symbol}</h2>
+                    <p className="text-xs text-slate-400 font-semibold tracking-wider uppercase mt-1">Sector: {metrics?.sector || "General Market"}</p>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest bg-white/5 px-2.5 py-1 rounded-md border border-white/5">
+                      Sector Scorecard
+                    </span>
+                  </div>
                 </div>
-                <div className="text-right">
-                  <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest bg-white/5 px-2.5 py-1 rounded-md border border-white/5">
-                    Sector Scorecard
-                  </span>
+
+                {/* Metrics Row */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col items-center">
+                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Price</span>
+                    <span className="text-lg font-bold text-white mt-1">
+                      {latestQuote?.price !== undefined && latestQuote?.price !== null ? `$${latestQuote.price.toFixed(2)}` : '---'}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col items-center">
+                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">P/E Ratio</span>
+                    <span className="text-lg font-bold text-white mt-1">
+                      {metrics?.pe_ratio !== undefined && metrics?.pe_ratio !== null ? `${metrics.pe_ratio.toFixed(1)}x` : '---'}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col items-center">
+                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Beta</span>
+                    <span className="text-lg font-bold text-white mt-1">
+                      {metrics?.beta !== undefined && metrics?.beta !== null ? metrics.beta.toFixed(2) : '---'}
+                    </span>
+                  </div>
                 </div>
+
+                {/* Performance Chart Section */}
+                <div className="flex-1 flex flex-col justify-center my-4">
+                  <div className="text-center mb-3">
+                    <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Performance vs Sector Benchmark</span>
+                  </div>
+                  <div className="h-[180px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={scorecardData} margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
+                        <XAxis 
+                          dataKey="name" 
+                          stroke="#64748b" 
+                          tickLine={false} 
+                          axisLine={false}
+                          tick={{ fontSize: 10, fontWeight: 600 }}
+                        />
+                        <YAxis 
+                          domain={[-150, 150]} 
+                          stroke="#475569" 
+                          tickLine={false}
+                          axisLine={false}
+                          tickFormatter={(v) => `${v > 0 ? '+' : ''}${v}%`}
+                          tick={{ fontSize: 9 }}
+                        />
+                        <ReferenceLine y={0} stroke="#334155" />
+                        <Bar dataKey="value" barSize={36} radius={[4, 4, 0, 0]}>
+                          {scorecardData.map((entry: any, index: number) => (
+                            <Cell 
+                              key={`cell-${index}`} 
+                              fill={entry.value >= 0 ? '#10b981' : '#f43f5e'} 
+                            />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                {/* Footer & Disclaimer */}
+                <div className="border-t border-white/5 pt-4 flex flex-col gap-2">
+                  <div className="flex justify-between items-center text-[9px] text-slate-500 font-medium">
+                    <span>LAST UPDATED: {metrics?.updated_at ? format(new Date(metrics.updated_at), "MMM d, h:mm a 'ET'") : '---'}</span>
+                    <span>social-sentiment-dashboard</span>
+                  </div>
+                  <div className="bg-slate-950/40 border border-white/5 rounded-lg p-2 text-center text-[9px] text-slate-400 font-medium tracking-wide">
+                    ⚠️ Disclaimer: Not financial advice. For informational purposes only. Data is delayed.
+                  </div>
+                </div>
+
               </div>
+            )}
 
-              {/* Metrics Row */}
-              <div className="grid grid-cols-3 gap-3">
-                <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col items-center">
-                  <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Price</span>
-                  <span className="text-lg font-bold text-white mt-1">
-                    {latestQuote?.price !== undefined && latestQuote?.price !== null ? `$${latestQuote.price.toFixed(2)}` : '---'}
-                  </span>
+            {/* Tab 2: The 1:1 Opportunity Share Card */}
+            {shareTab === "opportunity" && (
+              <div className="w-[500px] h-[500px] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black border border-white/10 rounded-3xl p-8 flex flex-col justify-between shadow-2xl relative overflow-hidden select-none">
+                
+                {/* Glow Accent */}
+                <div className="absolute top-0 right-0 w-48 h-48 bg-indigo-500/10 rounded-full blur-[80px] pointer-events-none" />
+                <div className="absolute bottom-0 left-0 w-48 h-48 bg-emerald-500/5 rounded-full blur-[80px] pointer-events-none" />
+
+                {/* Card Header */}
+                <div className="flex justify-between items-start">
+                  <div>
+                    <h2 className="text-4xl font-extrabold text-white tracking-tight">{symbol}</h2>
+                    <p className="text-xs text-slate-400 font-semibold tracking-wider uppercase mt-1">Sector: {metrics?.sector || "General Market"}</p>
+                  </div>
+                  <div className="text-right flex flex-col items-end gap-1.5">
+                    <span className={cn(
+                      "text-[9px] font-bold px-2 py-0.5 rounded border uppercase tracking-wider",
+                      opp ? (opp.color === 'emerald' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
+                             opp.color === 'teal' ? 'bg-teal-500/10 text-teal-400 border-teal-500/20' :
+                             opp.color === 'rose' ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' :
+                             'bg-slate-500/10 text-slate-400 border-white/10')
+                          : 'bg-slate-500/10 text-slate-400 border-white/10'
+                    )}>
+                      {opp?.classification || "NO SIGNAL"}
+                    </span>
+                    <span className="text-[9px] text-slate-400 font-bold tracking-widest uppercase">
+                      Trade Setup
+                    </span>
+                  </div>
                 </div>
-                <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col items-center">
-                  <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">P/E Ratio</span>
-                  <span className="text-lg font-bold text-white mt-1">
-                    {metrics?.pe_ratio !== undefined && metrics?.pe_ratio !== null ? `${metrics.pe_ratio.toFixed(1)}x` : '---'}
-                  </span>
+
+                {/* Strategy Box */}
+                <div className="bg-slate-950/40 border border-white/5 rounded-2xl p-4 flex items-center justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Strategy Target</span>
+                    <h3 className="text-lg font-black text-white mt-1 leading-snug truncate">
+                      {opp?.strategy || "NO STRATEGY ACTIVE"}
+                    </h3>
+                  </div>
+                  <div className="flex flex-col items-center justify-center bg-indigo-500/10 border border-indigo-500/25 rounded-xl w-16 h-16 shrink-0">
+                    <span className="text-base font-black text-indigo-400">{opp ? Math.round(opp.score) : 0}%</span>
+                    <span className="text-[8px] text-slate-400 font-bold uppercase mt-0.5">Score</span>
+                  </div>
                 </div>
-                <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col items-center">
-                  <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Beta</span>
-                  <span className="text-lg font-bold text-white mt-1">
-                    {metrics?.beta !== undefined && metrics?.beta !== null ? metrics.beta.toFixed(2) : '---'}
-                  </span>
+
+                {/* Hard Measures Grid */}
+                <div className="grid grid-cols-2 gap-3 my-2">
+                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col justify-between">
+                    <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Support Zone</span>
+                    <span className="text-base font-extrabold text-white mt-1">
+                      {correlationData?.supportPrice > 0 ? `$${correlationData.supportPrice.toFixed(2)}` : '---'}
+                    </span>
+                    <span className="text-[9px] text-slate-400 font-medium mt-0.5">
+                      {correlationData?.supportPct !== undefined ? `Price is ${correlationData.supportPct >= 0 ? '+' : ''}${correlationData.supportPct.toFixed(1)}%` : ''}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col justify-between">
+                    <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Resistance Zone</span>
+                    <span className="text-base font-extrabold text-white mt-1">
+                      {correlationData?.resistancePrice > 0 ? `$${correlationData.resistancePrice.toFixed(2)}` : '---'}
+                    </span>
+                    <span className="text-[9px] text-slate-400 font-medium mt-0.5">
+                      {correlationData?.resistancePct !== undefined ? `Price is ${correlationData.resistancePct >= 0 ? '+' : ''}${correlationData.resistancePct.toFixed(1)}%` : ''}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col justify-between">
+                    <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Correlation (r)</span>
+                    <span className="text-base font-extrabold text-white mt-1">
+                      {correlationData?.maxR !== undefined && correlationData?.maxR !== null 
+                        ? `${correlationData.maxR >= 0 ? '+' : ''}${correlationData.maxR.toFixed(3)}` 
+                        : '0.000'}
+                    </span>
+                    <span className="text-[9px] text-slate-400 font-medium mt-0.5 uppercase">
+                      {correlationData?.correlationStrength || "none"} correlation
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/50 border border-white/5 rounded-2xl p-3 flex flex-col justify-between">
+                    <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Lead/Lag Offset</span>
+                    <span className="text-base font-extrabold text-white mt-1">
+                      {correlationData?.bestLag !== undefined && correlationData?.bestLag !== null
+                        ? (correlationData.bestLag > 0 ? `+${correlationData.bestLag}h` : correlationData.bestLag < 0 ? `${correlationData.bestLag}h` : "0h")
+                        : "0h"}
+                    </span>
+                    <span className="text-[9px] text-slate-400 font-medium mt-0.5 uppercase">
+                      {correlationData?.bestLag > 0 ? "Sentiment Leads" : correlationData?.bestLag < 0 ? "Price Leads" : "Coincident"}
+                    </span>
+                  </div>
                 </div>
+
+                {/* Strategy Outlook Description */}
+                <div className="bg-slate-950/30 border border-white/5 rounded-xl p-3">
+                  <span className="text-[8px] text-slate-500 font-bold uppercase tracking-wider">Strategy Outlook</span>
+                  <p className="text-xs text-slate-300 leading-relaxed font-medium mt-0.5 line-clamp-2">
+                    {opp?.description || "No active trade signal or strategic outlook identified for this timeframe."}
+                  </p>
+                </div>
+
+                {/* Footer & Disclaimer */}
+                <div className="border-t border-white/5 pt-4 flex flex-col gap-2">
+                  <div className="flex justify-between items-center text-[9px] text-slate-500 font-medium">
+                    <span>LAST UPDATED: {metrics?.updated_at ? format(new Date(metrics.updated_at), "MMM d, h:mm a 'ET'") : '---'}</span>
+                    <span>social-sentiment-dashboard</span>
+                  </div>
+                  <div className="bg-slate-950/40 border border-white/5 rounded-lg p-2 text-center text-[9px] text-slate-400 font-medium tracking-wide">
+                    ⚠️ Disclaimer: Not financial advice. For informational purposes only. Data is delayed.
+                  </div>
+                </div>
+
               </div>
-
-              {/* Performance Chart Section */}
-              <div className="flex-1 flex flex-col justify-center my-4">
-                <div className="text-center mb-3">
-                  <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Performance vs Sector Benchmark</span>
-                </div>
-                <div className="h-[180px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={scorecardData} margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
-                      <XAxis 
-                        dataKey="name" 
-                        stroke="#64748b" 
-                        tickLine={false} 
-                        axisLine={false}
-                        tick={{ fontSize: 10, fontWeight: 600 }}
-                      />
-                      <YAxis 
-                        domain={[-150, 150]} 
-                        stroke="#475569" 
-                        tickLine={false}
-                        axisLine={false}
-                        tickFormatter={(v) => `${v > 0 ? '+' : ''}${v}%`}
-                        tick={{ fontSize: 9 }}
-                      />
-                      <ReferenceLine y={0} stroke="#334155" />
-                      <Bar dataKey="value" barSize={36} radius={[4, 4, 0, 0]}>
-                        {scorecardData.map((entry: any, index: number) => (
-                          <Cell 
-                            key={`cell-${index}`} 
-                            fill={entry.value >= 0 ? '#10b981' : '#f43f5e'} 
-                          />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Footer & Disclaimer */}
-              <div className="border-t border-white/5 pt-4 flex flex-col gap-2">
-                <div className="flex justify-between items-center text-[9px] text-slate-500 font-medium">
-                  <span>LAST UPDATED: {metrics?.updated_at ? format(new Date(metrics.updated_at), "MMM d, h:mm a 'ET'") : '---'}</span>
-                  <span>social-sentiment-dashboard</span>
-                </div>
-                <div className="bg-slate-950/40 border border-white/5 rounded-lg p-2 text-center text-[9px] text-slate-400 font-medium tracking-wide">
-                  ⚠️ Disclaimer: Not financial advice. For informational purposes only. Data is delayed.
-                </div>
-              </div>
-
-            </div>
+            )}
 
             {/* Explanatory Help Text */}
             <p className="text-xs text-slate-400 max-w-[500px] text-center mt-2 leading-relaxed">
@@ -181,4 +321,5 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
     </>
   );
 }
+
 
