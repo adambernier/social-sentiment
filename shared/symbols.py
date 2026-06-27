@@ -25,7 +25,7 @@ def fetch_symbols_from_db():
             with conn.cursor() as cur:
                 # We only fetch active symbols
                 cur.execute("""
-                    SELECT symbol, keywords, future, sector, require_uppercase, block_phrases 
+                    SELECT symbol, keywords, future, sector, require_uppercase, block_phrases, require_cashtag 
                     FROM tracked_symbols 
                     WHERE is_active = true
                 """)
@@ -38,6 +38,7 @@ def fetch_symbols_from_db():
                         "sector": row[3],
                         "require_uppercase": row[4],
                         "block_phrases": row[5] if isinstance(row[5], list) else json.loads(row[5]),
+                        "require_cashtag": row[6] if len(row) > 6 else False,
                     }
                 
                 if new_symbols:
@@ -95,6 +96,9 @@ def match_symbol(text: str, symbol: str) -> bool:
         if re.search(rf"(?<![a-zA-Z0-9]){re.escape(kw)}(?![a-zA-Z0-9])", text, re.I):
             return True
             
+    if cfg.get("require_cashtag"):
+        return False
+        
     flags = 0 if cfg.get("require_uppercase") else re.I
     pattern = rf"(?<![a-zA-Z0-9]){re.escape(symbol)}(?![a-zA-Z0-9])"
     if re.search(pattern, text, flags):

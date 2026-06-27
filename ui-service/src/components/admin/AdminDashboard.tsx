@@ -13,6 +13,7 @@ interface TrackedSymbol {
   future: string | null;
   sector: string | null;
   require_uppercase: boolean;
+  require_cashtag: boolean;
   block_phrases: string[];
   is_active: boolean;
 }
@@ -98,6 +99,7 @@ export default function AdminDashboard() {
         future: "",
         sector: "",
         require_uppercase: false,
+        require_cashtag: false,
         is_active: true
       });
       setRawKeywords("");
@@ -262,6 +264,7 @@ export default function AdminDashboard() {
                 <td className="px-6 py-4">
                   <div className="font-bold text-white text-base">{s.symbol}</div>
                   {s.require_uppercase && <div className="text-[10px] text-amber-500 mt-1 uppercase tracking-wider font-semibold">Strict Case</div>}
+                  {s.require_cashtag && <div className="text-[10px] text-indigo-400 mt-1 uppercase tracking-wider font-semibold">Requires Cashtag ($)</div>}
                 </td>
                 <td className="px-6 py-4">
                   <span className={cn(
@@ -409,6 +412,18 @@ export default function AdminDashboard() {
                 />
                 <label htmlFor="require_uppercase" className="text-sm font-medium text-slate-300">
                   Require Strict Uppercase Ticker Match
+                </label>
+              </div>
+              <div className="flex items-center gap-3">
+                <input 
+                  type="checkbox" 
+                  id="require_cashtag"
+                  checked={formData.require_cashtag || false}
+                  onChange={(e) => setFormData({...formData, require_cashtag: e.target.checked})}
+                  className="w-4 h-4 rounded border-white/10 bg-slate-950 text-indigo-500 focus:ring-indigo-500/50"
+                />
+                <label htmlFor="require_cashtag" className="text-sm font-medium text-slate-300">
+                  Require Cashtag (e.g. $SMH)
                 </label>
               </div>
             </div>

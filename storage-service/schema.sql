@@ -27,11 +27,16 @@ CREATE TABLE IF NOT EXISTS tracked_symbols (
     future            TEXT,
     sector            TEXT,
     require_uppercase BOOLEAN NOT NULL DEFAULT FALSE,
+    require_cashtag   BOOLEAN NOT NULL DEFAULT FALSE,
     block_phrases     JSONB NOT NULL DEFAULT '[]'::jsonb,
     is_active         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Ensure require_cashtag column exists if database table already created
+ALTER TABLE tracked_symbols ADD COLUMN IF NOT EXISTS require_cashtag BOOLEAN NOT NULL DEFAULT FALSE;
+
 
 CREATE TABLE IF NOT EXISTS stock_quotes (
     id          SERIAL PRIMARY KEY,

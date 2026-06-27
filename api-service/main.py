@@ -132,13 +132,14 @@ class TrackedSymbol(BaseModel):
     future: Optional[str] = None
     sector: Optional[str] = None
     require_uppercase: bool = False
+    require_cashtag: bool = False
     block_phrases: list[str] = []
     is_active: bool = True
 
 @app.get("/api/admin/symbols", response_model=list[TrackedSymbol])
 async def get_admin_symbols(api_key: str = Depends(verify_api_key)):
     query = """
-        SELECT symbol, keywords, future, sector, require_uppercase, block_phrases, is_active
+        SELECT symbol, keywords, future, sector, require_uppercase, require_cashtag, block_phrases, is_active
         FROM tracked_symbols
         ORDER BY symbol
     """
@@ -151,8 +152,8 @@ async def get_admin_symbols(api_key: str = Depends(verify_api_key)):
 @app.post("/api/admin/symbols")
 async def create_admin_symbol(symbol_data: TrackedSymbol, api_key: str = Depends(verify_api_key)):
     query = """
-        INSERT INTO tracked_symbols (symbol, keywords, future, sector, require_uppercase, block_phrases, is_active)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO tracked_symbols (symbol, keywords, future, sector, require_uppercase, require_cashtag, block_phrases, is_active)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """
     params = (
         symbol_data.symbol,
@@ -160,6 +161,7 @@ async def create_admin_symbol(symbol_data: TrackedSymbol, api_key: str = Depends
         symbol_data.future,
         symbol_data.sector,
         symbol_data.require_uppercase,
+        symbol_data.require_cashtag,
         json.dumps(symbol_data.block_phrases),
         symbol_data.is_active
     )
@@ -175,7 +177,7 @@ async def create_admin_symbol(symbol_data: TrackedSymbol, api_key: str = Depends
 async def update_admin_symbol(symbol: str, symbol_data: TrackedSymbol, api_key: str = Depends(verify_api_key)):
     query = """
         UPDATE tracked_symbols
-        SET keywords = %s, future = %s, sector = %s, require_uppercase = %s, block_phrases = %s, is_active = %s, updated_at = NOW()
+        SET keywords = %s, future = %s, sector = %s, require_uppercase = %s, require_cashtag = %s, block_phrases = %s, is_active = %s, updated_at = NOW()
         WHERE symbol = %s
     """
     params = (
@@ -183,6 +185,7 @@ async def update_admin_symbol(symbol: str, symbol_data: TrackedSymbol, api_key: 
         symbol_data.future,
         symbol_data.sector,
         symbol_data.require_uppercase,
+        symbol_data.require_cashtag,
         json.dumps(symbol_data.block_phrases),
         symbol_data.is_active,
         symbol
