@@ -145,12 +145,11 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
                         tick={{ fontSize: 9 }}
                       />
                       <ReferenceLine y={0} stroke="#334155" />
-                      <Bar dataKey="value" barSize={36}>
+                      <Bar dataKey="value" barSize={36} radius={[4, 4, 0, 0]}>
                         {scorecardData.map((entry: any, index: number) => (
                           <Cell 
                             key={`cell-${index}`} 
                             fill={entry.value >= 0 ? '#10b981' : '#f43f5e'} 
-                            radius={entry.value >= 0 ? [4, 4, 0, 0] : [0, 0, 4, 4]}
                           />
                         ))}
                       </Bar>
