@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("stocktwits-producer")
 
-POLL_INTERVAL = get_env_int("STOCKTWITS_POLL_INTERVAL", 60)
+POLL_INTERVAL = get_env_int("STOCKTWITS_POLL_INTERVAL", 900)
 MAX_BACKOFF = get_env_int("STOCKTWITS_MAX_BACKOFF", 3600)
 # Request shaping: cap in-flight requests and pace how fast new ones start so a
 # large symbol list doesn't fire one big burst per cycle. Defaults preserve

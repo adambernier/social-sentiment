@@ -61,4 +61,4 @@ def get_futures_session(symbol: str, now_utc: datetime) -> str:
 
 def all_polled_futures() -> list[str]:
     """Unique futures tickers the market-producer should poll."""
-    return sorted(set(PRIMARY_FUTURES_MAP.values()) | set(GLOBAL_FUTURES))
+    return sorted(set(f for f in PRIMARY_FUTURES_MAP.values() if f) | set(GLOBAL_FUTURES))
