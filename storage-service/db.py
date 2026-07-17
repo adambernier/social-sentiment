@@ -97,12 +97,12 @@ class DB:
                 p.id,
                 p.symbol,
                 p.platform,
-                p.text,
+                p.text.replace("\x00", "") if p.text else "",
                 p.timestamp,
                 p.sentiment,
                 json.dumps(p.scores),
                 p.topic_id,
-                p.topic_label,
+                p.topic_label.replace("\x00", "") if p.topic_label else None,
                 p.engagement,
             )
             for p in posts
@@ -168,12 +168,12 @@ class DB:
                 p.id,
                 p.symbol,
                 p.platform,
-                p.text,
+                p.text.replace("\x00", "") if p.text else "",
                 p.timestamp,
                 p.sentiment,
                 json.dumps(p.scores),
                 p.topic_id,
-                p.topic_label,
+                p.topic_label.replace("\x00", "") if p.topic_label else None,
                 p.engagement,
             )
             for p in posts
