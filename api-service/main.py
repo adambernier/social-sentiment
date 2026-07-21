@@ -20,7 +20,12 @@ from prometheus_fastapi_instrumentator import Instrumentator
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.config import DATABASE_DSN, VIX_SYMBOL
-from shared.symbols import primary_futures_map, tickers
+from shared.symbols import (
+    primary_futures_map,
+    start_symbol_registry,
+    stop_symbol_registry,
+    tickers,
+)
 
 
 # Global pool instance
@@ -72,28 +77,35 @@ async def postgres_listener():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db_pool
-    print("Initializing async database connection pool...")
-    db_pool = AsyncConnectionPool(
-        DATABASE_DSN,
-        min_size=5,
-        max_size=20,
-        open=False,
-        kwargs={"row_factory": psycopg.rows.dict_row}
-    )
-    await db_pool.open()
-    
-    listener_task = asyncio.create_task(postgres_listener())
-    
-    yield
-    
-    listener_task.cancel()
+    listener_task = None
+    await start_symbol_registry()
     try:
-        await listener_task
-    except asyncio.CancelledError:
-        pass
-        
-    print("Closing async database connection pool...")
-    await db_pool.close()
+        print("Initializing async database connection pool...")
+        db_pool = AsyncConnectionPool(
+            DATABASE_DSN,
+            min_size=5,
+            max_size=20,
+            open=False,
+            kwargs={"row_factory": psycopg.rows.dict_row}
+        )
+        await db_pool.open()
+
+        listener_task = asyncio.create_task(postgres_listener())
+        yield
+    finally:
+        try:
+            if listener_task is not None:
+                listener_task.cancel()
+                try:
+                    await listener_task
+                except asyncio.CancelledError:
+                    pass
+
+            if db_pool is not None:
+                print("Closing async database connection pool...")
+                await db_pool.close()
+        finally:
+            await stop_symbol_registry()
 
 app = FastAPI(title="Social Sentiment API", lifespan=lifespan)
 Instrumentator().instrument(app).expose(app)

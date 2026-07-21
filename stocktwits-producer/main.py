@@ -19,7 +19,7 @@ from shared.config import (
     get_env_int,
 )
 from shared.schemas import RawPost
-from shared.symbols import tickers
+from shared.symbols import run_with_symbol_registry, tickers
 from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
 from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
@@ -159,6 +159,10 @@ async def main():
             logger.error(f"Error in main loop: {e}. Retrying in 10s...")
             await asyncio.sleep(10)
 
+async def service_main():
+    await run_with_symbol_registry(main)
+
+
 if __name__ == "__main__":
     from shared.runtime import run
-    run(main, name="stocktwits-producer")
+    run(service_main, name="stocktwits-producer")

@@ -22,7 +22,7 @@ from shared.config import (
     get_env_int,
 )
 from shared.schemas import RawPost
-from shared.symbols import tickers, match_symbol
+from shared.symbols import match_symbol, run_with_symbol_registry, tickers
 from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
 from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
@@ -180,8 +180,10 @@ async def main():
             logger.exception(f"Error in producer loop: {e}")
             await asyncio.sleep(60)
 
+async def service_main():
+    await run_with_symbol_registry(main)
+
+
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Exiting cleanly")
+    from shared.runtime import run
+    run(service_main, name="alpaca-producer")

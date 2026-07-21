@@ -18,7 +18,7 @@ sys.path.append(str(ROOT))
 from shared.schemas import StockQuote, StockMetrics
 from shared.config import get_env_int
 from shared.futures import get_futures_session, all_polled_futures
-from shared.symbols import tickers, sector_map
+from shared.symbols import run_with_symbol_registry, sector_map, tickers
 from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
 from storage_service.db import DB
 from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
@@ -398,6 +398,10 @@ async def main():
         await nav_runner.maybe_run(now_utc, get_market_session(now_utc))
         await asyncio.sleep(POLL_INTERVAL)
 
+async def service_main():
+    await run_with_symbol_registry(main)
+
+
 if __name__ == "__main__":
     from shared.runtime import run
-    run(main, name="market-producer")
+    run(service_main, name="market-producer")

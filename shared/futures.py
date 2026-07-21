@@ -4,10 +4,6 @@ from datetime import datetime, timedelta
 from shared.symbols import primary_futures_map
 from shared.config import VIX_SYMBOL
 
-# Per-symbol primary index future. Used for the chart overlay + the
-# context-aware tile that shows up beside the selected equity.
-PRIMARY_FUTURES_MAP = primary_futures_map()
-
 # Market-wide volatility signal shown beside every symbol (different signal type,
 # not a price proxy). Spot VIX (^VIX) is a cash-session index, so the market
 # producer fetches it via the equity market session — not a futures session — and
@@ -61,4 +57,9 @@ def get_futures_session(symbol: str, now_utc: datetime) -> str:
 
 def all_polled_futures() -> list[str]:
     """Unique futures tickers the market-producer should poll."""
-    return sorted(set(f for f in PRIMARY_FUTURES_MAP.values() if f) | set(GLOBAL_FUTURES))
+    configured_futures = {
+        future
+        for future in primary_futures_map().values()
+        if future is not None
+    }
+    return sorted(configured_futures | set(GLOBAL_FUTURES))

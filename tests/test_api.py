@@ -13,8 +13,10 @@ app = api_main.app
 @pytest.fixture
 def mock_db():
     # Patch postgres_listener to avoid starting background DB listener tasks
-    # and patch AsyncConnectionPool so it doesn't open real connections
+    # and patch startup resources so tests never open real connections.
     with patch.object(api_main, "postgres_listener", new_callable=AsyncMock) as mock_listener, \
+         patch.object(api_main, "start_symbol_registry", new_callable=AsyncMock), \
+         patch.object(api_main, "stop_symbol_registry", new_callable=AsyncMock), \
          patch.object(api_main, "AsyncConnectionPool") as mock_pool_cls:
         
         mock_pool = MagicMock()
