@@ -116,8 +116,9 @@ FOR EACH ROW
 EXECUTE FUNCTION notify_new_post();
 
 
--- Hourly aggregation table for cold-tier data retention.
--- Raw posts older than the retention window are rolled up here before pruning.
+-- Hourly aggregation table for cold-tier data retention. Expired raw posts are
+-- deleted and aggregated from the same DELETE ... RETURNING statement so a row
+-- cannot be pruned without its contribution being preserved here.
 CREATE TABLE IF NOT EXISTS hourly_sentiment_agg (
     symbol              TEXT NOT NULL,
     bucket_hour         TIMESTAMPTZ NOT NULL,

@@ -1,7 +1,7 @@
 """
 Rollup & Prune maintenance script for Social Sentiment data retention.
 
-Aggregates old posts into hourly_sentiment_agg and prunes raw data.
+Atomically moves old posts into hourly_sentiment_agg and prunes raw data.
 
 Usage:
     python rollup.py [--retention-days 7] [--quote-retention-days 90] [--dry-run]
@@ -29,9 +29,8 @@ def main():
     args = parser.parse_args()
 
     now = datetime.now(timezone.utc)
-    # Align to the hour so only fully-elapsed hours are rolled up and pruned; an
-    # unaligned cutoff would aggregate then prune a partial boundary hour, leaving
-    # the bucket permanently undercounted (see rollup_scheduler in main.py).
+    # Align to the hour so the retention boundary cannot split one sentiment
+    # bucket between the aggregate and raw-post tiers.
     post_cutoff = (now - timedelta(days=args.retention_days)).replace(
         minute=0, second=0, microsecond=0
     )
@@ -51,7 +50,8 @@ def main():
             posts_to_rollup = cur.fetchone()[0]
 
             cur.execute(
-                "SELECT COUNT(DISTINCT (symbol, date_trunc('hour', timestamp))) "
+                "SELECT COUNT(DISTINCT (symbol, "
+                "date_trunc('hour', timestamp, 'UTC'))) "
                 "FROM posts WHERE timestamp < %s",
                 [post_cutoff]
             )
@@ -68,18 +68,14 @@ def main():
         print("No changes made (dry run).")
         return
 
-    # Step 1: Rollup
-    print("Step 1: Rolling up old posts into hourly_sentiment_agg...")
-    rolled_up = db.rollup_to_aggregates(post_cutoff)
+    # Step 1: Atomically move posts into the cold tier
+    print("Step 1: Atomically rolling up and pruning old posts...")
+    rolled_up, pruned_posts = db.rollup_and_prune_posts(post_cutoff)
     print(f"  Upserted {rolled_up:,} aggregation rows.")
-
-    # Step 2: Prune posts
-    print("Step 2: Pruning old posts...")
-    pruned_posts = db.prune_old_posts(post_cutoff)
     print(f"  Deleted {pruned_posts:,} posts.")
 
-    # Step 3: Prune quotes
-    print("Step 3: Pruning old stock quotes...")
+    # Step 2: Prune quotes
+    print("Step 2: Pruning old stock quotes...")
     pruned_quotes = db.prune_old_quotes(quote_cutoff)
     print(f"  Deleted {pruned_quotes:,} stock quotes.")
 

@@ -13,6 +13,24 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: sentiment_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+        ports:
+        - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sentiment_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_DATABASE_DSN: postgresql://postgres:test@localhost:5432/sentiment_test
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v5
@@ -38,4 +56,3 @@ jobs:
     - name: Run test suite
       run: |
         pytest
-

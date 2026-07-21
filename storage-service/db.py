@@ -30,6 +30,10 @@ SCHEMA_RETRY_BASE_DELAY = 1.0
 # idempotent, so the others re-run it harmlessly. Released automatically if the
 # session drops. The key is arbitrary but must match across all callers.
 SCHEMA_ADVISORY_LOCK_KEY = 4815162342
+# Serializes post-retention maintenance across scheduler/manual invocations. The
+# transaction-scoped lock is acquired inside the atomic move statement and is
+# released as soon as that statement commits or rolls back.
+POST_RETENTION_ADVISORY_LOCK_KEY = 4815162343
 
 INSERT_POST_SQL = """
     INSERT INTO posts (id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, engagement)
@@ -61,6 +65,102 @@ UPSERT_METRICS_SQL = """
         return_relative_sector = EXCLUDED.return_relative_sector,
         updated_at = NOW()
     RETURNING symbol
+"""
+
+ROLLUP_AND_PRUNE_POSTS_SQL = """
+    WITH maintenance_lock AS MATERIALIZED (
+        SELECT pg_advisory_xact_lock(%s)
+    ),
+    deleted_posts AS (
+        DELETE FROM posts
+        WHERE timestamp < %s
+          AND EXISTS (SELECT 1 FROM maintenance_lock)
+        RETURNING symbol, timestamp, sentiment, engagement
+    ),
+    aggregated_posts AS (
+        SELECT
+            symbol,
+            date_trunc('hour', timestamp, 'UTC') AS bucket_hour,
+            COUNT(*) FILTER (
+                WHERE sentiment = 'positive'
+            ) AS positive_count,
+            COUNT(*) FILTER (
+                WHERE sentiment = 'neutral'
+            ) AS neutral_count,
+            COUNT(*) FILTER (
+                WHERE sentiment = 'negative'
+            ) AS negative_count,
+            COALESCE(SUM(LN(engagement + 1.0)) FILTER (
+                WHERE sentiment = 'positive'
+            ), 0) AS positive_weighted,
+            COALESCE(SUM(LN(engagement + 1.0)) FILTER (
+                WHERE sentiment = 'negative'
+            ), 0) AS negative_weighted,
+            COALESCE(SUM(LN(engagement + 1.0)) FILTER (
+                WHERE sentiment = 'neutral'
+            ), 0) AS neutral_weighted,
+            COALESCE(SUM(LN(engagement + 1.0)), 0) AS total_weighted
+        FROM deleted_posts
+        GROUP BY symbol, date_trunc('hour', timestamp, 'UTC')
+    ),
+    upserted_buckets AS (
+        INSERT INTO hourly_sentiment_agg (
+            symbol, bucket_hour,
+            positive_count, neutral_count, negative_count,
+            positive_weighted, negative_weighted, neutral_weighted,
+            total_weighted, sentiment_index
+        )
+        SELECT
+            symbol,
+            bucket_hour,
+            positive_count,
+            neutral_count,
+            negative_count,
+            positive_weighted,
+            negative_weighted,
+            neutral_weighted,
+            total_weighted,
+            CASE
+                WHEN total_weighted > 0
+                THEN (positive_weighted - negative_weighted) / total_weighted
+                ELSE 0.0
+            END
+        FROM aggregated_posts
+        ORDER BY symbol, bucket_hour
+        ON CONFLICT (symbol, bucket_hour) DO UPDATE SET
+            positive_count = hourly_sentiment_agg.positive_count
+                + EXCLUDED.positive_count,
+            neutral_count = hourly_sentiment_agg.neutral_count
+                + EXCLUDED.neutral_count,
+            negative_count = hourly_sentiment_agg.negative_count
+                + EXCLUDED.negative_count,
+            positive_weighted = hourly_sentiment_agg.positive_weighted
+                + EXCLUDED.positive_weighted,
+            negative_weighted = hourly_sentiment_agg.negative_weighted
+                + EXCLUDED.negative_weighted,
+            neutral_weighted = hourly_sentiment_agg.neutral_weighted
+                + EXCLUDED.neutral_weighted,
+            total_weighted = hourly_sentiment_agg.total_weighted
+                + EXCLUDED.total_weighted,
+            sentiment_index = CASE
+                WHEN hourly_sentiment_agg.total_weighted
+                     + EXCLUDED.total_weighted > 0
+                THEN (
+                    hourly_sentiment_agg.positive_weighted
+                    + EXCLUDED.positive_weighted
+                    - hourly_sentiment_agg.negative_weighted
+                    - EXCLUDED.negative_weighted
+                ) / (
+                    hourly_sentiment_agg.total_weighted
+                    + EXCLUDED.total_weighted
+                )
+                ELSE 0.0
+            END
+        RETURNING 1
+    )
+    SELECT
+        (SELECT COUNT(*) FROM upserted_buckets) AS rolled_up_buckets,
+        (SELECT COUNT(*) FROM deleted_posts) AS pruned_posts
 """
 
 
@@ -233,74 +333,31 @@ class DB:
             )
             return cur.fetchone() is not None
 
-    def rollup_to_aggregates(self, cutoff_ts) -> int:
-        """Roll up posts older than cutoff_ts into hourly_sentiment_agg.
-        
-        Uses INSERT ... ON CONFLICT to be idempotent — safe to run repeatedly.
-        Returns the number of rows upserted.
-        """
-        sql = """
-            INSERT INTO hourly_sentiment_agg (
-                symbol, bucket_hour,
-                positive_count, neutral_count, negative_count,
-                positive_weighted, negative_weighted, neutral_weighted,
-                total_weighted, sentiment_index
-            )
-            SELECT
-                symbol,
-                date_trunc('hour', timestamp) AS bucket_hour,
-                COUNT(*) FILTER (WHERE sentiment = 'positive') AS positive_count,
-                COUNT(*) FILTER (WHERE sentiment = 'neutral') AS neutral_count,
-                COUNT(*) FILTER (WHERE sentiment = 'negative') AS negative_count,
-                COALESCE(SUM(LN(engagement + 1.0)) FILTER (WHERE sentiment = 'positive'), 0) AS positive_weighted,
-                COALESCE(SUM(LN(engagement + 1.0)) FILTER (WHERE sentiment = 'negative'), 0) AS negative_weighted,
-                COALESCE(SUM(LN(engagement + 1.0)) FILTER (WHERE sentiment = 'neutral'), 0) AS neutral_weighted,
-                COALESCE(SUM(LN(engagement + 1.0)), 0) AS total_weighted,
-                CASE
-                    WHEN COALESCE(SUM(LN(engagement + 1.0)), 0) > 0
-                    THEN (
-                        COALESCE(SUM(LN(engagement + 1.0)) FILTER (WHERE sentiment = 'positive'), 0)
-                        - COALESCE(SUM(LN(engagement + 1.0)) FILTER (WHERE sentiment = 'negative'), 0)
-                    )::float / SUM(LN(engagement + 1.0))
-                    ELSE 0.0
-                END AS sentiment_index
-            FROM posts
-            WHERE timestamp < %s
-            GROUP BY symbol, date_trunc('hour', timestamp)
-            ON CONFLICT (symbol, bucket_hour) DO UPDATE SET
-                positive_count = EXCLUDED.positive_count,
-                neutral_count = EXCLUDED.neutral_count,
-                negative_count = EXCLUDED.negative_count,
-                positive_weighted = EXCLUDED.positive_weighted,
-                negative_weighted = EXCLUDED.negative_weighted,
-                neutral_weighted = EXCLUDED.neutral_weighted,
-                total_weighted = EXCLUDED.total_weighted,
-                sentiment_index = EXCLUDED.sentiment_index
-        """
-        try:
-            with self.conn.cursor() as cur:
-                cur.execute(sql, [cutoff_ts])
-                return cur.rowcount
-        except psycopg.OperationalError:
-            print("DB connection lost during rollup, reconnecting...")
-            self._connect()
-            with self.conn.cursor() as cur:
-                cur.execute(sql, [cutoff_ts])
-                return cur.rowcount
+    def rollup_and_prune_posts(self, cutoff_ts) -> tuple[int, int]:
+        """Atomically aggregate and delete posts older than ``cutoff_ts``.
 
-    def prune_old_posts(self, cutoff_ts) -> int:
-        """Delete posts older than cutoff_ts. Returns the number of rows deleted."""
-        sql = "DELETE FROM posts WHERE timestamp < %s"
+        The aggregate is derived from the exact rows returned by DELETE. Existing
+        buckets are incremented so late-arriving posts are retained. Returns
+        ``(rolled_up_buckets, pruned_posts)``.
+        """
         try:
-            with self.conn.cursor() as cur:
-                cur.execute(sql, [cutoff_ts])
-                return cur.rowcount
+            return self._do_rollup_and_prune_posts(cutoff_ts)
         except psycopg.OperationalError:
-            print("DB connection lost during prune, reconnecting...")
+            # Retrying is safe even when commit status is unknown: if the first
+            # statement committed, its source posts no longer exist; otherwise
+            # PostgreSQL rolled back both the delete and aggregate upsert.
+            print("DB connection lost during post retention, reconnecting...")
             self._connect()
-            with self.conn.cursor() as cur:
-                cur.execute(sql, [cutoff_ts])
-                return cur.rowcount
+            return self._do_rollup_and_prune_posts(cutoff_ts)
+
+    def _do_rollup_and_prune_posts(self, cutoff_ts) -> tuple[int, int]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                ROLLUP_AND_PRUNE_POSTS_SQL,
+                [POST_RETENTION_ADVISORY_LOCK_KEY, cutoff_ts],
+            )
+            rolled_up_buckets, pruned_posts = cur.fetchone()
+            return rolled_up_buckets, pruned_posts
 
     def prune_old_quotes(self, cutoff_ts) -> int:
         """Delete stock quotes older than cutoff_ts. Returns the number of rows deleted."""

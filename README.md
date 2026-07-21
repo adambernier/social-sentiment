@@ -79,6 +79,8 @@ Inspired by hockey stat cards, the dashboard features a **Divergent Bar Chart** 
 - Hourly sentiment aggregates are kept in `hourly_sentiment_agg` (cold tier),
   while raw posts (hot tier) are pruned after a retention window. The API
   transparently overlays live posts on top of the aggregates.
+- Post rollup and pruning are one atomic database operation; late posts add to
+  existing hourly aggregates rather than replacing them.
 - Run by the maintenance script below.
 
 ## Getting Started on a New Machine
@@ -204,7 +206,9 @@ python storage-service/rollup.py --dry-run
 python storage-service/rollup.py --retention-days 7 --quote-retention-days 90
 ```
 
-The rollup is completely idempotent and safe to execute repeatedly.
+Post rollup and pruning use one atomic `DELETE ... RETURNING` operation. A
+failure rolls back both changes, repeat runs are safe, and late-arriving posts
+increment existing hourly aggregates.
 
 ## Smoke test (synthetic posts)
 
