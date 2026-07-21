@@ -97,23 +97,45 @@ CREATE INDEX IF NOT EXISTS stock_quotes_timestamp_idx ON stock_quotes (timestamp
 CREATE INDEX IF NOT EXISTS stock_quotes_symbol_timestamp_idx ON stock_quotes (symbol, timestamp DESC);
 CREATE INDEX IF NOT EXISTS stock_quotes_symbol_session_timestamp_idx ON stock_quotes (symbol, market_session, timestamp DESC);
 
--- Clean up duplicate quotes if they exist before adding the constraint to an existing table
-DELETE FROM stock_quotes a
-USING stock_quotes b
-WHERE a.id > b.id
-  AND a.symbol = b.symbol
-  AND a.timestamp = b.timestamp;
-
--- Add unique constraint if it doesn't already exist for older installations
+-- Older installations may predate quote identity enforcement. Only run the
+-- duplicate cleanup while performing that one-time migration: once a matching
+-- unique constraint exists, a table-wide self-join can never find duplicates
+-- and would just add work and lock contention to every service startup.
 DO $$
+DECLARE
+    has_quote_identity_constraint BOOLEAN;
 BEGIN
-    IF NOT EXISTS (
+    SELECT EXISTS (
         SELECT 1
-        FROM pg_constraint
-        WHERE conname = 'stock_quotes_symbol_timestamp_key'
-           OR conname = 'unique_symbol_timestamp'
-    ) THEN
-        ALTER TABLE stock_quotes ADD CONSTRAINT unique_symbol_timestamp UNIQUE (symbol, timestamp);
+        FROM pg_constraint AS constraint_info
+        WHERE constraint_info.conrelid = 'stock_quotes'::regclass
+          AND constraint_info.contype = 'u'
+          AND ARRAY(
+              SELECT attribute_info.attname::TEXT
+              FROM unnest(constraint_info.conkey)
+                  WITH ORDINALITY AS key_info(attnum, ordinality)
+              JOIN pg_attribute AS attribute_info
+                ON attribute_info.attrelid = constraint_info.conrelid
+               AND attribute_info.attnum = key_info.attnum
+              ORDER BY key_info.ordinality
+          ) = ARRAY['symbol', 'timestamp']::TEXT[]
+    ) INTO has_quote_identity_constraint;
+
+    IF NOT has_quote_identity_constraint THEN
+        -- Keep a concurrent writer from recreating a duplicate between cleanup
+        -- and constraint creation. This stronger lock is taken only once, on a
+        -- legacy table that does not yet enforce quote identity.
+        LOCK TABLE stock_quotes IN SHARE ROW EXCLUSIVE MODE;
+
+        DELETE FROM stock_quotes AS older_quote
+        USING stock_quotes AS newer_quote
+        WHERE older_quote.id > newer_quote.id
+          AND older_quote.symbol = newer_quote.symbol
+          AND older_quote.timestamp = newer_quote.timestamp;
+
+        ALTER TABLE stock_quotes
+            ADD CONSTRAINT unique_symbol_timestamp
+            UNIQUE (symbol, timestamp);
     END IF;
 END $$;
 

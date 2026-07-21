@@ -36,6 +36,15 @@ def mock_psycopg_connect():
         
         yield mock_connect, mock_conn, mock_cursor
 
+
+def test_secondary_connection_can_skip_schema_application(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    db = DB("mock_dsn", apply_schema=False)
+
+    assert db.conn is not None
+    mock_cursor.execute.assert_not_called()
+
 def test_db_insert_quote_success(mock_psycopg_connect):
     mock_connect, mock_conn, mock_cursor = mock_psycopg_connect
     

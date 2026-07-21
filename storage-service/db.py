@@ -165,12 +165,13 @@ ROLLUP_AND_PRUNE_POSTS_SQL = """
 
 
 class DB:
-    def __init__(self, dsn: str = DATABASE_DSN):
+    def __init__(self, dsn: str = DATABASE_DSN, *, apply_schema: bool = True):
         self.dsn = dsn
         self.conn: psycopg.Connection | None = None
         self.async_pool: AsyncConnectionPool | None = None
         self._connect()
-        self._apply_schema()
+        if apply_schema:
+            self._apply_schema()
 
     def _connect(self) -> None:
         if self.conn is not None:

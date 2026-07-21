@@ -352,14 +352,20 @@ async def fetch_and_store(db: DB, limiter: AsyncRateLimiter, backoff_tracker: Pe
 
 def run_metrics_in_background():
     def worker():
+        db_thread = None
         try:
             print("Starting background metrics update thread...")
-            db_thread = DB()
+            # The main market connection already applied the schema at startup.
+            # This hourly secondary connection only needs an independent session;
+            # reapplying all DDL here adds avoidable locks and table scans.
+            db_thread = DB(apply_schema=False)
             fetch_and_store_metrics(db_thread)
-            db_thread.conn.close()
             print("Background metrics update completed successfully.")
         except Exception as e:
             print(f"Error in background metrics update thread: {e}")
+        finally:
+            if db_thread is not None and db_thread.conn is not None:
+                db_thread.conn.close()
             
     t = threading.Thread(target=worker)
     t.daemon = True
