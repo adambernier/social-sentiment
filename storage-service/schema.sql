@@ -96,7 +96,7 @@ BEGIN
             'id', NEW.id,
             'symbol', NEW.symbol,
             'platform', NEW.platform,
-            'text', NEW.text,
+            'text', left(NEW.text, 1000),
             'timestamp', NEW.timestamp,
             'sentiment', NEW.sentiment,
             'scores', NEW.scores,
