@@ -10,6 +10,9 @@ __pycache__/
 # Docker
 .docker_data/
 
+# Local database backups
+/backups/
+
 # Screenshots & Temp
 *.png
 *.jpg
