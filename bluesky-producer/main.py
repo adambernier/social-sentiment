@@ -6,6 +6,7 @@ from pathlib import Path
 
 import aio_pika
 from atproto import AsyncClient
+from atproto_client.exceptions import RequestErrorBase
 from pydantic import ValidationError
 
 # Setup path for shared imports
@@ -32,6 +33,124 @@ logger = logging.getLogger("bluesky-producer")
 POLL_INTERVAL = get_env_int("BLUESKY_POLL_INTERVAL", 900)
 MAX_BACKOFF = get_env_int("BLUESKY_MAX_BACKOFF", 3600)
 
+
+def is_rate_limit_error(error: Exception) -> bool:
+    """Return whether an AT Protocol request failed with HTTP 429."""
+    return (
+        isinstance(error, RequestErrorBase)
+        and error.response is not None
+        and error.response.status_code == 429
+    )
+
+
+async def search_and_publish(
+    client: AsyncClient,
+    channel: aio_pika.Channel,
+    symbol: str,
+    term: str,
+    last_seen: dict[str, str],
+) -> int:
+    params = {"q": term, "limit": 25, "sort": "latest"}
+    if term in last_seen:
+        params["since"] = last_seen[term]
+
+    response = await client.app.bsky.feed.search_posts(params=params)
+    new_posts_count = 0
+
+    for post in response.posts:
+        if term in last_seen and post.record.created_at <= last_seen[term]:
+            continue
+
+        # Post-fetch precision filtering for ambiguous tickers (SMH, MU).
+        if not match_symbol(post.record.text, symbol):
+            continue
+
+        try:
+            timestamp = datetime.fromisoformat(
+                post.record.created_at.replace("Z", "+00:00")
+            )
+        except (AttributeError, TypeError, ValueError):
+            timestamp = datetime.now(timezone.utc)
+
+        engagement = max(
+            1,
+            int(
+                (post.like_count or 0)
+                + 2 * (post.repost_count or 0)
+                + 3 * (post.reply_count or 0)
+            ),
+        )
+        raw_post = RawPost(
+            id=post.cid,
+            symbol=symbol,
+            platform="bluesky",
+            text=post.record.text,
+            timestamp=timestamp,
+            engagement=engagement,
+        )
+
+        await channel.default_exchange.publish(
+            aio_pika.Message(
+                body=raw_post.model_dump_json().encode(),
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            ),
+            routing_key=QUEUE_RAW_POSTS,
+        )
+        POSTS_INGESTED_TOTAL.labels(platform="bluesky", symbol=symbol).inc()
+        new_posts_count += 1
+
+        if term not in last_seen or post.record.created_at > last_seen[term]:
+            last_seen[term] = post.record.created_at
+
+    return new_posts_count
+
+
+async def poll_search_terms(
+    client: AsyncClient,
+    channel: aio_pika.Channel,
+    keyword_mapping: dict[str, list[str]],
+    last_seen: dict[str, str],
+) -> bool:
+    """Poll one batch, returning True only when Bluesky responds with HTTP 429."""
+    for symbol, terms in keyword_mapping.items():
+        for term in terms:
+            try:
+                new_posts_count = await search_and_publish(
+                    client,
+                    channel,
+                    symbol,
+                    term,
+                    last_seen,
+                )
+                if new_posts_count > 0:
+                    logger.info(
+                        "Term %r (%s): Published %d new posts.",
+                        term,
+                        symbol,
+                        new_posts_count,
+                    )
+            except ValidationError as error:
+                # A newly introduced response type should skip this term, not
+                # stop every symbol or masquerade as API throttling.
+                logger.error(
+                    "Bluesky response validation failed for term %r; "
+                    "skipping this term: %s",
+                    term,
+                    error,
+                )
+            except Exception as error:
+                if is_rate_limit_error(error):
+                    logger.warning("Bluesky rate limit reached while searching %r", term)
+                    return True
+                logger.error("Error searching for term %r: %s", term, error)
+
+            # Pace successful and non-rate-limited failed queries alike so an
+            # upstream outage or bad response cannot turn into a request burst.
+            await asyncio.sleep(2.0)
+
+    return False
+
+
 async def main():
     logger.info("Starting Bluesky Polling Producer...")
     start_metrics_server(8001)
@@ -52,74 +171,17 @@ async def main():
 
                 backoff = POLL_INTERVAL
                 while True:
-                    kw_map = keywords_map()
-                    rate_limited = False
-
-                    for symbol, terms in kw_map.items():
-                        if rate_limited:
-                            break
-                        for term in terms:
-                            if rate_limited:
-                                break
-                            try:
-                                params = {'q': term, 'limit': 25, 'sort': 'latest'}
-                                if term in last_seen:
-                                    params['since'] = last_seen[term]
-
-                                response = await client.app.bsky.feed.search_posts(params=params)
-                                
-                                new_posts_count = 0
-                                for post in response.posts:
-                                    if term in last_seen and post.record.created_at <= last_seen[term]:
-                                        continue
-                                    
-                                    # Post-fetch precision filtering for ambiguous tickers (SMH, MU)
-                                    if not match_symbol(post.record.text, symbol):
-                                        continue
-
-                                    try:
-                                        ts_str = post.record.created_at.replace("Z", "+00:00")
-                                        timestamp = datetime.fromisoformat(ts_str)
-                                    except Exception:
-                                        timestamp = datetime.now(timezone.utc)
-
-                                    engagement = max(1, int((post.like_count or 0) + 2 * (post.repost_count or 0) + 3 * (post.reply_count or 0)))
-
-                                    raw_post = RawPost(
-                                        id=post.cid,
-                                        symbol=symbol,  # Tag with the target symbol
-                                        platform="bluesky",
-                                        text=post.record.text,
-                                        timestamp=timestamp,
-                                        engagement=engagement,
-                                    )
-
-                                    await channel.default_exchange.publish(
-                                        aio_pika.Message(
-                                            body=raw_post.model_dump_json().encode(),
-                                            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                                        ),
-                                        routing_key=QUEUE_RAW_POSTS,
-                                    )
-                                    POSTS_INGESTED_TOTAL.labels(platform="bluesky", symbol=symbol).inc()
-                                    new_posts_count += 1
-                                    
-                                    if term not in last_seen or post.record.created_at > last_seen[term]:
-                                        last_seen[term] = post.record.created_at
-
-                                if new_posts_count > 0:
-                                    logger.info(f"Term '{term}' ({symbol}): Published {new_posts_count} new posts.")
-
-                                # Rate limiting safety: Sleep between queries to the public API
-                                await asyncio.sleep(2.0)
-                            except Exception as e:
-                                logger.error(f"Error searching for term '{term}': {e}")
-                                rate_limited = True
+                    rate_limited = await poll_search_terms(
+                        client,
+                        channel,
+                        keywords_map(),
+                        last_seen,
+                    )
 
                     if rate_limited:
                         RATE_LIMITS_HIT_TOTAL.labels(platform="bluesky").inc()
                         backoff = min(backoff * 2, MAX_BACKOFF)
-                        logger.warning(f"Error/Rate limit hit. Backing off for {backoff}s.")
+                        logger.warning(f"Rate limit hit. Backing off for {backoff}s.")
                     else:
                         if backoff != POLL_INTERVAL:
                             logger.info("Requests succeeding again; resetting poll interval.")
