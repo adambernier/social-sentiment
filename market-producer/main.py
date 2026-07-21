@@ -355,10 +355,9 @@ def run_metrics_in_background():
         db_thread = None
         try:
             print("Starting background metrics update thread...")
-            # The main market connection already applied the schema at startup.
-            # This hourly secondary connection only needs an independent session;
-            # reapplying all DDL here adds avoidable locks and table scans.
-            db_thread = DB(apply_schema=False)
+            # Metrics use an independent session because this work runs in a
+            # background thread. Schema changes belong to schema-migrate.
+            db_thread = DB()
             fetch_and_store_metrics(db_thread)
             print("Background metrics update completed successfully.")
         except Exception as e:

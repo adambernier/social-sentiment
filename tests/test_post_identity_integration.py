@@ -92,7 +92,7 @@ def test_schema_migrates_global_id_primary_key_and_scopes_deduplication(
         _set_search_path(conn, legacy_posts_database)
 
         conn.execute(SCHEMA_SQL)
-        conn.execute(SCHEMA_SQL)  # Schema startup must remain idempotent.
+        conn.execute(SCHEMA_SQL)  # A retried migration must remain idempotent.
 
         primary_key_columns = conn.execute(
             """

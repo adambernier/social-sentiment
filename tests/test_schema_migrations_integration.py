@@ -1,10 +1,14 @@
 import os
+import hashlib
 import uuid
 from pathlib import Path
 
 import psycopg
 import pytest
 from psycopg import sql
+from psycopg.conninfo import make_conninfo
+
+from schema_migrations import MIGRATIONS, apply_migrations
 
 
 TEST_DATABASE_DSN = os.environ.get("TEST_DATABASE_DSN")
@@ -115,3 +119,54 @@ def test_quote_cleanup_runs_only_during_uniqueness_migration(
         assert conn.execute(
             "SELECT COUNT(*) FROM stock_quotes"
         ).fetchone() == (1,)
+
+
+@pytest.fixture
+def migration_runner_database():
+    schema_name = f"migration_runner_{uuid.uuid4().hex}"
+    with psycopg.connect(TEST_DATABASE_DSN, autocommit=True) as conn:
+        conn.execute(
+            sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_name))
+        )
+
+    scoped_dsn = make_conninfo(
+        TEST_DATABASE_DSN,
+        options=f"-csearch_path={schema_name}",
+    )
+
+    try:
+        yield schema_name, scoped_dsn
+    finally:
+        with psycopg.connect(TEST_DATABASE_DSN, autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(
+                    sql.Identifier(schema_name)
+                )
+            )
+
+
+def test_migration_runner_records_baseline_and_skips_repeat_ddl(
+    migration_runner_database,
+):
+    _, scoped_dsn = migration_runner_database
+    baseline = MIGRATIONS[0]
+    expected_checksum = hashlib.sha256(baseline.path.read_bytes()).hexdigest()
+
+    assert apply_migrations(scoped_dsn) == [baseline.version]
+
+    with psycopg.connect(scoped_dsn, autocommit=True) as conn:
+        assert conn.execute(
+            "SELECT version, checksum FROM schema_migrations"
+        ).fetchone() == (baseline.version, expected_checksum)
+
+        # If a second runner mistakenly reapplies the baseline, CREATE TABLE
+        # would recreate `posts`. Renaming it makes that easy to detect.
+        conn.execute("ALTER TABLE posts RENAME TO posts_preserved")
+
+    assert apply_migrations(scoped_dsn) == []
+
+    with psycopg.connect(scoped_dsn, autocommit=True) as conn:
+        assert conn.execute("SELECT to_regclass('posts')").fetchone() == (None,)
+        assert conn.execute(
+            "SELECT to_regclass('posts_preserved')"
+        ).fetchone() == ("posts_preserved",)

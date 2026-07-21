@@ -32,6 +32,17 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+  schema-migrate:
+    build:
+      context: .
+      dockerfile: storage-service/Dockerfile
+    command: ["python", "storage-service/migrate.py"]
+    environment:
+    - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
   preprocessing-service:
     build:
       context: .
@@ -72,6 +83,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      schema-migrate:
+        condition: service_completed_successfully
   bluesky-producer:
     build:
       context: .
@@ -87,6 +100,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      schema-migrate:
+        condition: service_completed_successfully
   stocktwits-producer:
     build:
       context: .
@@ -102,6 +117,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      schema-migrate:
+        condition: service_completed_successfully
   reddit-producer:
     # Disabled by default -- Reddit can 403-block unauthenticated .json 
     # Re-enable with `docker compose --profile reddit up -d`
@@ -125,6 +142,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      schema-migrate:
+        condition: service_completed_successfully
   finnhub-producer:
     build:
       context: .
@@ -141,6 +160,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      schema-migrate:
+        condition: service_completed_successfully
   alpaca-producer:
     build:
       context: .
@@ -159,6 +180,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      schema-migrate:
+        condition: service_completed_successfully
   market-producer:
     build:
       context: .
@@ -173,6 +196,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema-migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
   api-service:
@@ -185,6 +210,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema-migrate:
+        condition: service_completed_successfully
   ui-service:
     build:
       context: ui-service

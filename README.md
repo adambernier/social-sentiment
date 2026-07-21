@@ -110,6 +110,10 @@ docker compose up -d --build
 docker compose ps
 ```
 
+Compose runs `schema-migrate` once after PostgreSQL is healthy. Database-using
+services start only after that migration exits successfully; ordinary service
+startup never executes DDL.
+
 The quantized ONNX models ship in the images, so first boot is fast; the
 `hf_cache` named volume caches any tokenizer assets across restarts.
 
@@ -144,9 +148,14 @@ vars, with defaults that match `localhost`:
 
 ```bash
 docker compose up -d rabbitmq postgres
+docker compose run --rm schema-migrate
 source .venv/bin/activate
 python preprocessing-service/main.py    # for example
 ```
+
+The migration runner records the checksum of each applied migration in
+`schema_migrations`. Applied SQL files are immutable: add a new version to
+`storage-service/schema_migrations.py` for later schema changes.
 
 The UI is a Next.js app; iterate on it with `npm run dev` (it is already run
 this way inside the `ui-service` container, with the source bind-mounted for

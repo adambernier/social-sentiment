@@ -155,10 +155,10 @@ async def rollup_scheduler(db: DB):
 
 
 async def main():
-    logger.info("Initializing database and applying schema...")
+    logger.info("Connecting to database...")
     start_metrics_server(8008)
     db = DB()
-    logger.info("Database schema applied.")
+    logger.info("Database connection established.")
 
     rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"
     queue = asyncio.Queue()

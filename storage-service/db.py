@@ -1,7 +1,5 @@
 import json
-import random
 import sys
-import time
 from pathlib import Path
 
 import psycopg
@@ -12,24 +10,6 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from shared.schemas import ScoredPost, StockQuote, StockMetrics
 from shared.config import DATABASE_DSN
 
-SCHEMA_FILE = Path(__file__).parent / "schema.sql"
-
-# Schema is applied on startup and can include DDL (e.g. ADD CONSTRAINT) that takes
-# an exclusive lock on a busy table. Concurrent readers/writers can deadlock it (or
-# it can block), and an unhandled error there crashes the whole consumer — stranding
-# the pipeline. So apply with a short lock_timeout (fail fast) and retry transient
-# lock errors instead of dying.
-SCHEMA_APPLY_RETRIES = 5
-SCHEMA_LOCK_TIMEOUT_MS = 5000
-SCHEMA_RETRY_BASE_DELAY = 1.0
-# Several services (storage-service, market-producer, ...) construct DB() on boot
-# and each applies the schema, so on `compose up` multiple processes run the DDL
-# at once — and concurrent DDL (the DELETE self-join + ADD CONSTRAINT below) is
-# exactly what deadlocks. A session-level advisory lock on this fixed key
-# serializes the starters so only one runs the DDL at a time; the schema is
-# idempotent, so the others re-run it harmlessly. Released automatically if the
-# session drops. The key is arbitrary but must match across all callers.
-SCHEMA_ADVISORY_LOCK_KEY = 4815162342
 # Serializes post-retention maintenance across scheduler/manual invocations. The
 # transaction-scoped lock is acquired inside the atomic move statement and is
 # released as soon as that statement commits or rolls back.
@@ -165,13 +145,11 @@ ROLLUP_AND_PRUNE_POSTS_SQL = """
 
 
 class DB:
-    def __init__(self, dsn: str = DATABASE_DSN, *, apply_schema: bool = True):
+    def __init__(self, dsn: str = DATABASE_DSN):
         self.dsn = dsn
         self.conn: psycopg.Connection | None = None
         self.async_pool: AsyncConnectionPool | None = None
         self._connect()
-        if apply_schema:
-            self._apply_schema()
 
     def _connect(self) -> None:
         if self.conn is not None:
@@ -213,47 +191,6 @@ class DB:
             async with conn.cursor() as cur:
                 await cur.executemany(INSERT_POST_SQL, data)
                 return cur.rowcount
-
-    def _apply_schema(self) -> None:
-        sql = SCHEMA_FILE.read_text()
-        last_err: Exception | None = None
-        for attempt in range(1, SCHEMA_APPLY_RETRIES + 1):
-            try:
-                with self.conn.cursor() as cur:
-                    # Serialize concurrent starters so no two processes run the
-                    # DDL at once (the actual deadlock trigger). Acquired before
-                    # lock_timeout is set, so it waits for our turn rather than
-                    # failing fast; the holder finishes quickly when uncontended.
-                    cur.execute("SELECT pg_advisory_lock(%s)", (SCHEMA_ADVISORY_LOCK_KEY,))
-                    try:
-                        # Within our turn, still fail fast rather than block
-                        # forever if *live* pipeline traffic holds a table lock
-                        # the migration needs.
-                        cur.execute(f"SET lock_timeout = '{SCHEMA_LOCK_TIMEOUT_MS}ms'")
-                        cur.execute(sql)
-                    finally:
-                        # Best-effort: session close on reconnect/exit releases it
-                        # anyway, so don't let an unlock error mask a real failure.
-                        try:
-                            cur.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_ADVISORY_LOCK_KEY,))
-                        except Exception:
-                            pass
-                return
-            except (psycopg.errors.DeadlockDetected, psycopg.errors.LockNotAvailable) as e:
-                last_err = e
-                if attempt >= SCHEMA_APPLY_RETRIES:
-                    break
-                delay = SCHEMA_RETRY_BASE_DELAY * attempt + random.uniform(0, SCHEMA_RETRY_BASE_DELAY)
-                print(
-                    f"Schema apply blocked by lock contention ({type(e).__name__}); "
-                    f"attempt {attempt}/{SCHEMA_APPLY_RETRIES}, retrying in {delay:.1f}s..."
-                )
-                time.sleep(delay)
-                # The aborted statement leaves the session usable under autocommit,
-                # but reconnect for a clean slate (and reset the timed-out lock wait).
-                self._connect()
-        print(f"Schema apply failed after {SCHEMA_APPLY_RETRIES} attempts: {last_err}")
-        raise last_err
 
     def insert_scored_batch(self, posts: list[ScoredPost]) -> int:
         try:
