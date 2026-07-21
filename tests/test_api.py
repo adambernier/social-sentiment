@@ -155,15 +155,28 @@ def test_leaderboard_endpoint(mock_db):
             api_main.LEADERBOARD_MIN_BASELINE_HOURS,
         ]
 
-def test_correlation_endpoint(mock_db):
+@pytest.mark.asyncio
+async def test_correlation_endpoint(mock_db):
     now = datetime.now(timezone.utc)
     now_hour = now.replace(minute=0, second=0, microsecond=0)
     
-    # Mock data for 20 quotes to correctly resolve 5th and 95th percentile indexes
-    mock_quotes = [
-        {"timestamp": now_hour - timedelta(hours=20-i), "price": 100.0 + i, "volume": 1000 + i * 10, "market_session": "regular"}
-        for i in range(20)
-    ]
+    # Mock the rows returned by the database-side hourly resampling query.
+    mock_hourly_rows = []
+    for row_symbol, starting_price in (("NVDA", 100.0), ("NQ", 200.0)):
+        for i in range(20):
+            price = starting_price + i
+            previous_price = starting_price + i - 1
+            mock_hourly_rows.append({
+                "symbol": row_symbol,
+                "bucket_hour": now_hour - timedelta(hours=19 - i),
+                "price": price,
+                "price_change": (
+                    None
+                    if i == 0
+                    else ((price - previous_price) / previous_price) * 100
+                ),
+                "is_market_open": True,
+            })
     
     # Mock data for aggregates
     mock_aggs = [
@@ -181,13 +194,11 @@ def test_correlation_endpoint(mock_db):
     ]
     
     # Setup mock_db.fetchall side_effect to return mocks for sequential queries:
-    # 1. target quotes
-    # 2. future quotes
-    # 3. agg sentiment
-    # 4. live posts
+    # 1. combined target/future hourly rows
+    # 2. agg sentiment
+    # 3. live posts
     mock_db.fetchall.side_effect = [
-        mock_quotes,
-        mock_quotes,
+        mock_hourly_rows,
         mock_aggs,
         mock_posts
     ]
@@ -199,11 +210,13 @@ def test_correlation_endpoint(mock_db):
         {"price": 12.5}               # Low VIX (options are cheap)
     ]
     
-    with patch.object(api_main, "primary_futures_map", return_value={"NVDA": "NQ"}), \
-         TestClient(app) as client:
-        response = client.get("/api/stats/correlation?symbol=NVDA&hours=2")
-        assert response.status_code == 200
-        data = response.json()
+    with patch.object(api_main, "primary_futures_map", return_value={"NVDA": "NQ"}):
+        data = await api_main.get_correlation(
+            symbol="NVDA",
+            hours=24,
+            platform=None,
+            topic=None,
+        )
         assert "data" in data
         assert "closedRegions" in data
         assert "supportPrice" in data
@@ -250,6 +263,141 @@ def test_correlation_endpoint(mock_db):
         assert "rawPrice" in first_bucket
         assert "buySignal" in first_bucket
         assert "buyScore" in first_bucket
+
+        # Spot and future symbols are resampled in one query, with one prior
+        # cutoff hour requested to seed the first in-window hourly return.
+        market_query_call = mock_db.execute.call_args_list[0]
+        assert market_query_call.args[0] == api_main.HOURLY_MARKET_QUERY
+        assert market_query_call.args[1][0] == ["NVDA", "NQ"]
+        assert market_query_call.args[1][1] == now_hour - timedelta(hours=25)
+
+
+def test_hourly_market_query_resamples_quotes_by_symbol_and_utc_hour():
+    query = " ".join(api_main.HOURLY_MARKET_QUERY.lower().split())
+
+    # The descending aggregate selects the final quote in each hour, not a
+    # minute-level quote, and a mixed session hour is open if any row is regular.
+    assert "(array_agg(price order by timestamp desc))[1]" in query
+    assert "bool_or(market_session = 'regular')" in query
+    assert "date_trunc('hour', timestamp, 'utc')" in query
+
+    # LAG is isolated per symbol and a return is emitted only for a genuinely
+    # adjacent hour. This prevents both cross-symbol and missing-hour returns.
+    assert query.count("partition by symbol order by bucket_hour") == 2
+    assert "previous_hour = bucket_hour - interval '1 hour'" in query
+    assert "where symbol = any(%s) and timestamp >= %s" in query
+
+
+def test_apply_hourly_market_rows_preserves_gaps_sessions_and_symbols():
+    hour = datetime(2026, 7, 20, 16, tzinfo=timezone.utc)
+
+    def key(offset):
+        return (hour + timedelta(hours=offset)).isoformat().replace("+00:00", "Z")
+
+    buckets = {
+        key(offset): {
+            "priceChange": None,
+            "futureChange": None,
+            "futurePct": None,
+            "rawPrice": None,
+            "isMarketOpen": False,
+        }
+        for offset in range(3)
+    }
+    rows = [
+        # Prior-cutoff anchor: absent from buckets, but its close seeds the
+        # database-computed return on the first visible target/future bucket.
+        {
+            "symbol": "NVDA",
+            "bucket_hour": hour - timedelta(hours=1),
+            "price": 100.0,
+            "price_change": None,
+            "is_market_open": False,
+        },
+        {
+            "symbol": "NQ",
+            "bucket_hour": hour - timedelta(hours=1),
+            "price": 200.0,
+            "price_change": None,
+            "is_market_open": False,
+        },
+        {
+            "symbol": "NVDA",
+            "bucket_hour": hour,
+            "price": 102.0,
+            "price_change": 2.0,
+            "is_market_open": True,
+        },
+        {
+            "symbol": "NQ",
+            "bucket_hour": hour,
+            "price": 202.0,
+            "price_change": 1.0,
+            "is_market_open": True,
+        },
+        # No rows for hour + 1. The gap return at hour + 2 must remain null.
+        {
+            "symbol": "NVDA",
+            "bucket_hour": hour + timedelta(hours=2),
+            "price": 104.0,
+            "price_change": None,
+            "is_market_open": False,
+        },
+        {
+            "symbol": "NQ",
+            "bucket_hour": hour + timedelta(hours=2),
+            "price": 206.0,
+            "price_change": None,
+            "is_market_open": True,
+        },
+    ]
+
+    market_data = api_main._apply_hourly_market_rows(
+        buckets, rows, "NVDA", "NQ"
+    )
+
+    assert [row["symbol"] for row in market_data] == ["NVDA"] * 3
+    assert buckets[key(0)]["rawPrice"] == 102.0
+    assert buckets[key(0)]["priceChange"] == pytest.approx(2.0)
+    assert buckets[key(0)]["isMarketOpen"] is True
+    assert buckets[key(0)]["futureChange"] == pytest.approx(1.0)
+    assert buckets[key(0)]["futurePct"] == pytest.approx(
+        (202.0 - 206.0) / 206.0 * 100
+    )
+
+    assert buckets[key(1)]["rawPrice"] is None
+    assert buckets[key(1)]["priceChange"] is None
+    assert buckets[key(1)]["isMarketOpen"] is False
+
+    assert buckets[key(2)]["rawPrice"] == 104.0
+    assert buckets[key(2)]["priceChange"] is None
+    assert buckets[key(2)]["isMarketOpen"] is False
+    assert buckets[key(2)]["futureChange"] is None
+    assert buckets[key(2)]["futurePct"] == pytest.approx(0.0)
+
+
+def test_lagged_correlation_excludes_closed_session_returns():
+    data = [
+        {"sentimentIndex": sentiment, "priceChange": price, "isMarketOpen": True}
+        for sentiment, price in zip(
+            (1.0, 2.0, 3.0, 4.0),
+            (2.0, 4.0, 6.0, 8.0),
+        )
+    ]
+    # These closed-session values would materially distort the result if they
+    # were included in the Pearson sample.
+    data.extend([
+        {"sentimentIndex": 5.0, "priceChange": 100.0, "isMarketOpen": False},
+        {"sentimentIndex": 6.0, "priceChange": -100.0, "isMarketOpen": False},
+        {"sentimentIndex": 7.0, "priceChange": 100.0, "isMarketOpen": False},
+        {"sentimentIndex": 8.0, "priceChange": -100.0, "isMarketOpen": False},
+    ])
+
+    max_r, best_lag, sweeps = api_main.compute_lagged_correlation(data, max_lag=0)
+
+    assert max_r == pytest.approx(1.0)
+    assert best_lag == 0
+    assert sweeps == [{"lag": 0, "r": pytest.approx(1.0)}]
 
 def test_compute_opportunity_logic():
     # Test compute_opportunity helper function directly
@@ -394,4 +542,3 @@ def test_source_health_volume_aware_status(mock_db):
         assert data["finnhub"]["baseline_per_hour"] is None
         # Problems (silent/stalled) are sorted to the top.
         assert response.json()[0]["status"] in ("silent", "stalled")
-

@@ -23,6 +23,7 @@ read -r -d '' SYMBOLS <<'JSON' || true
 {"symbol":"IREN","keywords":["Iris Energy","IREN Limited"],"future":"RTY=F","sector":"Crypto Mining","require_uppercase":false,"block_phrases":[],"is_active":true}
 {"symbol":"AVGO","keywords":["Broadcom","Hock Tan","VMware"],"future":"NQ=F","sector":"Semiconductors","require_uppercase":false,"block_phrases":[],"is_active":true}
 {"symbol":"GOOGL","keywords":["Google","Alphabet","Sundar Pichai","Waymo","YouTube"],"future":"NQ=F","sector":"Communication Services","require_uppercase":false,"block_phrases":["google it","googled","just google","google search"],"is_active":true}
+{"symbol":"SWYGX","keywords":[],"future":null,"sector":"AOA","require_uppercase":false,"require_cashtag":true,"block_phrases":[],"is_active":true}
 JSON
 
 fail=0

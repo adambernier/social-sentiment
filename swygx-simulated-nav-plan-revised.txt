@@ -1,0 +1,75 @@
+# SWYGX simulated NAV — revision after external plan review
+
+## Context
+
+The SWYGX simulated-NAV feature is **already implemented, deployed on the local stack, and verified live** (2026-07-08): `market-producer/synthetic_nav.py` + hooks in `market-producer/main.py`, SWYGX registered with `sector='AOA'`, 23 unit tests passing, official NAVs backfilled and intraday estimates flowing (`primary_delta` anchors to the prior official NAV exactly as designed). Production droplet deploy is still pending.
+
+An external review of the original plan (`plan_review.md`, Antigravity) made three recommendations. This document records the assessment and the resulting delta work. The original plan remains in `swygx-simulated-nav-plan.txt`.
+
+## Review assessment
+
+| Recommendation | Verdict |
+|---|---|
+| **A. UTC-crossover timezone bug** (evening ET vs UTC date mismatch) | Valid concern, **already handled in shipped code**: `maybe_run` converts `now_et = now_utc.astimezone(ET)`; all gates (`official_due`, `is_final_close`, `_upsert_official_rows`) operate on ET dates/times. No change. |
+| **C. Don't mark `_official_done_for` on stale-repeat deferral** | **Already implemented and tested**: the guard `continue`s before the done-marker; `tests/test_synthetic_nav.py::test_upsert_defers_exact_repeat_of_prior_close` asserts `_official_done_for is None`. No change. |
+| **B. DB-backed baseline instead of per-cycle Yahoo history fetch** | **Agreed — implement.** The estimate path currently fetches SWYGX's static 5d daily history every 5 min in-session (~78 redundant Yahoo calls/day) when yesterday's official NAV already sits in `stock_quotes` at a deterministic timestamp. DB-first halves the synthetic path's Yahoo usage and makes the baseline byte-identical to the reference row the dashboard delta uses. |
+| (mockup detail) Set `_next_run` only after the due-gates | **Adopt.** Idle cycles (overnight/weekends) do no I/O, so re-evaluating every 60s poll is free — and the runner then catches the 9:30 ET open within one poll instead of up to 5 min late. |
+
+## Changes
+
+### 1. `storage-service/db.py` — add a point-read for the baseline row
+
+New method following the existing reconnect-wrapper pattern (`insert_quote` → `_do_insert_quote`, db.py:189-209):
+
+```python
+QUOTE_PRICE_AT_SQL = "SELECT price FROM stock_quotes WHERE symbol = %s AND timestamp = %s"
+
+def quote_price_at(self, symbol: str, timestamp) -> float | None:
+    # public wrapper with OperationalError reconnect retry, like insert_quote
+def _do_quote_price_at(self, symbol, timestamp) -> float | None:
+    # cursor.execute + fetchone; row[0] or None
+```
+
+Indexed by the `(symbol, timestamp)` unique constraint — a cheap point query.
+
+### 2. `market-producer/synthetic_nav.py` — DB-first baseline in `maybe_run`
+
+Restructure the estimate path:
+
+1. Move `self._next_run = monotonic() + interval` to after the `estimate_due/official_due` gates (idle cycles re-check every poll; working cycles keep the 300s cadence).
+2. When `estimate_due`: compute `b_date = previous_trading_date(calendar, today_et)`; look up `db.quote_price_at(NAV_SYMBOL, official_close_timestamp(b_date))`.
+   - **Hit** → use as baseline; skip the Yahoo NAV-history fetch entirely for this cycle (only the batched proxy download runs).
+   - **Miss** (fresh DB, downtime, purge) → current behavior: fetch `fetch_official_navs()` from Yahoo, `_upsert_official_rows(...)` (this is also what preserves the after-downtime backfill), then derive the baseline via the existing `_baseline_from` validation.
+3. Evening official path unchanged — it must fetch Yahoo to discover the newly published NAV.
+4. Only official rows can occupy a 16:00 ET timestamp (the estimate path's `est_ts >= official_close_timestamp` guard already prevents collisions), so the point-read cannot return an estimate.
+
+Net effect: steady-state in-session cycles go from 2 Yahoo calls to 1; the SWYGX history fetch happens ~once per day (evening) plus once after any restart/downtime with an empty window.
+
+### 3. Tests
+
+- `tests/test_synthetic_nav.py`: add `maybe_run` coverage with monkeypatched fetchers — (a) DB hit → `fetch_official_navs` not called, estimate inserted off the DB price; (b) DB miss → Yahoo fallback path runs and backfills; (c) idle cycle does not consume the 300s throttle.
+- `tests/test_db.py` style: one test for `quote_price_at` (row present → float; absent → None) using the existing `mock_psycopg_connect` fixture.
+
+## Files
+
+| Action | Path |
+|---|---|
+| MODIFY | `storage-service/db.py` — `QUOTE_PRICE_AT_SQL` + `quote_price_at` |
+| MODIFY | `market-producer/synthetic_nav.py` — DB-first baseline, `_next_run` after gates |
+| MODIFY | `tests/test_synthetic_nav.py` — new `maybe_run` tests |
+| MODIFY | `tests/test_db.py` — `quote_price_at` test |
+
+No schema changes (read-only query on existing table/index). No API/UI changes.
+
+## Verification
+
+1. `.venv/bin/pytest` — full suite green.
+2. `docker compose build market-producer && docker compose up -d market-producer` (storage-service image also contains db.py but only market-producer calls the new method; rebuild storage-service too only if desired for image consistency).
+3. In-session log check: `docker compose logs -f market-producer | grep SYNTH` — estimates continue every ~5 min; confirm the SWYGX Yahoo history fetch no longer happens intraday (add/observe a one-line log on the fallback path, absent in steady state).
+4. Baseline-identity check: `primary_delta.reference_price` from `/api/stats/dashboard?symbol=SWYGX` equals the baseline printed in the `SYNTH SWYGX: est … (baseline …)` log line.
+5. Restart mid-session: first cycle logs the Yahoo fallback once (or a DB hit if rows exist), then steady state.
+6. Unchanged behaviors to spot-check: evening official NAV insert after ~18:15 ET; no rows on non-trading days.
+
+## Deferred / out of scope
+
+- Production droplet deploy + SWYGX registration there (tracked separately in project memory).

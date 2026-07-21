@@ -22,6 +22,7 @@ from shared.symbols import tickers, sector_map
 from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
 from storage_service.db import DB
 from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
+from synthetic_nav import SYNTHETIC_NAV_SYMBOLS, SyntheticNavRunner
 
 # Initialize market calendar
 nyse = mcal.get_calendar('NYSE')
@@ -308,7 +309,10 @@ def fetch_single_quote(symbol: str, now_utc: datetime) -> tuple[StockQuote | Non
 async def fetch_and_store(db: DB, limiter: AsyncRateLimiter, backoff_tracker: PerSymbolBackoff):
     now_utc = datetime.now(timezone.utc)
 
-    current_symbols = tickers() + all_polled_futures()
+    # Synthetic-NAV symbols (mutual funds) have no 1m bars; an empty fetch reads
+    # as a rate limit and would park them in permanent backoff, so they are
+    # handled solely by SyntheticNavRunner.
+    current_symbols = [s for s in tickers() if s not in SYNTHETIC_NAV_SYMBOLS] + all_polled_futures()
     # Skip symbols still in their own rate-limit cooldown so one throttled symbol
     # doesn't stall the rest. Each yfinance call is blocking, so run it in a worker
     # thread and shape the fan-out (concurrency cap + pacing) with the shared helper.
@@ -375,6 +379,7 @@ async def main():
 
     limiter = AsyncRateLimiter(max_rate=MARKET_RATE_PER_MIN, period=60.0)
     backoff_tracker = PerSymbolBackoff(base_interval=POLL_INTERVAL, max_backoff=MARKET_MAX_BACKOFF)
+    nav_runner = SyntheticNavRunner(db, limiter, backoff_tracker, nyse)
     last_metrics_update = 0.0
 
     while True:
@@ -384,6 +389,8 @@ async def main():
             last_metrics_update = now
 
         await fetch_and_store(db, limiter, backoff_tracker)
+        now_utc = datetime.now(timezone.utc)
+        await nav_runner.maybe_run(now_utc, get_market_session(now_utc))
         await asyncio.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":

@@ -1142,6 +1142,151 @@ async def get_dashboard(
                 "vix_delta": vix_delta
             }
 
+
+HOURLY_MARKET_QUERY = """
+    WITH hourly_closes AS (
+        SELECT
+            symbol,
+            date_trunc('hour', timestamp, 'UTC') AS bucket_hour,
+            (array_agg(price ORDER BY timestamp DESC))[1] AS close_price,
+            bool_or(market_session = 'regular') AS is_market_open
+        FROM stock_quotes
+        WHERE symbol = ANY(%s) AND timestamp >= %s
+        GROUP BY symbol, date_trunc('hour', timestamp, 'UTC')
+    ),
+    hourly_with_previous AS (
+        SELECT
+            symbol,
+            bucket_hour,
+            close_price,
+            is_market_open,
+            lag(bucket_hour) OVER (
+                PARTITION BY symbol ORDER BY bucket_hour
+            ) AS previous_hour,
+            lag(close_price) OVER (
+                PARTITION BY symbol ORDER BY bucket_hour
+            ) AS previous_close
+        FROM hourly_closes
+    )
+    SELECT
+        symbol,
+        bucket_hour,
+        close_price AS price,
+        CASE
+            WHEN previous_hour = bucket_hour - INTERVAL '1 hour'
+                 AND previous_close <> 0
+            THEN ((close_price - previous_close) / previous_close) * 100.0
+            ELSE NULL
+        END AS price_change,
+        is_market_open
+    FROM hourly_with_previous
+    ORDER BY symbol, bucket_hour
+"""
+
+
+def _hour_bucket_key(timestamp: datetime) -> str:
+    bucket_hour = timestamp.astimezone(timezone.utc).replace(
+        minute=0, second=0, microsecond=0
+    )
+    return bucket_hour.isoformat().replace("+00:00", "Z")
+
+
+def _apply_hourly_market_rows(
+    buckets: dict[str, dict],
+    hourly_rows: list[dict],
+    symbol: str,
+    primary_future_symbol: Optional[str],
+) -> list[dict]:
+    """Overlay database-resampled market rows and return target-symbol rows."""
+    market_data = sorted(
+        (row for row in hourly_rows if row['symbol'] == symbol),
+        key=lambda row: row['bucket_hour'],
+    )
+    future_market_data = sorted(
+        (
+            row
+            for row in hourly_rows
+            if primary_future_symbol and row['symbol'] == primary_future_symbol
+        ),
+        key=lambda row: row['bucket_hour'],
+    )
+
+    for row in market_data:
+        bucket = buckets.get(_hour_bucket_key(row['bucket_hour']))
+        if bucket is None:
+            continue
+        bucket['priceChange'] = row['price_change']
+        bucket['rawPrice'] = row['price']
+        bucket['isMarketOpen'] = row['is_market_open']
+
+    latest_future_price = (
+        future_market_data[-1]['price'] if future_market_data else None
+    )
+    for row in future_market_data:
+        bucket = buckets.get(_hour_bucket_key(row['bucket_hour']))
+        if bucket is None:
+            continue
+        bucket['futureChange'] = row['price_change']
+        if latest_future_price and latest_future_price != 0:
+            bucket['futurePct'] = (
+                (row['price'] - latest_future_price) / latest_future_price
+            ) * 100
+
+    return market_data
+
+
+def compute_lagged_correlation(
+    data: list[dict], max_lag: int = 5
+) -> tuple[float, int, list[dict]]:
+    """Calculate lag sweeps using only regular-session hourly returns."""
+
+    def pearson_r(sentiment_values, price_values):
+        n = len(sentiment_values)
+        if n < 4:
+            return 0.0
+        mean_sentiment = sum(sentiment_values) / n
+        mean_price = sum(price_values) / n
+        numerator = sum(
+            (sentiment - mean_sentiment) * (price - mean_price)
+            for sentiment, price in zip(sentiment_values, price_values)
+        )
+        sentiment_variance = sum(
+            (sentiment - mean_sentiment) ** 2 for sentiment in sentiment_values
+        )
+        price_variance = sum((price - mean_price) ** 2 for price in price_values)
+        denominator = (sentiment_variance * price_variance) ** 0.5
+        return numerator / denominator if denominator > 0 else 0.0
+
+    max_r = 0.0
+    best_lag = 0
+    lag_sweeps = []
+    for lag in range(-max_lag, max_lag + 1):
+        sentiment_values = []
+        price_values = []
+        for index, sentiment_bucket in enumerate(data):
+            price_index = index + lag
+            if not 0 <= price_index < len(data):
+                continue
+            price_bucket = data[price_index]
+            sentiment = sentiment_bucket['sentimentIndex']
+            price_change = price_bucket['priceChange']
+            if (
+                sentiment is not None
+                and price_change is not None
+                and price_bucket['isMarketOpen']
+            ):
+                sentiment_values.append(sentiment)
+                price_values.append(price_change)
+
+        correlation = pearson_r(sentiment_values, price_values)
+        lag_sweeps.append({"lag": lag, "r": correlation})
+        if abs(correlation) > abs(max_r):
+            max_r = correlation
+            best_lag = lag
+
+    return max_r, best_lag, lag_sweeps
+
+
 @app.get("/api/stats/correlation", response_model=CorrelationResponse)
 async def get_correlation(
     symbol: str,
@@ -1185,56 +1330,20 @@ async def get_correlation(
 
     async with get_db_conn() as conn:
         async with conn.cursor() as cur:
-            # 1. Fetch market quotes for target
-            # We query from 1 hour prior to cutoff to calculate hourly returns for the first hour of the window
+            # 1. Resample target and future quotes to UTC-hour closes in one query.
+            # The prior hour is included only to calculate the first in-window return.
             db_cutoff = cutoff - timedelta(hours=1)
-            market_query = """
-                SELECT timestamp, price, volume, market_session 
-                FROM stock_quotes 
-                WHERE symbol = %s AND timestamp >= %s
-                ORDER BY timestamp ASC
-            """
-            await cur.execute(market_query, [symbol, db_cutoff])
-            market_data = await cur.fetchall()
-            
-            # Chronological returns calculation (percentage change from previous hour)
-            market_data = sorted(market_data, key=lambda x: x['timestamp'])
-            for idx in range(1, len(market_data)):
-                prev_q = market_data[idx - 1]
-                curr_q = market_data[idx]
-                curr_ts = curr_q['timestamp'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-                curr_ts_str = curr_ts.isoformat().replace("+00:00", "Z")
-                if curr_ts_str in buckets:
-                    prev_price = prev_q['price']
-                    if prev_price and prev_price != 0:
-                        buckets[curr_ts_str]['priceChange'] = ((curr_q['price'] - prev_price) / prev_price) * 100
-                    else:
-                        buckets[curr_ts_str]['priceChange'] = 0.0
-                    buckets[curr_ts_str]['rawPrice'] = curr_q['price']
-                    buckets[curr_ts_str]['isMarketOpen'] = True
-
-            # 2. Fetch market quotes for primary future
-            if primary_future_symbol:
-                await cur.execute(market_query, [primary_future_symbol, db_cutoff])
-                future_market_data = await cur.fetchall()
-                future_market_data = sorted(future_market_data, key=lambda x: x['timestamp'])
-                # Anchor for the cumulative futures line: most recent future price.
-                latest_future_price = future_market_data[-1]['price'] if future_market_data else None
-                for idx in range(1, len(future_market_data)):
-                    prev_q = future_market_data[idx - 1]
-                    curr_q = future_market_data[idx]
-                    curr_ts = curr_q['timestamp'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-                    curr_ts_str = curr_ts.isoformat().replace("+00:00", "Z")
-                    if curr_ts_str in buckets:
-                        prev_price = prev_q['price']
-                        if prev_price and prev_price != 0:
-                            buckets[curr_ts_str]['futureChange'] = ((curr_q['price'] - prev_price) / prev_price) * 100
-                        else:
-                            buckets[curr_ts_str]['futureChange'] = 0.0
-                        # Cumulative % vs the latest future price, mirroring pricePct
-                        # so the futures overlay tracks the index trajectory.
-                        if latest_future_price and latest_future_price != 0:
-                            buckets[curr_ts_str]['futurePct'] = ((curr_q['price'] - latest_future_price) / latest_future_price) * 100
+            market_symbols = [symbol]
+            if primary_future_symbol and primary_future_symbol != symbol:
+                market_symbols.append(primary_future_symbol)
+            await cur.execute(HOURLY_MARKET_QUERY, [market_symbols, db_cutoff])
+            hourly_market_data = await cur.fetchall()
+            market_data = _apply_hourly_market_rows(
+                buckets,
+                hourly_market_data,
+                symbol,
+                primary_future_symbol,
+            )
 
             # 3. Load pre-aggregated data from hourly_sentiment_agg (cold tier).
             # This covers hours where raw posts may have been pruned.
@@ -1391,38 +1500,8 @@ async def get_correlation(
         sorted_data[i]['sentimentSignal'] = m['signal']
         sorted_data[i]['sentimentHist'] = m['hist']
 
-    # 6. Calculate Pearson Correlation
-    def pearson_r(s_list, p_list):
-        n = len(s_list)
-        if n < 4:
-            return 0.0
-        mean_s = sum(s_list) / n
-        mean_p = sum(p_list) / n
-        num = sum((s - mean_s) * (p - mean_p) for s, p in zip(s_list, p_list))
-        den_s = sum((s - mean_s) ** 2 for s in s_list)
-        den_p = sum((p - mean_p) ** 2 for p in p_list)
-        den = (den_s * den_p) ** 0.5
-        return num / den if den > 0 else 0.0
-
-    max_r = 0.0
-    best_lag = 0
-    lag_sweeps = []
-    for lag in range(-5, 6):
-        s_vals = []
-        p_vals = []
-        for i in range(len(sorted_data)):
-            p_idx = i + lag
-            if 0 <= p_idx < len(sorted_data):
-                s_val = sorted_data[i]['sentimentIndex']
-                p_val = sorted_data[p_idx]['priceChange']
-                if s_val is not None and p_val is not None:
-                    s_vals.append(s_val)
-                    p_vals.append(p_val)
-        r = pearson_r(s_vals, p_vals)
-        lag_sweeps.append({"lag": lag, "r": r})
-        if abs(r) > abs(max_r):
-            max_r = r
-            best_lag = lag
+    # 6. Calculate Pearson correlation from valid regular-session hourly returns.
+    max_r, best_lag, lag_sweeps = compute_lagged_correlation(sorted_data)
 
     # Correlation Strength & Text
     correlation_strength = "weak"

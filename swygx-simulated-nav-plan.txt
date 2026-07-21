@@ -1,0 +1,104 @@
+# Simulated intraday NAV for SWYGX in market-producer
+
+## Context
+
+SWYGX (Schwab Target 2060 Index Fund) is a fund-of-funds that only prices once daily (~6pm ET Yahoo publication). `/home/acbernier/realtime-nav/nav.py` already estimates its intraday NAV % change as a coverage-renormalized weighted average of daily % moves of 6 liquid proxy ETFs, but it's a manual stdout-only script. Goal: port that logic into the social-sentiment pipeline so SWYGX shows a live simulated price on the dashboard alongside tracked equities, anchored each day to the real prior-day NAV.
+
+**Decisions made with user:**
+- Computation lives inside the existing **market-producer** (no new service).
+- Simulated quotes go into `stock_quotes` with `market_session='regular'`, `volume=0` — zero API/UI changes needed (delta badge, live indicator, chart shading all key off `'regular'`). Inserts must be NYSE-calendar-gated: a `'regular'` row on a non-trading day would corrupt the leaderboard's global trading-day detection (`api-service/main.py:791-804`).
+- When Yahoo publishes the official NAV, insert it backdated to that session's **16:00 ET** (UTC-converted), also `'regular'`/`volume=0` — anchors deltas to real NAV and enables estimate-vs-actual comparison.
+- SWYGX registered in `tracked_symbols` with `sector='AOA'` (peer-baseline ETF convention), `require_cashtag=true` (post noise ~zero).
+
+## Files
+
+| Action | Path |
+|---|---|
+| CREATE | `market-producer/synthetic_nav.py` — ported estimator + runner |
+| MODIFY | `market-producer/main.py` — 3 hooks (import, fan-out skip, runner wiring) |
+| MODIFY | `scripts/add_symbols.sh` — add SWYGX payload |
+| CREATE | `tests/test_synthetic_nav.py` |
+| MODIFY | `pytest.ini` — add `market-producer` to `pythonpath` |
+
+No schema, db.py, shared/, api-service, UI, or docker-compose changes. No new dependencies (yfinance, pandas, pandas_market_calendars, zoneinfo all present in market-producer).
+
+## Step 1 — `market-producer/synthetic_nav.py`
+
+Constants:
+```python
+ET = ZoneInfo("America/New_York")
+NAV_SYMBOL = "SWYGX"
+SYNTHETIC_NAV_SYMBOLS = frozenset({NAV_SYMBOL})
+# Hand-maintained from the Schwab SWYGX fact sheet (glide path shifts over time)
+HOLDINGS = {"SCHB": ("SWTSX US Total Market", 0.55), "SCHF": ("SWISX Intl Developed", 0.27),
+            "SCHE": ("SFENX Emerging Markets", 0.08), "SCHZ": ("SWAGX US Agg Bond", 0.06),
+            "SCHP": ("SWRSX TIPS", 0.02), "SCHO": ("SWSBX Short-Term Treasury", 0.02)}
+MAX_PLAUSIBLE_MOVE = 8.0
+SYNTHETIC_NAV_INTERVAL = get_env_int("SYNTHETIC_NAV_INTERVAL", 300)  # 5 min cadence
+OFFICIAL_NAV_EARLIEST_ET = time(18, 15)  # trust a today-dated close only after this
+```
+Do **not** import `shared.symbols` here (DB connection + thread at import time breaks unit tests). Import yfinance lazily inside fetch functions.
+
+Pure functions (ported from `realtime-nav/nav.py`, testable without network):
+- `fetch_proxy_closes() -> pd.DataFrame` — port of `fetch_closes()`: one batched `yf.download(list(HOLDINGS), period="5d", interval="1d", auto_adjust=False, group_by="column", progress=False)["Close"]`; RuntimeError on empty.
+- `proxy_change(closes: pd.Series, session_date) -> float` — port of `change_for()` + one added guard: require last row's date == session_date (so a proxy missing today's bar raises instead of reading as 0%). Keeps prior-close lookup and the 8% raise.
+- `estimate_pct_change(closes: pd.DataFrame, session_date) -> float | None` — port of the aggregation: per-proxy pct × weight, renormalize over covered weights; failed proxies logged + skipped; None if nothing priced.
+- `fetch_official_navs() -> pd.Series` — `yf.Ticker(NAV_SYMBOL).history(period="5d", interval="1d", auto_adjust=False)["Close"]`. `auto_adjust=False` required: `Ticker.history()` defaults to True, which rewrites closes on distribution dates.
+- `is_final_close(d, now_et) -> bool` — d < today: final; d == today: only if now_et ≥ 18:15 ET (Yahoo can show a stale today-dated row intraday).
+- `official_close_timestamp(session_date) -> datetime` — 16:00 ET → UTC via zoneinfo (DST-safe).
+- `previous_trading_date(calendar, session_date)` — last trading date before session_date from `calendar.schedule`.
+
+`SyntheticNavRunner(db, limiter, backoff, calendar, interval)` with `async maybe_run(now_utc, session)`, called every poll cycle, self-throttled by monotonic `_next_run`:
+1. Skip unless interval elapsed and `NAV_SYMBOL` is due per the shared `PerSymbolBackoff`.
+2. `estimate_due = (session == 'regular')`; `official_due` = today is an NYSE trading day AND now ≥ 18:15 ET AND not already done today (`_official_done_for` date). Neither → return (zero Yahoo calls overnight/weekends/holidays).
+3. Fetch official NAVs via `await limiter.acquire()` + `asyncio.to_thread`. Any exception → `backoff.record(NAV_SYMBOL, True)`, `RATE_LIMITS_HIT_TOTAL.labels(platform="market").inc()`, log, return. Never insert on failure.
+4. **Official rows:** for each final, trading-day close in the 5d series: skip if day-over-day move > 8% (log); if today-dated and exactly equal to prior close, defer as possibly-stale (self-heals tomorrow when d < today); else `db.insert_quote(StockQuote(NAV_SYMBOL, official_close_timestamp(d), close, 0, 'regular'))` — ON CONFLICT idempotent, and the 5d window backfills after downtime.
+5. **Estimate (if `estimate_due`):** baseline = latest close dated before today; require it equals `previous_trading_date(...)` else skip (never compound a stale baseline). Fetch proxies (same error handling), `pct = estimate_pct_change(...)`; None → skip. `est_ts = now_utc` truncated to the minute; skip if `est_ts >= official_close_timestamp(today)` (an estimate stamped 16:00 would win the ON CONFLICT race against the official row). Insert `price = round(baseline * (1 + pct/100), 4)`, increment `POSTS_INGESTED_TOTAL`, log `SYNTH SWYGX: est +0.62% -> $XX.XX (baseline …)`.
+6. `backoff.record(NAV_SYMBOL, False)` on non-Yahoo-failure passes.
+
+Cadence 300s: 2 Yahoo calls per 5 min in-session, 1 per 5 min in the evening check window — negligible vs the existing 60s per-symbol fan-out, and both go through the shared `AsyncRateLimiter`.
+
+## Step 2 — Hooks in `market-producer/main.py`
+
+1. **Import** (after `sys.path.append`, main.py:16): `from synthetic_nav import SYNTHETIC_NAV_SYMBOLS, SyntheticNavRunner` (main.py runs as a script, so same-dir module import works).
+2. **Fan-out skip** (main.py:311):
+   ```python
+   current_symbols = [s for s in tickers() if s not in SYNTHETIC_NAV_SYMBOLS] + all_polled_futures()
+   ```
+   Required: mutual funds return empty 1m data, and `fetch_single_quote` treats empty as rate-limited (`return None, True`, main.py:276-279) — SWYGX would otherwise pollute `RATE_LIMITS_HIT_TOTAL` and sit in permanent exponential backoff. (Note: the docstring at main.py:255-257 claims empty → `(None, False)`; the code says otherwise — code wins.)
+3. **Runner wiring** in `main()`: after `backoff_tracker` (main.py:377) construct `nav_runner = SyntheticNavRunner(db, limiter, backoff_tracker, nyse)` (module-level `nyse` calendar, main.py:27); in the loop after `await fetch_and_store(...)` (main.py:386):
+   ```python
+   now_utc = datetime.now(timezone.utc)
+   await nav_runner.maybe_run(now_utc, get_market_session(now_utc))
+   ```
+   `get_market_session` (main.py:217+) already returns `'regular'` only inside NYSE trading-day hours — this is the calendar gate. Early-close days stop estimates at 13:00 ET automatically.
+4. **`fetch_and_store_metrics` — leave unchanged.** For SWYGX: defeatbeta likely errors → yfinance fallback (`history(period="1y")`) works for funds, `trailingPE` absent → existing None guard, sector baseline resolves to `AOA` via `sector_map()`. Graceful as-is.
+
+## Step 3 — Register SWYGX (runtime, AFTER deploy)
+
+Add to `scripts/add_symbols.sh` heredoc (or one-off curl to `POST /api/admin/symbols`):
+```json
+{"symbol":"SWYGX","keywords":[],"future":null,"sector":"AOA","require_uppercase":false,"require_cashtag":true,"block_phrases":[],"is_active":true}
+```
+**Ordering matters:** rebuild/deploy market-producer first — `shared/symbols.py` refreshes every 60s, so the old image would immediately 1m-poll SWYGX and trip backoff.
+
+## Step 4 — Tests
+
+- `pytest.ini`: `pythonpath = . preprocessing-service sentiment-service storage-service market-producer`.
+- `tests/test_synthetic_nav.py` (constructed pandas fixtures, MagicMock db, no network):
+  - `proxy_change`: normal pct; raises on stale last-row date, on >8% move, on insufficient history.
+  - `estimate_pct_change`: renormalization when one proxy skipped (e.g. SCHF missing → weighted/0.73); None when all fail.
+  - `is_final_close`: prior date final; same-day only ≥ 18:15 ET.
+  - `official_close_timestamp`: July → 20:00 UTC, January → 21:00 UTC.
+  - `_upsert_official_rows`: backdated inserts, skips non-trading dates, stale-repeat deferral, idempotent when insert returns False.
+
+## Verification
+
+1. `pytest tests/test_synthetic_nav.py -v` (or `./scripts/run_tests.sh`).
+2. `docker compose build market-producer && docker compose up -d market-producer`.
+3. Register SWYGX via `scripts/add_symbols.sh` (needs `ADMIN_API_KEY`).
+4. `docker compose logs -f market-producer | grep -i swygx` — expect `SYNTH SWYGX: est …` every ~5 min during regular hours; NO `Fetching SWYGX (Session: …)` lines (proves fan-out skip); backfilled official rows on first run.
+5. DB: `SELECT timestamp, price, volume, market_session FROM stock_quotes WHERE symbol='SWYGX' ORDER BY timestamp DESC LIMIT 20;` — 5-min spacing, volume=0, 'regular', prices within ~±2% of prior NAV; after ~6:15pm ET a 20:00 UTC (summer) row matching the published NAV.
+6. API: `/api/stats/market/latest?symbol=SWYGX`, `/api/stats/dashboard?symbol=SWYGX` — `primary_delta.reference_price` should equal the prior day's official 16:00 NAV (12h-lookback regular-session logic, api-service/main.py:1074-1096); leaderboard lists SWYGX with ~0 posts.
+7. Weekend/holiday: confirm no new SWYGX rows (protects leaderboard trading-day CTEs).
+8. After the hourly metrics cycle: `stock_metrics` row for SWYGX with beta/return vs AOA, `pe_ratio` NULL.
