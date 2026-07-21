@@ -30,7 +30,7 @@ def main():
         sys.exit(1)
 
     print("Fetching unclassified posts...")
-    query = "SELECT id, text FROM posts WHERE topic_label IS NULL ORDER BY timestamp DESC"
+    query = "SELECT post_pk, id, text FROM posts WHERE topic_label IS NULL ORDER BY timestamp DESC"
     if args.limit is not None:
         query += f" LIMIT {args.limit}"
 
@@ -54,7 +54,7 @@ def main():
     classified_count = 0
     start_time = time.time()
 
-    for idx, (post_id, text) in enumerate(rows, 1):
+    for idx, (post_pk, post_id, text) in enumerate(rows, 1):
         cleaned = clean_text(text)
         topic_id, topic_label = topic_model.predict(cleaned)
         
@@ -63,7 +63,7 @@ def main():
         else:
             classified_count += 1
 
-        updates.append((topic_label, topic_id, post_id))
+        updates.append((topic_label, topic_id, post_pk))
 
         if idx % 100 == 0 or idx == total_rows:
             elapsed = time.time() - start_time
@@ -72,15 +72,16 @@ def main():
 
     if args.dry_run:
         print("\n[DRY RUN] Classified results (first 20):")
-        for topic_label, topic_id, post_id in updates[:20]:
-            orig_text = next(r[1] for r in rows if r[0] == post_id)
+        for (topic_label, topic_id, _), (_, post_id, orig_text) in zip(
+            updates[:20], rows[:20]
+        ):
             print(f"  Post {post_id} -> {topic_label}: {orig_text[:100]}...")
         print(f"\n[DRY RUN] Done. Total processed: {total_rows}. Database was NOT modified.")
         conn.close()
         return
 
     print(f"\nWriting {total_rows} updates to database in batches of {args.batch_size}...")
-    update_query = "UPDATE posts SET topic_label = %s, topic_id = %s, scored_at = NOW() WHERE id = %s"
+    update_query = "UPDATE posts SET topic_label = %s, topic_id = %s, scored_at = NOW() WHERE post_pk = %s"
     
     try:
         with conn.cursor() as cur:

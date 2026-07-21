@@ -5,10 +5,19 @@ from datetime import datetime, timezone
 from shared.schemas import StockQuote, StockMetrics
 from db import (
     DB,
+    INSERT_POST_SQL,
     POST_RETENTION_ADVISORY_LOCK_KEY,
     ROLLUP_AND_PRUNE_POSTS_SQL,
     SCHEMA_APPLY_RETRIES,
 )
+
+
+def test_insert_post_conflict_scope_matches_source_identity():
+    sql = " ".join(INSERT_POST_SQL.lower().split())
+
+    assert "on conflict (platform, id, symbol) do nothing" in sql
+    assert "on conflict (id)" not in sql
+
 
 @pytest.fixture
 def mock_psycopg_connect():

@@ -38,7 +38,7 @@ POST_RETENTION_ADVISORY_LOCK_KEY = 4815162343
 INSERT_POST_SQL = """
     INSERT INTO posts (id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, engagement)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (id) DO NOTHING
+    ON CONFLICT (platform, id, symbol) DO NOTHING
     RETURNING id
 """
 
