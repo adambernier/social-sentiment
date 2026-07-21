@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import aio_pika
+from pydantic import ValidationError
 
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -20,6 +21,12 @@ from shared.config import (
 )
 from model import SentimentModel
 from shared.metrics import start_metrics_server, MESSAGES_PROCESSED_TOTAL
+from shared.messaging import (
+    dead_letter_message,
+    declare_dead_letter_queue,
+    requeue_unprocessed,
+    retry_or_dead_letter,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -30,6 +37,87 @@ logger = logging.getLogger("sentiment-service")
 
 BATCH_SIZE = 32
 BATCH_TIMEOUT = 1.0  # seconds
+
+
+async def process_batch(
+    batch_posts: list[CleanPost],
+    batch_messages: list[aio_pika.IncomingMessage],
+    model: SentimentModel,
+    channel: aio_pika.Channel,
+) -> None:
+    texts = [post.text for post in batch_posts]
+    try:
+        results = await asyncio.to_thread(model.predict_batch, texts)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"Sentiment inference failed for batch: {e}", exc_info=True)
+        for message in batch_messages:
+            await retry_or_dead_letter(message, channel, INPUT_QUEUE, e)
+        return
+
+    if len(results) != len(batch_posts):
+        error = RuntimeError(
+            "sentiment model returned "
+            f"{len(results)} results for {len(batch_posts)} posts"
+        )
+        logger.error(str(error))
+        for message in batch_messages:
+            await retry_or_dead_letter(message, channel, INPUT_QUEUE, error)
+        return
+
+    processed_count = 0
+    for post, (label, scores), message in zip(
+        batch_posts,
+        results,
+        batch_messages,
+    ):
+        try:
+            scored = ScoredPost(
+                **post.model_dump(),
+                sentiment=label,
+                scores=scores,
+            )
+        except ValidationError as e:
+            logger.error(
+                f"Invalid sentiment result for {post.id}; "
+                f"moving input to dead-letter queue: {e}"
+            )
+            await dead_letter_message(message, channel, INPUT_QUEUE, e)
+            continue
+
+        try:
+            await channel.default_exchange.publish(
+                aio_pika.Message(
+                    body=scored.model_dump_json().encode(),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
+                routing_key=OUTPUT_QUEUE,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            disposition = await retry_or_dead_letter(
+                message,
+                channel,
+                INPUT_QUEUE,
+                e,
+            )
+            logger.error(
+                f"Error publishing scored post {post.id}; {disposition}: {e}"
+            )
+            continue
+
+        # If acknowledgement fails, let the worker's outer error handler return
+        # any still-unprocessed inputs. The published duplicate is safe because
+        # storage ingestion is idempotent within (platform, id, symbol).
+        await message.ack()
+        processed_count += 1
+
+    if processed_count:
+        MESSAGES_PROCESSED_TOTAL.labels(service="sentiment").inc(
+            processed_count
+        )
 
 
 async def batch_worker(queue: asyncio.Queue, model: SentimentModel, channel: aio_pika.Channel):
@@ -60,27 +148,12 @@ async def batch_worker(queue: asyncio.Queue, model: SentimentModel, channel: aio
             # Flush batch if full or timeout reached
             if len(batch_posts) >= BATCH_SIZE or (batch_posts and (time.time() - last_flush >= BATCH_TIMEOUT)):
                 logger.info(f"Processing batch of {len(batch_posts)} posts...")
-                texts = [p.text for p in batch_posts]
-
-                # Run GPU/CPU bound inference in background thread executor
-                results = await asyncio.to_thread(model.predict_batch, texts)
-                
-                MESSAGES_PROCESSED_TOTAL.labels(service="sentiment").inc(len(batch_posts))
-
-                for post, (label, scores), message in zip(batch_posts, results, batch_messages):
-                    try:
-                        scored = ScoredPost(**post.model_dump(), sentiment=label, scores=scores)
-                        await channel.default_exchange.publish(
-                            aio_pika.Message(
-                                body=scored.model_dump_json().encode(),
-                                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                            ),
-                            routing_key=OUTPUT_QUEUE,
-                        )
-                        await message.ack()
-                    except Exception as e:
-                        logger.error(f"Error publishing/acking scored post {post.id}: {e}")
-                        await message.nack(requeue=False)
+                await process_batch(
+                    batch_posts,
+                    batch_messages,
+                    model,
+                    channel,
+                )
 
                 batch_posts = []
                 batch_messages = []
@@ -90,7 +163,7 @@ async def batch_worker(queue: asyncio.Queue, model: SentimentModel, channel: aio
             # Requeue any messages that are in the current batch if cancelled
             for message in batch_messages:
                 try:
-                    await message.nack(requeue=True)
+                    await requeue_unprocessed(message)
                 except Exception:
                     pass
             break
@@ -98,7 +171,7 @@ async def batch_worker(queue: asyncio.Queue, model: SentimentModel, channel: aio
             logger.error(f"Error in batch worker loop: {e}", exc_info=True)
             for message in batch_messages:
                 try:
-                    await message.nack(requeue=True)
+                    await requeue_unprocessed(message)
                 except Exception:
                     pass
             batch_posts = []
@@ -127,6 +200,7 @@ async def main():
 
                 await channel.declare_queue(INPUT_QUEUE, durable=True)
                 await channel.declare_queue(OUTPUT_QUEUE, durable=True)
+                await declare_dead_letter_queue(channel, INPUT_QUEUE)
 
                 # Start background batch worker
                 worker_task = asyncio.create_task(batch_worker(queue, model, channel))
@@ -141,9 +215,17 @@ async def main():
                             try:
                                 post = CleanPost.model_validate_json(message.body)
                                 await queue.put((message, post))
-                            except Exception as e:
-                                logger.error(f"Malformed message, dropping: {e}")
-                                await message.nack(requeue=False)
+                            except ValidationError as e:
+                                logger.error(
+                                    "Malformed message, moving to dead-letter "
+                                    f"queue: {e}"
+                                )
+                                await dead_letter_message(
+                                    message,
+                                    channel,
+                                    INPUT_QUEUE,
+                                    e,
+                                )
                 finally:
                     worker_task.cancel()
                     try:
@@ -155,7 +237,7 @@ async def main():
                     while not queue.empty():
                         try:
                             message, _ = queue.get_nowait()
-                            await message.nack(requeue=True)
+                            await requeue_unprocessed(message)
                         except Exception as e:
                             logger.error(f"Error nacking message during shutdown: {e}")
 

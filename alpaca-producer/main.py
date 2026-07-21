@@ -103,7 +103,10 @@ async def fetch_symbol_news(symbol: str, client: httpx.AsyncClient, channel: aio
             )
 
             await channel.default_exchange.publish(
-                aio_pika.Message(body=post.model_dump_json().encode()),
+                aio_pika.Message(
+                    body=post.model_dump_json().encode(),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
                 routing_key=QUEUE_RAW_POSTS,
             )
             seen_ids.add(post_id)

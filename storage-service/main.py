@@ -7,6 +7,7 @@ from pathlib import Path
 
 import aio_pika
 import psycopg
+from pydantic import ValidationError
 
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -21,6 +22,11 @@ from shared.config import (
 )
 from db import DB
 from shared.metrics import start_metrics_server, MESSAGES_PROCESSED_TOTAL
+from shared.messaging import (
+    dead_letter_message,
+    declare_dead_letter_queue,
+    requeue_unprocessed,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -77,7 +83,7 @@ async def db_writer_worker(queue: asyncio.Queue, db: DB):
                     # Requeue all messages in the batch
                     for message in batch_messages:
                         try:
-                            await message.nack(requeue=True)
+                            await requeue_unprocessed(message)
                         except Exception:
                             pass
 
@@ -89,7 +95,7 @@ async def db_writer_worker(queue: asyncio.Queue, db: DB):
             # Requeue any messages that are in the current batch if cancelled
             for message in batch_messages:
                 try:
-                    await message.nack(requeue=True)
+                    await requeue_unprocessed(message)
                 except Exception:
                     pass
             break
@@ -97,7 +103,7 @@ async def db_writer_worker(queue: asyncio.Queue, db: DB):
             logger.error(f"Error in database writer worker: {e}", exc_info=True)
             for message in batch_messages:
                 try:
-                    await message.nack(requeue=True)
+                    await requeue_unprocessed(message)
                 except Exception:
                     pass
             batch_posts = []
@@ -168,6 +174,7 @@ async def main():
                 await channel.set_qos(prefetch_count=BATCH_SIZE * 2)
 
                 await channel.declare_queue(INPUT_QUEUE, durable=True)
+                await declare_dead_letter_queue(channel, INPUT_QUEUE)
 
                 # Start the background batch database writer worker
                 worker_task = asyncio.create_task(db_writer_worker(queue, db))
@@ -183,9 +190,17 @@ async def main():
                             try:
                                 post = ScoredPost.model_validate_json(message.body)
                                 await queue.put((message, post))
-                            except Exception as e:
-                                logger.error(f"Malformed message, dropping: {e}")
-                                await message.nack(requeue=False)
+                            except ValidationError as e:
+                                logger.error(
+                                    "Malformed message, moving to dead-letter "
+                                    f"queue: {e}"
+                                )
+                                await dead_letter_message(
+                                    message,
+                                    channel,
+                                    INPUT_QUEUE,
+                                    e,
+                                )
                 finally:
                     worker_task.cancel()
                     scheduler_task.cancel()
@@ -202,7 +217,7 @@ async def main():
                     while not queue.empty():
                         try:
                             message, _ = queue.get_nowait()
-                            await message.nack(requeue=True)
+                            await requeue_unprocessed(message)
                         except Exception as e:
                             logger.error(f"Error nacking message during shutdown: {e}")
 

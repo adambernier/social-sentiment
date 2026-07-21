@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 import aio_pika
+from pydantic import ValidationError
 
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -20,6 +21,12 @@ from shared.config import (
 )
 from preprocess import clean_text, is_valid
 from shared.metrics import start_metrics_server, MESSAGES_PROCESSED_TOTAL
+from shared.messaging import (
+    dead_letter_message,
+    declare_dead_letter_queue,
+    requeue_unprocessed,
+    retry_or_dead_letter,
+)
 
 # Configure logger
 logging.basicConfig(
@@ -30,16 +37,18 @@ logger = logging.getLogger("preprocessing-service")
 
 
 async def process_message(message: aio_pika.IncomingMessage, topic_model: TopicModel, channel: aio_pika.Channel):
-    async with message.process():
-        try:
-            raw = RawPost.model_validate_json(message.body)
-        except Exception as e:
-            logger.error(f"Malformed message, dropping: {e}")
-            return
+    try:
+        raw = RawPost.model_validate_json(message.body)
+    except ValidationError as e:
+        logger.error(f"Malformed message, moving to dead-letter queue: {e}")
+        await dead_letter_message(message, channel, INPUT_QUEUE, e)
+        return
 
+    try:
         cleaned = clean_text(raw.text)
         if not is_valid(cleaned):
             logger.info(f"{raw.id}: dropped (too short after cleaning)")
+            await message.ack()
             return
 
         # Classify topic (offload CPU-bound inference to thread executor)
@@ -65,8 +74,22 @@ async def process_message(message: aio_pika.IncomingMessage, topic_model: TopicM
             ),
             routing_key=OUTPUT_QUEUE,
         )
-        MESSAGES_PROCESSED_TOTAL.labels(service="preprocessing").inc()
-        logger.info(f"{raw.id} ({raw.symbol}): topic='{topic_label}', text='{cleaned[:70]}'")
+    except asyncio.CancelledError:
+        await requeue_unprocessed(message)
+        raise
+    except Exception as e:
+        disposition = await retry_or_dead_letter(
+            message,
+            channel,
+            INPUT_QUEUE,
+            e,
+        )
+        logger.error(f"{raw.id}: processing failed; {disposition}: {e}")
+        return
+
+    await message.ack()
+    MESSAGES_PROCESSED_TOTAL.labels(service="preprocessing").inc()
+    logger.info(f"{raw.id} ({raw.symbol}): topic='{topic_label}', text='{cleaned[:70]}'")
 
 
 async def main():
@@ -89,6 +112,7 @@ async def main():
 
                 input_queue = await channel.declare_queue(INPUT_QUEUE, durable=True)
                 await channel.declare_queue(OUTPUT_QUEUE, durable=True)
+                await declare_dead_letter_queue(channel, INPUT_QUEUE)
 
                 logger.info(f"Listening on '{INPUT_QUEUE}'. Ready to consume...")
                 
