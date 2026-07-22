@@ -981,178 +981,299 @@ async def get_stock_metrics(symbol: str):
             await cur.execute(query, [symbol])
             return await cur.fetchone()
 
+
+DASHBOARD_MAX_MARKET_POINTS_PER_SYMBOL = 2200
+DASHBOARD_MARKET_BUCKET_MINUTES = (1, 5, 15, 30, 60, 120, 240)
+
+DASHBOARD_CONTENT_QUERY = """
+    WITH filtered_posts AS MATERIALIZED (
+        SELECT id, symbol, platform, text, timestamp, sentiment, scores,
+               topic_id, topic_label, scored_at, engagement
+        FROM posts
+        WHERE symbol = %s AND timestamp >= %s
+        {platform_filter}
+    ),
+    recent_posts AS (
+        SELECT *
+        FROM filtered_posts
+        ORDER BY timestamp DESC
+        LIMIT 1000
+    ),
+    sentiment_rows AS (
+        SELECT sentiment, COUNT(*) AS count
+        FROM filtered_posts
+        GROUP BY sentiment
+    ),
+    topic_rows AS (
+        SELECT topic_label, COUNT(*) AS count
+        FROM filtered_posts
+        GROUP BY topic_label
+    )
+    SELECT
+        COALESCE(
+            (SELECT jsonb_agg(to_jsonb(recent_posts) ORDER BY timestamp DESC)
+             FROM recent_posts),
+            '[]'::jsonb
+        ) AS posts,
+        COALESCE(
+            (SELECT jsonb_agg(to_jsonb(sentiment_rows) ORDER BY sentiment)
+             FROM sentiment_rows),
+            '[]'::jsonb
+        ) AS sentiment_stats,
+        COALESCE(
+            (SELECT jsonb_agg(to_jsonb(topic_rows) ORDER BY count DESC)
+             FROM topic_rows),
+            '[]'::jsonb
+        ) AS topic_stats
+"""
+
+DASHBOARD_MARKET_SERIES_QUERY = """
+    WITH bucketed_quotes AS MATERIALIZED (
+        SELECT
+            symbol,
+            timestamp,
+            price,
+            volume,
+            market_session,
+            date_bin(
+                %s * INTERVAL '1 minute',
+                timestamp,
+                TIMESTAMPTZ '1970-01-01 00:00:00+00'
+            ) AS bucket_start
+        FROM stock_quotes
+        WHERE symbol = ANY(%s) AND timestamp >= %s
+    ),
+    latest_by_bucket AS (
+        SELECT DISTINCT ON (symbol, bucket_start)
+            symbol, timestamp, price, volume, market_session
+        FROM bucketed_quotes
+        ORDER BY symbol, bucket_start, timestamp DESC
+    )
+    SELECT symbol, timestamp, price, volume, market_session
+    FROM latest_by_bucket
+    ORDER BY symbol, timestamp
+"""
+
+DASHBOARD_MARKET_SNAPSHOT_QUERY = """
+    WITH requested AS (
+        SELECT
+            symbol,
+            CASE
+                WHEN RIGHT(symbol, 2) = '=F' THEN 'futures_open'
+                ELSE 'regular'
+            END AS reference_session
+        FROM unnest(%s::text[]) AS requested_symbol(symbol)
+    )
+    SELECT
+        requested.symbol,
+        latest.timestamp AS latest_timestamp,
+        latest.price AS latest_price,
+        latest.volume AS latest_volume,
+        latest.market_session AS latest_market_session,
+        COALESCE(
+            previous_session.price,
+            latest_session.price,
+            oldest.price,
+            latest.price
+        ) AS reference_price,
+        metrics.symbol AS metrics_symbol,
+        metrics.pe_ratio,
+        metrics.beta,
+        metrics.avg_return_1y,
+        metrics.inflation_adj_return_1y,
+        metrics.pe_relative_sector,
+        metrics.beta_relative_sector,
+        metrics.return_relative_sector,
+        metrics.updated_at
+    FROM requested
+    LEFT JOIN LATERAL (
+        SELECT timestamp, price, volume, market_session
+        FROM stock_quotes
+        WHERE symbol = requested.symbol
+        ORDER BY timestamp DESC
+        LIMIT 1
+    ) AS latest ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT timestamp, price
+        FROM stock_quotes
+        WHERE symbol = requested.symbol
+          AND market_session = requested.reference_session
+        ORDER BY timestamp DESC
+        LIMIT 1
+    ) AS latest_session ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT price
+        FROM stock_quotes
+        WHERE symbol = requested.symbol
+          AND market_session = requested.reference_session
+          AND timestamp < latest_session.timestamp - INTERVAL '12 hours'
+        ORDER BY timestamp DESC
+        LIMIT 1
+    ) AS previous_session ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT price
+        FROM stock_quotes
+        WHERE symbol = requested.symbol
+        ORDER BY timestamp ASC
+        LIMIT 1
+    ) AS oldest ON latest_session.timestamp IS NULL
+    LEFT JOIN stock_metrics AS metrics ON metrics.symbol = requested.symbol
+"""
+
+
+def dashboard_market_bucket_minutes(hours: int) -> int:
+    """Choose the finest bucket that keeps each market series response bounded."""
+    for bucket_minutes in DASHBOARD_MARKET_BUCKET_MINUTES:
+        # Add one for an inclusive window that spans both endpoint buckets.
+        points = math.ceil(hours * 60 / bucket_minutes) + 1
+        if points <= DASHBOARD_MAX_MARKET_POINTS_PER_SYMBOL:
+            return bucket_minutes
+
+    return max(
+        DASHBOARD_MARKET_BUCKET_MINUTES[-1],
+        math.ceil(
+            hours * 60 / (DASHBOARD_MAX_MARKET_POINTS_PER_SYMBOL - 1)
+        ),
+    )
+
+
+def _dashboard_content_query(
+    symbol: str,
+    cutoff: datetime,
+    platform: Optional[str],
+) -> tuple[str, list]:
+    platform_filter = ""
+    params = [symbol, cutoff]
+    if platform:
+        platform_filter = "AND platform = %s"
+        params.append(platform)
+    return DASHBOARD_CONTENT_QUERY.format(platform_filter=platform_filter), params
+
+
+def _quote_from_snapshot(snapshot: Optional[dict]) -> Optional[dict]:
+    if not snapshot or snapshot.get("latest_timestamp") is None:
+        return None
+    return {
+        "symbol": snapshot["symbol"],
+        "timestamp": snapshot["latest_timestamp"],
+        "price": snapshot["latest_price"],
+        "volume": snapshot["latest_volume"],
+        "market_session": snapshot["latest_market_session"],
+    }
+
+
+def _delta_from_snapshot(snapshot: Optional[dict]) -> Optional[dict]:
+    if not snapshot or snapshot.get("latest_price") is None:
+        return None
+    reference_price = snapshot.get("reference_price")
+    if reference_price is None:
+        return None
+
+    latest_price = snapshot["latest_price"]
+    abs_change = latest_price - reference_price
+    pct_change = (
+        abs_change / reference_price * 100
+        if reference_price != 0
+        else 0.0
+    )
+    return {
+        "symbol": snapshot["symbol"],
+        "reference_price": reference_price,
+        "latest_price": latest_price,
+        "pct_change": pct_change,
+        "abs_change": abs_change,
+    }
+
+
+def _metrics_from_snapshot(snapshot: Optional[dict]) -> Optional[dict]:
+    if not snapshot or snapshot.get("metrics_symbol") is None:
+        return None
+    return {
+        "symbol": snapshot["metrics_symbol"],
+        "pe_ratio": snapshot["pe_ratio"],
+        "beta": snapshot["beta"],
+        "avg_return_1y": snapshot["avg_return_1y"],
+        "inflation_adj_return_1y": snapshot["inflation_adj_return_1y"],
+        "pe_relative_sector": snapshot["pe_relative_sector"],
+        "beta_relative_sector": snapshot["beta_relative_sector"],
+        "return_relative_sector": snapshot["return_relative_sector"],
+        "updated_at": snapshot["updated_at"],
+    }
+
+
 @app.get("/api/stats/dashboard", response_model=DashboardResponse)
 async def get_dashboard(
     symbol: str,
     hours: int = Query(24, gt=0, le=8760),
     platform: Optional[str] = None
 ):
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     futures_map = primary_futures_map()
     primary_future_symbol = futures_map.get(symbol)
-    vix_symbol = VIX_SYMBOL
-    
+    series_symbols = list(
+        dict.fromkeys(
+            [symbol]
+            + ([primary_future_symbol] if primary_future_symbol else [])
+        )
+    )
+    snapshot_symbols = list(dict.fromkeys(series_symbols + [VIX_SYMBOL]))
+
     async with get_db_conn() as conn:
         async with conn.cursor() as cur:
-            # Helper to run query and fetch all rows
-            async def run_query(q, p):
-                await cur.execute(q, p)
-                return await cur.fetchall()
-
-            # Helper to run query and fetch one row
-            async def run_query_one(q, p):
-                await cur.execute(q, p)
-                return await cur.fetchone()
-
-            # Time threshold for hourly stats and graphs
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-
-            # 1. Fetch posts matching symbol and optional platform, ordered by timestamp
-            posts_query = (
-                "SELECT id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, scored_at, engagement "
-                "FROM posts "
-                "WHERE symbol = %s AND timestamp >= %s"
+            content_query, content_params = _dashboard_content_query(
+                symbol,
+                cutoff,
+                platform,
             )
-            posts_params = [symbol, cutoff]
-            if platform:
-                posts_query += " AND platform = %s"
-                posts_params.append(platform)
-            posts_query += " ORDER BY timestamp DESC LIMIT 1000"
-            posts = await run_query(posts_query, posts_params)
+            await cur.execute(content_query, content_params)
+            content = await cur.fetchone() or {}
 
-            # 2. Fetch sentiment stats
-            sent_query = (
-                "SELECT sentiment, COUNT(*) as count "
-                "FROM posts "
-                "WHERE timestamp > %s AND symbol = %s"
+            await cur.execute(
+                DASHBOARD_MARKET_SERIES_QUERY,
+                [
+                    dashboard_market_bucket_minutes(hours),
+                    series_symbols,
+                    cutoff,
+                ],
             )
-            sent_params = [cutoff, symbol]
-            if platform:
-                sent_query += " AND platform = %s"
-                sent_params.append(platform)
-            sent_query += " GROUP BY sentiment"
-            sentiment_stats = await run_query(sent_query, sent_params)
+            series_rows = await cur.fetchall()
 
-            # 3. Fetch topic stats
-            topic_query = (
-                "SELECT topic_label, COUNT(*) as count "
-                "FROM posts "
-                "WHERE timestamp > %s AND symbol = %s"
+            await cur.execute(
+                DASHBOARD_MARKET_SNAPSHOT_QUERY,
+                [snapshot_symbols],
             )
-            topic_params = [cutoff, symbol]
-            if platform:
-                topic_query += " AND platform = %s"
-                topic_params.append(platform)
-            topic_query += " GROUP BY topic_label ORDER BY count DESC"
-            topic_stats = await run_query(topic_query, topic_params)
+            snapshot_rows = await cur.fetchall()
 
-            # 4. Fetch market data (quotes)
-            market_query = (
-                "SELECT symbol, timestamp, price, volume, market_session "
-                "FROM stock_quotes "
-                "WHERE symbol = %s AND timestamp > %s "
-                "ORDER BY timestamp ASC"
-            )
-            market_data = await run_query(market_query, [symbol, cutoff])
+    snapshots = {row["symbol"]: row for row in snapshot_rows}
+    primary_snapshot = snapshots.get(symbol)
+    future_snapshot = (
+        snapshots.get(primary_future_symbol)
+        if primary_future_symbol
+        else None
+    )
+    vix_snapshot = snapshots.get(VIX_SYMBOL)
 
-            # 5. Fetch latest quote for target
-            latest_quote = await run_query_one(
-                "SELECT symbol, timestamp, price, volume, market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
-                [symbol]
-            )
-
-            # 6. Fetch target metrics
-            metrics_data = await run_query_one(
-                "SELECT symbol, pe_ratio, beta, avg_return_1y, inflation_adj_return_1y, "
-                "       pe_relative_sector, beta_relative_sector, return_relative_sector, updated_at "
-                "FROM stock_metrics WHERE symbol = %s",
-                [symbol]
-            )
-
-            # Delta helper - change since previous close
-            async def get_delta_data(sym, ref_time=None):
-                await cur.execute(
-                    "SELECT timestamp, price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
-                    [sym]
-                )
-                latest = await cur.fetchone()
-                if not latest:
-                    return None
-                latest_price = latest['price']
-                latest_ts = latest['timestamp']
-
-                session_type = 'futures_open' if sym.endswith("=F") else 'regular'
-
-                # Get the last regular/open session quote
-                await cur.execute(
-                    "SELECT timestamp, price FROM stock_quotes WHERE symbol = %s AND market_session = %s ORDER BY timestamp DESC LIMIT 1",
-                    [sym, session_type]
-                )
-                latest_reg = await cur.fetchone()
-                if not latest_reg:
-                    # Fallback to oldest overall quote
-                    await cur.execute(
-                        "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp ASC LIMIT 1",
-                        [sym]
-                    )
-                    ref = await cur.fetchone()
-                    ref_price = ref['price'] if ref else latest_price
-                else:
-                    latest_reg_ts = latest_reg['timestamp']
-                    # Previous close is the last regular/open session quote before the current trading session day started (at least 12 hours prior)
-                    await cur.execute(
-                        "SELECT price FROM stock_quotes WHERE symbol = %s AND market_session = %s AND timestamp < %s - %s::interval ORDER BY timestamp DESC LIMIT 1",
-                        [sym, session_type, latest_reg_ts, timedelta(hours=12)]
-                    )
-                    ref = await cur.fetchone()
-                    ref_price = ref['price'] if ref else latest_reg['price']
-
-                abs_change = latest_price - ref_price
-                pct_change = (abs_change / ref_price * 100) if ref_price != 0 else 0.0
-                return {
-                    "symbol": sym,
-                    "reference_price": ref_price,
-                    "latest_price": latest_price,
-                    "pct_change": pct_change,
-                    "abs_change": abs_change
-                }
-
-            primary_delta = await get_delta_data(symbol, since)
-
-            # 7. Fetch primary future details if available
-            p_future_quote = None
-            p_future_delta = None
-            p_future_market_data = []
-            if primary_future_symbol:
-                p_future_quote = await run_query_one(
-                    "SELECT symbol, timestamp, price, volume, market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
-                    [primary_future_symbol]
-                )
-                p_future_delta = await get_delta_data(primary_future_symbol, since)
-                p_future_market_data = await run_query(market_query, [primary_future_symbol, cutoff])
-
-            # 8. Fetch VIX details
-            vix_quote = await run_query_one(
-                "SELECT symbol, timestamp, price, volume, market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
-                [vix_symbol]
-            )
-            vix_delta = await get_delta_data(vix_symbol, since)
-
-            return {
-                "sentiment_stats": sentiment_stats,
-                "topic_stats": topic_stats,
-                "posts": posts,
-                "market_data": market_data,
-                "latest_quote": latest_quote,
-                "metrics_data": metrics_data,
-                "primary_delta": primary_delta,
-                "primary_future_symbol": primary_future_symbol,
-                "primary_future_quote": p_future_quote,
-                "primary_future_delta": p_future_delta,
-                "primary_future_market_data": p_future_market_data,
-                "vix_quote": vix_quote,
-                "vix_delta": vix_delta
-            }
+    return {
+        "sentiment_stats": content.get("sentiment_stats", []),
+        "topic_stats": content.get("topic_stats", []),
+        "posts": content.get("posts", []),
+        "market_data": [
+            row for row in series_rows if row["symbol"] == symbol
+        ],
+        "latest_quote": _quote_from_snapshot(primary_snapshot),
+        "metrics_data": _metrics_from_snapshot(primary_snapshot),
+        "primary_delta": _delta_from_snapshot(primary_snapshot),
+        "primary_future_symbol": primary_future_symbol,
+        "primary_future_quote": _quote_from_snapshot(future_snapshot),
+        "primary_future_delta": _delta_from_snapshot(future_snapshot),
+        "primary_future_market_data": [
+            row
+            for row in series_rows
+            if primary_future_symbol and row["symbol"] == primary_future_symbol
+        ],
+        "vix_quote": _quote_from_snapshot(vix_snapshot),
+        "vix_delta": _delta_from_snapshot(vix_snapshot),
+    }
 
 
 HOURLY_MARKET_QUERY = """

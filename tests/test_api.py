@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import math
 import sys
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, AsyncMock, patch
@@ -121,6 +122,223 @@ def test_topic_stats_endpoint(mock_db):
         assert len(data) == 2
         assert data[0]["topic_label"] == "Earnings & Guidance"
         assert data[0]["count"] == 8
+
+
+@pytest.mark.parametrize(
+    ("hours", "expected_bucket_minutes"),
+    [
+        (1, 1),
+        (24, 1),
+        (36, 1),
+        (37, 5),
+        (168, 5),
+        (549, 15),
+        (550, 30),
+        (720, 30),
+        (2160, 60),
+        (8760, 240),
+    ],
+)
+def test_dashboard_market_bucket_size_bounds_response(
+    hours,
+    expected_bucket_minutes,
+):
+    bucket_minutes = api_main.dashboard_market_bucket_minutes(hours)
+
+    assert bucket_minutes == expected_bucket_minutes
+    assert math.ceil(hours * 60 / bucket_minutes) + 1 <= (
+        api_main.DASHBOARD_MAX_MARKET_POINTS_PER_SYMBOL
+    )
+
+
+def test_dashboard_queries_batch_and_downsample_data():
+    content_query = " ".join(api_main.DASHBOARD_CONTENT_QUERY.lower().split())
+    series_query = " ".join(
+        api_main.DASHBOARD_MARKET_SERIES_QUERY.lower().split()
+    )
+    snapshot_query = " ".join(
+        api_main.DASHBOARD_MARKET_SNAPSHOT_QUERY.lower().split()
+    )
+
+    assert content_query.count("from posts") == 1
+    assert "filtered_posts as materialized" in content_query
+    assert "from filtered_posts" in content_query
+    assert "date_bin(" in series_query
+    assert "distinct on (symbol, bucket_start)" in series_query
+    assert "symbol = any(%s)" in series_query
+    assert snapshot_query.count("left join lateral") == 4
+    assert "from unnest(%s::text[])" in snapshot_query
+    assert "left join stock_metrics" in snapshot_query
+
+
+@pytest.mark.asyncio
+async def test_dashboard_batches_queries_and_preserves_response_contract(
+    mock_db,
+):
+    now = datetime(2026, 7, 22, 16, 0, tzinfo=timezone.utc)
+    content = {
+        "posts": [
+            {
+                "id": "post-1",
+                "symbol": "NVDA",
+                "platform": "reddit",
+                "text": "NVDA earnings",
+                "timestamp": now,
+                "sentiment": "positive",
+                "scores": {"positive": 0.9},
+                "topic_id": 1,
+                "topic_label": "Earnings & Guidance",
+                "scored_at": now,
+                "engagement": 4,
+            }
+        ],
+        "sentiment_stats": [{"sentiment": "positive", "count": 1}],
+        "topic_stats": [
+            {"topic_label": "Earnings & Guidance", "count": 1}
+        ],
+    }
+    series_rows = [
+        {
+            "symbol": "NVDA",
+            "timestamp": now - timedelta(minutes=5),
+            "price": 109.0,
+            "volume": 1000,
+            "market_session": "regular",
+        },
+        {
+            "symbol": "NQ=F",
+            "timestamp": now - timedelta(minutes=5),
+            "price": 204.0,
+            "volume": 2000,
+            "market_session": "futures_open",
+        },
+    ]
+    snapshots = [
+        {
+            "symbol": "NVDA",
+            "latest_timestamp": now,
+            "latest_price": 110.0,
+            "latest_volume": 1100,
+            "latest_market_session": "regular",
+            "reference_price": 100.0,
+            "metrics_symbol": "NVDA",
+            "pe_ratio": 25.0,
+            "beta": 1.2,
+            "avg_return_1y": 0.3,
+            "inflation_adj_return_1y": 0.27,
+            "pe_relative_sector": -0.1,
+            "beta_relative_sector": -0.2,
+            "return_relative_sector": 0.4,
+            "updated_at": now,
+        },
+        {
+            "symbol": "NQ=F",
+            "latest_timestamp": now,
+            "latest_price": 205.0,
+            "latest_volume": 2100,
+            "latest_market_session": "futures_open",
+            "reference_price": 200.0,
+            "metrics_symbol": None,
+        },
+        {
+            "symbol": api_main.VIX_SYMBOL,
+            "latest_timestamp": now,
+            "latest_price": 18.0,
+            "latest_volume": 500,
+            "latest_market_session": "regular",
+            "reference_price": 17.0,
+            "metrics_symbol": None,
+        },
+    ]
+    mock_db.fetchone = AsyncMock(return_value=content)
+    mock_db.fetchall = AsyncMock(side_effect=[series_rows, snapshots])
+
+    with patch.object(
+        api_main,
+        "primary_futures_map",
+        return_value={"NVDA": "NQ=F"},
+    ):
+        response = await api_main.get_dashboard(
+            symbol="NVDA",
+            hours=168,
+            platform="reddit",
+        )
+
+    validated = api_main.DashboardResponse.model_validate(response)
+    assert validated.posts[0].id == "post-1"
+    assert [quote.symbol for quote in validated.market_data] == ["NVDA"]
+    assert [quote.symbol for quote in validated.primary_future_market_data] == [
+        "NQ=F"
+    ]
+    assert validated.latest_quote.price == 110.0
+    assert validated.primary_delta.pct_change == pytest.approx(10.0)
+    assert validated.primary_future_delta.pct_change == pytest.approx(2.5)
+    assert validated.vix_quote.price == 18.0
+    assert validated.metrics_data.symbol == "NVDA"
+
+    assert mock_db.execute.await_count == 3
+    content_call, series_call, snapshot_call = mock_db.execute.call_args_list
+    assert "AND platform = %s" in content_call.args[0]
+    assert content_call.args[1][0] == "NVDA"
+    assert content_call.args[1][2] == "reddit"
+    assert series_call.args[0] == api_main.DASHBOARD_MARKET_SERIES_QUERY
+    assert series_call.args[1][0] == 5
+    assert series_call.args[1][1] == ["NVDA", "NQ=F"]
+    assert series_call.args[1][2] == content_call.args[1][1]
+    assert snapshot_call.args == (
+        api_main.DASHBOARD_MARKET_SNAPSHOT_QUERY,
+        [["NVDA", "NQ=F", api_main.VIX_SYMBOL]],
+    )
+
+
+@pytest.mark.asyncio
+async def test_dashboard_without_future_keeps_nullable_contract(mock_db):
+    mock_db.fetchone = AsyncMock(
+        return_value={"posts": [], "sentiment_stats": [], "topic_stats": []}
+    )
+    mock_db.fetchall = AsyncMock(
+        side_effect=[
+            [],
+            [
+                {
+                    "symbol": "NVDA",
+                    "latest_timestamp": None,
+                    "latest_price": None,
+                    "metrics_symbol": None,
+                },
+                {
+                    "symbol": api_main.VIX_SYMBOL,
+                    "latest_timestamp": None,
+                    "latest_price": None,
+                    "metrics_symbol": None,
+                },
+            ],
+        ]
+    )
+
+    with patch.object(api_main, "primary_futures_map", return_value={}):
+        response = await api_main.get_dashboard(
+            symbol="NVDA",
+            hours=24,
+            platform=None,
+        )
+
+    validated = api_main.DashboardResponse.model_validate(response)
+    assert validated.primary_future_symbol is None
+    assert validated.primary_future_quote is None
+    assert validated.primary_future_delta is None
+    assert validated.primary_future_market_data == []
+    assert validated.latest_quote is None
+    assert validated.primary_delta is None
+    assert validated.vix_quote is None
+    assert validated.metrics_data is None
+
+    content_call, series_call, snapshot_call = mock_db.execute.call_args_list
+    assert "AND platform = %s" not in content_call.args[0]
+    assert content_call.args[1][0] == "NVDA"
+    assert len(content_call.args[1]) == 2
+    assert series_call.args[1][1] == ["NVDA"]
+    assert snapshot_call.args[1] == [["NVDA", api_main.VIX_SYMBOL]]
 
 def test_leaderboard_endpoint(mock_db):
     # The endpoint runs a single query and returns the rows as-is; the SQL itself
