@@ -1,9 +1,29 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Post, SentimentStat, TopicStat, LeaderboardEntry,
   MarketQuote, DeltaData, MetricsData, CorrelationData, SourceHealth
 } from '../types';
 import { isNewsPlatform } from '../dashboard/constants';
+import { requestJson, startCompletionScheduledPolling } from './polling.mjs';
+
+const API_BASE = '/api';
+const POLL_INTERVAL_MS = 60_000;
+const QUOTE_STALE_MS = 15 * 60 * 1000;
+
+interface DashboardPayload {
+  posts?: Post[];
+  sentiment_stats?: SentimentStat[];
+  topic_stats?: TopicStat[];
+  market_data?: MarketQuote[];
+  metrics_data?: MetricsData | null;
+  latest_quote?: MarketQuote | null;
+  primary_delta?: DeltaData | null;
+  primary_future_symbol?: string | null;
+  primary_future_quote?: MarketQuote | null;
+  primary_future_delta?: DeltaData | null;
+  primary_future_market_data?: MarketQuote[];
+  vix_quote?: MarketQuote | null;
+}
 
 export function useDashboardData() {
   const [symbol, setSymbol] = useState("SMH");
@@ -19,16 +39,20 @@ export function useDashboardData() {
   const [drillDownPosts, setDrillDownPosts] = useState<Post[]>([]);
   const [isDrillDownLoading, setIsDrillDownLoading] = useState(false);
   const [hasHydrated, setHasHydrated] = useState(false);
+  const hasSetDefaultHoursRef = useRef(false);
+  const [clockNow, setClockNow] = useState(0);
   
   // Persist symbol across reloads
   useEffect(() => {
-    if (typeof window !== 'undefined') {
+    const hydrateTimer = window.setTimeout(() => {
       const savedSymbol = localStorage.getItem('social_sentiment_symbol');
       if (savedSymbol) {
         setSymbol(savedSymbol);
       }
       setHasHydrated(true);
-    }
+    }, 0);
+
+    return () => window.clearTimeout(hydrateTimer);
   }, []);
 
   useEffect(() => {
@@ -61,70 +85,125 @@ export function useDashboardData() {
     opportunity: null
   });
 
-  const apiBase = '/api';
-
   const wsBase = typeof window !== 'undefined' 
     ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api` 
     : 'ws://localhost:3000/api';
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
+    return startCompletionScheduledPolling(
+      async (signal) => {
+        const observedAt = Date.now();
+        setClockNow(observedAt);
         const platformParam = platform !== 'all' ? `&platform=${platform}` : '';
-        const topicParam = selectedTopic !== 'all' ? `&topic=${encodeURIComponent(selectedTopic)}` : '';
-        const [dashRes, corrRes, leaderRes, sourcesRes] = await Promise.all([
-          fetch(`${apiBase}/stats/dashboard?symbol=${symbol}&hours=${hours}${platformParam}`),
-          fetch(`${apiBase}/stats/correlation?symbol=${symbol}&hours=${hours}${platformParam}${topicParam}`),
-          fetch(`${apiBase}/stats/leaderboard`),
-          fetch(`${apiBase}/stats/sources`)
-        ]);
-        
-        let currentLeaderboard = [];
-        if (leaderRes.ok) {
-          currentLeaderboard = await leaderRes.json();
-          setLeaderboard(currentLeaderboard);
-        }
+        const data = await requestJson<DashboardPayload>(
+          `${API_BASE}/stats/dashboard?symbol=${symbol}&hours=${hours}${platformParam}`,
+          signal,
+        );
+        if (!data) return;
 
-        // Auto-switch away from default 'SMH' if it's not active
-        if (currentLeaderboard.length > 0) {
-          const symbolExists = currentLeaderboard.find((l: any) => l.symbol === symbol);
-          if (!symbolExists && symbol === "SMH") {
-            setSymbol(currentLeaderboard[0].symbol);
-            return; // Abort this fetch and let the symbol change trigger a new one
+        setPosts(data.posts ?? []);
+        setSentimentStats(data.sentiment_stats ?? []);
+        setTopicStats(data.topic_stats ?? []);
+        setMarketData(data.market_data ?? []);
+        setMetrics(data.metrics_data ?? null);
+
+        const currentLatestQuote = data.latest_quote ?? null;
+        setLatestQuote(currentLatestQuote);
+        setPrimaryDelta(data.primary_delta ?? null);
+        setFutureSymbol(data.primary_future_symbol ?? null);
+        setFutureQuote(data.primary_future_quote ?? null);
+        setFutureDelta(data.primary_future_delta ?? null);
+        setFutureMarketData(data.primary_future_market_data ?? []);
+        setVixQuote(data.vix_quote ?? null);
+
+        if (!hasSetDefaultHoursRef.current) {
+          hasSetDefaultHoursRef.current = true;
+          setHasSetDefaultHours(true);
+
+          const quoteIsStale = currentLatestQuote
+            ? observedAt - new Date(currentLatestQuote.timestamp).getTime() >= QUOTE_STALE_MS
+            : false;
+          if (
+            currentLatestQuote &&
+            (currentLatestQuote.market_session !== 'regular' || quoteIsStale)
+          ) {
+            setHours(168);
           }
         }
+      },
+      {
+        intervalMs: POLL_INTERVAL_MS,
+        onError: (error) => console.error('Failed to fetch dashboard data', error),
+      },
+    );
+  }, [symbol, hours, platform]);
 
-        if (dashRes.ok) {
-          const data = await dashRes.json();
-          setPosts(data.posts || []);
-          setSentimentStats(data.sentiment_stats || []);
-          setTopicStats(data.topic_stats || []);
-          setMarketData(data.market_data || []);
-          setMetrics(data.metrics_data || null);
-          setLatestQuote(data.latest_quote || null);
-          setPrimaryDelta(data.primary_delta || null);
-          setFutureSymbol(data.primary_future_symbol || null);
-          setFutureQuote(data.primary_future_quote || null);
-          setFutureDelta(data.primary_future_delta || null);
-          setFutureMarketData(data.primary_future_market_data || []);
-          setVixQuote(data.vix_quote || null);
+  useEffect(() => {
+    return startCompletionScheduledPolling(
+      async (signal) => {
+        const platformParam = platform !== 'all' ? `&platform=${platform}` : '';
+        const topicParam = selectedTopic !== 'all'
+          ? `&topic=${encodeURIComponent(selectedTopic)}`
+          : '';
+        const data = await requestJson<CorrelationData>(
+          `${API_BASE}/stats/correlation?symbol=${symbol}&hours=${hours}${platformParam}${topicParam}`,
+          signal,
+        );
+        if (data) {
+          setCorrelationData(data);
         }
-        if (corrRes.ok) {
-          const corrData = await corrRes.json();
-          setCorrelationData(corrData);
+      },
+      {
+        intervalMs: POLL_INTERVAL_MS,
+        onError: (error) => console.error('Failed to fetch correlation data', error),
+      },
+    );
+  }, [symbol, hours, platform, selectedTopic]);
+
+  useEffect(() => {
+    return startCompletionScheduledPolling(
+      async (signal) => {
+        const [leaderboardResult, sourcesResult] = await Promise.allSettled([
+          requestJson<LeaderboardEntry[]>(`${API_BASE}/stats/leaderboard`, signal),
+          requestJson<SourceHealth[]>(`${API_BASE}/stats/sources`, signal),
+        ]);
+        if (signal.aborted) return;
+
+        if (leaderboardResult.status === 'fulfilled') {
+          const currentLeaderboard = leaderboardResult.value;
+          if (currentLeaderboard) {
+            setLeaderboard(currentLeaderboard);
+
+            // Auto-switch away from the default if it is not currently active.
+            if (currentLeaderboard.length > 0) {
+              setSymbol((currentSymbol) => {
+                const symbolExists = currentLeaderboard.some(
+                  (entry) => entry.symbol === currentSymbol,
+                );
+                return currentSymbol === 'SMH' && !symbolExists
+                  ? currentLeaderboard[0].symbol
+                  : currentSymbol;
+              });
+            }
+          }
+        } else {
+          console.error('Failed to fetch leaderboard data', leaderboardResult.reason);
         }
-        if (sourcesRes.ok) {
-          setSourceHealth(await sourcesRes.json());
+
+        if (sourcesResult.status === 'fulfilled') {
+          if (sourcesResult.value) {
+            setSourceHealth(sourcesResult.value);
+          }
+        } else {
+          console.error('Failed to fetch source health data', sourcesResult.reason);
         }
-      } catch (err) {
-        console.error("Failed to fetch dashboard data", err);
-      }
-    };
-    
-    fetchData();
-    const intervalId = setInterval(fetchData, 60000);
-    return () => clearInterval(intervalId);
-  }, [symbol, hours, platform, selectedTopic, apiBase]);
+      },
+      {
+        intervalMs: POLL_INTERVAL_MS,
+        onError: (error) => console.error('Failed to fetch global dashboard data', error),
+      },
+    );
+  }, []);
 
   useEffect(() => {
     const ws = new WebSocket(`${wsBase}/stats/stream`);
@@ -149,47 +228,53 @@ export function useDashboardData() {
             });
           }
         }
-      } catch (err) {}
+      } catch (error) {
+        console.error('Failed to process dashboard stream message', error);
+      }
     };
     return () => ws.close();
   }, [symbol, platform, wsBase]);
 
   useEffect(() => {
     if (!selectedHour) {
-      setDrillDownPosts([]);
-      setIsDrillDownLoading(false);
-      return;
+      const resetTimer = window.setTimeout(() => {
+        setDrillDownPosts([]);
+        setIsDrillDownLoading(false);
+      }, 0);
+      return () => window.clearTimeout(resetTimer);
     }
+
+    const controller = new AbortController();
     const fetchDrillDown = async () => {
       setIsDrillDownLoading(true);
       try {
         const platformParam = platform !== 'all' ? `&platform=${platform}` : '';
         const topicParam = selectedTopic !== 'all' ? `&topic=${encodeURIComponent(selectedTopic)}` : '';
-        const res = await fetch(`${apiBase}/stats/posts?symbol=${symbol}&hour=${selectedHour}${platformParam}${topicParam}`);
-        if (res.ok) {
-          setDrillDownPosts(await res.json());
+        const data = await requestJson<Post[]>(
+          `${API_BASE}/stats/posts?symbol=${symbol}&hour=${selectedHour}${platformParam}${topicParam}`,
+          controller.signal,
+        );
+        if (data) {
+          setDrillDownPosts(data);
         }
-      } catch (err) {
-        console.error(err);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error('Failed to fetch drill-down posts', error);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsDrillDownLoading(false);
+        }
       }
-      setIsDrillDownLoading(false);
     };
-    fetchDrillDown();
-  }, [symbol, selectedHour, platform, selectedTopic, apiBase]);
+    void fetchDrillDown();
 
-  const QUOTE_STALE_MS = 15 * 60 * 1000;
+    return () => controller.abort();
+  }, [symbol, selectedHour, platform, selectedTopic]);
+
   const latestQuoteFresh = latestQuote 
-    ? Date.now() - new Date(latestQuote.timestamp).getTime() < QUOTE_STALE_MS
+    ? clockNow - new Date(latestQuote.timestamp).getTime() < QUOTE_STALE_MS
     : false;
-
-  useEffect(() => {
-    if (!hasSetDefaultHours && latestQuote !== undefined) {
-      if (latestQuote && (latestQuote.market_session !== 'regular' || !latestQuoteFresh)) {
-        setHours(168);
-      }
-      setHasSetDefaultHours(true);
-    }
-  }, [latestQuote, hasSetDefaultHours, latestQuoteFresh]);
 
   const totalMentions = sentimentStats.reduce((sum, s) => sum + s.count, 0);
   const bullishCount = sentimentStats.find(s => s.sentiment === "positive")?.count || 0;
