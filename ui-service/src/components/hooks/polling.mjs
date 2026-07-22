@@ -22,6 +22,71 @@ export async function requestJson(url, signal, fetcher = fetch) {
   return signal.aborted ? null : data;
 }
 
+export function createLatestRequestRunner() {
+  let activeController;
+
+  return {
+    async run(task) {
+      activeController?.abort();
+      const controller = new AbortController();
+      activeController = controller;
+
+      try {
+        const result = await task(controller.signal);
+        return activeController === controller && !controller.signal.aborted
+          ? result
+          : undefined;
+      } catch (error) {
+        if (
+          activeController !== controller ||
+          controller.signal.aborted ||
+          isAbortError(error)
+        ) {
+          return undefined;
+        }
+        throw error;
+      } finally {
+        if (activeController === controller) {
+          activeController = undefined;
+        }
+      }
+    },
+    cancel() {
+      activeController?.abort();
+      activeController = undefined;
+    },
+  };
+}
+
+export function createAbortableRequestGroup() {
+  const activeControllers = new Set();
+
+  return {
+    async run(task) {
+      const controller = new AbortController();
+      activeControllers.add(controller);
+
+      try {
+        const result = await task(controller.signal);
+        return controller.signal.aborted ? undefined : result;
+      } catch (error) {
+        if (controller.signal.aborted || isAbortError(error)) {
+          return undefined;
+        }
+        throw error;
+      } finally {
+        activeControllers.delete(controller);
+      }
+    },
+    cancelAll() {
+      for (const controller of activeControllers) {
+        controller.abort();
+      }
+      activeControllers.clear();
+    },
+  };
+}
+
 export function startCompletionScheduledPolling(
   task,
   { intervalMs, onError, scheduler = defaultScheduler },

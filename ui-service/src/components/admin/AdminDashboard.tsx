@@ -1,11 +1,20 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { ShieldAlert, Plus, Edit2, Trash2, Power, PowerOff, Save, X, ArrowLeft, Activity } from "lucide-react";
 import { cn } from "../dashboard/utils";
 import Link from "next/link";
 import { SourceHealth } from "../types";
 import SourceHealthPanel from "../dashboard/SourceHealthPanel";
+import {
+  createAbortableRequestGroup,
+  createLatestRequestRunner,
+  requestJson,
+  startCompletionScheduledPolling,
+} from "../hooks/polling.mjs";
+
+const ADMIN_API_KEY_STORAGE = "ADMIN_API_KEY";
+const HEALTH_POLL_INTERVAL_MS = 30_000;
 
 interface TrackedSymbol {
   symbol: string;
@@ -24,6 +33,8 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [apiKey, setApiKey] = useState("");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [symbolRequests] = useState(() => createLatestRequestRunner());
+  const [mutationRequests] = useState(() => createAbortableRequestGroup());
   
   // Modal state
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -32,58 +43,92 @@ export default function AdminDashboard() {
   const [rawKeywords, setRawKeywords] = useState("");
   const [rawBlockPhrases, setRawBlockPhrases] = useState("");
 
-  const fetchHealth = async () => {
-    try {
-      const res = await fetch("/api/stats/sources");
-      if (res.ok) {
-        const data = await res.json();
-        setSourceHealth(data);
-      }
-    } catch (err) {
-      console.error("Error fetching source health", err);
-    }
-  };
-
-  useEffect(() => {
-    const storedKey = localStorage.getItem("ADMIN_API_KEY");
-    if (storedKey) {
-      setApiKey(storedKey);
-      fetchSymbols(storedKey);
-    } else {
-      setLoading(false);
-    }
-    
-    // Initial fetch
-    fetchHealth();
-    // Poll every 30 seconds
-    const interval = setInterval(fetchHealth, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchSymbols = async (key: string) => {
+  const fetchSymbols = useCallback(async (key: string) => {
     setLoading(true);
     try {
-      const res = await fetch("/api/admin/symbols", {
-        headers: { "X-API-Key": key },
+      const result = await symbolRequests.run(async (signal) => {
+        const response = await fetch("/api/admin/symbols", {
+          headers: { "X-API-Key": key },
+          signal,
+        });
+        if (response.status === 403) {
+          return { status: "forbidden" as const };
+        }
+        if (!response.ok) {
+          throw new Error(`Symbol request failed with status ${response.status}`);
+        }
+
+        return {
+          status: "success" as const,
+          symbols: (await response.json()) as TrackedSymbol[],
+        };
       });
-      if (res.status === 403) {
+      if (!result) return;
+
+      if (result.status === "forbidden") {
         setIsAuthenticated(false);
-        localStorage.removeItem("ADMIN_API_KEY");
-      } else if (res.ok) {
-        const data = await res.json();
-        setSymbols(data);
+        localStorage.removeItem(ADMIN_API_KEY_STORAGE);
+      } else {
+        setSymbols(result.symbols);
         setIsAuthenticated(true);
-        localStorage.setItem("ADMIN_API_KEY", key);
+        localStorage.setItem(ADMIN_API_KEY_STORAGE, key);
       }
-    } catch (err) {
-      console.error(err);
+      setLoading(false);
+    } catch (error) {
+      console.error("Error fetching tracked symbols", error);
+      setLoading(false);
     }
-    setLoading(false);
-  };
+  }, [symbolRequests]);
+
+  useEffect(() => {
+    const hydrationTimer = window.setTimeout(() => {
+      const storedKey = localStorage.getItem(ADMIN_API_KEY_STORAGE);
+      if (storedKey) {
+        setApiKey(storedKey);
+        void fetchSymbols(storedKey);
+      } else {
+        setLoading(false);
+      }
+    }, 0);
+
+    return () => {
+      window.clearTimeout(hydrationTimer);
+      symbolRequests.cancel();
+      mutationRequests.cancelAll();
+    };
+  }, [fetchSymbols, mutationRequests, symbolRequests]);
+
+  useEffect(() => {
+    return startCompletionScheduledPolling(
+      async (signal) => {
+        const data = await requestJson<SourceHealth[]>(
+          "/api/stats/sources",
+          signal,
+        );
+        if (data) {
+          setSourceHealth(data);
+        }
+      },
+      {
+        intervalMs: HEALTH_POLL_INTERVAL_MS,
+        onError: (error) => console.error("Error fetching source health", error),
+      },
+    );
+  }, []);
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    fetchSymbols(apiKey);
+    void fetchSymbols(apiKey);
+  };
+
+  const handleLogout = () => {
+    symbolRequests.cancel();
+    mutationRequests.cancelAll();
+    localStorage.removeItem(ADMIN_API_KEY_STORAGE);
+    setSymbols([]);
+    setIsAuthenticated(false);
+    setApiKey("");
+    setLoading(false);
   };
 
   const openModal = (symbol?: TrackedSymbol) => {
@@ -121,18 +166,22 @@ export default function AdminDashboard() {
     };
 
     try {
-      const res = await fetch(url, {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          "X-API-Key": apiKey
-        },
-        body: JSON.stringify(payload)
-      });
+      const res = await mutationRequests.run((signal) =>
+        fetch(url, {
+          method,
+          headers: {
+            "Content-Type": "application/json",
+            "X-API-Key": apiKey
+          },
+          body: JSON.stringify(payload),
+          signal,
+        }),
+      );
+      if (!res) return;
       
       if (res.ok) {
         setIsModalOpen(false);
-        fetchSymbols(apiKey);
+        await fetchSymbols(apiKey);
       } else {
         alert("Failed to save symbol");
       }
@@ -143,12 +192,21 @@ export default function AdminDashboard() {
 
   const toggleActive = async (symbol: TrackedSymbol) => {
     try {
-      await fetch(`/api/admin/symbols/${symbol.symbol}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
-        body: JSON.stringify({ ...symbol, is_active: !symbol.is_active })
-      });
-      fetchSymbols(apiKey);
+      const res = await mutationRequests.run((signal) =>
+        fetch(`/api/admin/symbols/${symbol.symbol}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
+          body: JSON.stringify({ ...symbol, is_active: !symbol.is_active }),
+          signal,
+        }),
+      );
+      if (!res) return;
+
+      if (res.ok) {
+        await fetchSymbols(apiKey);
+      } else {
+        console.error(`Failed to update ${symbol.symbol}: ${res.status}`);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -157,11 +215,20 @@ export default function AdminDashboard() {
   const deleteSymbol = async (symbolStr: string) => {
     if (!confirm("Are you sure you want to disable this symbol?")) return;
     try {
-      await fetch(`/api/admin/symbols/${symbolStr}`, {
-        method: "DELETE",
-        headers: { "X-API-Key": apiKey },
-      });
-      fetchSymbols(apiKey);
+      const res = await mutationRequests.run((signal) =>
+        fetch(`/api/admin/symbols/${symbolStr}`, {
+          method: "DELETE",
+          headers: { "X-API-Key": apiKey },
+          signal,
+        }),
+      );
+      if (!res) return;
+
+      if (res.ok) {
+        await fetchSymbols(apiKey);
+      } else {
+        console.error(`Failed to delete ${symbolStr}: ${res.status}`);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -228,11 +295,7 @@ export default function AdminDashboard() {
             <Activity className="w-4 h-4" /> Grafana
           </a>
           <button
-            onClick={() => {
-              localStorage.removeItem("ADMIN_API_KEY");
-              setIsAuthenticated(false);
-              setApiKey("");
-            }}
+            onClick={handleLogout}
             className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2.5 rounded-xl font-semibold transition-colors border border-white/5"
             title="Log out of Admin Panel"
           >
