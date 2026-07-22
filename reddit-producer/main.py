@@ -2,8 +2,7 @@ import asyncio
 import logging
 import sys
 import os
-import re
-import html
+import random
 from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
@@ -26,6 +25,7 @@ from shared.config import (
 from shared.schemas import RawPost
 from shared.symbols import keywords_map, match_symbol, run_with_symbol_registry
 from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
+from shared.polling import PollOutcome, PollStatus
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,100 +41,185 @@ SUBREDDITS = (
 FEED_URL = f"https://www.reddit.com/r/{SUBREDDITS}/comments.json?limit=100"
 POLL_INTERVAL = get_env_int("REDDIT_POLL_INTERVAL", 900)
 MAX_BACKOFF = get_env_int("REDDIT_MAX_BACKOFF", 3600)
+TRANSIENT_RETRY_INTERVAL = get_env_int("REDDIT_TRANSIENT_RETRY_INTERVAL", 60)
+TRANSIENT_RETRY_JITTER = get_env_int("REDDIT_TRANSIENT_RETRY_JITTER", 15)
 
 # Global deque for ID-based deduplication
 seen_ids = deque(maxlen=2000)
 
-async def fetch_and_process(client: httpx.AsyncClient, channel: aio_pika.Channel) -> tuple[bool, int]:
+
+def parse_retry_after(value: str | None) -> int | None:
+    try:
+        seconds = int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def next_poll_delay(
+    outcome: PollOutcome,
+    current_backoff: float,
+    *,
+    jitter_seconds: float | None = None,
+) -> float:
+    if outcome.status is PollStatus.RATE_LIMITED:
+        if outcome.retry_after_seconds is not None:
+            return min(float(outcome.retry_after_seconds), float(MAX_BACKOFF))
+        return min(current_backoff * 2, float(MAX_BACKOFF))
+
+    if outcome.status is PollStatus.BLOCKED:
+        return min(current_backoff * 2, float(MAX_BACKOFF))
+
+    if outcome.status is PollStatus.TRANSIENT_ERROR:
+        retry_interval = min(
+            float(POLL_INTERVAL),
+            max(1.0, float(TRANSIENT_RETRY_INTERVAL)),
+        )
+        max_jitter = min(
+            max(0.0, float(TRANSIENT_RETRY_JITTER)),
+            max(0.0, float(POLL_INTERVAL) - retry_interval),
+        )
+        jitter = (
+            random.uniform(0.0, max_jitter)
+            if jitter_seconds is None
+            else min(max(0.0, jitter_seconds), max_jitter)
+        )
+        return retry_interval + jitter
+
+    return float(POLL_INTERVAL)
+
+
+async def fetch_and_process(
+    client: httpx.AsyncClient,
+    channel: aio_pika.Channel,
+    processed_ids: deque[str] | None = None,
+) -> PollOutcome:
+    if processed_ids is None:
+        processed_ids = seen_ids
+
     try:
         logger.info(f"Fetching RSS feed: {FEED_URL}")
         resp = await client.get(FEED_URL, timeout=15)
-        
-        if resp.status_code == 403:
-            # 403 = unauthenticated .json blocked / proxy IP flagged. Return 0 so
-            # the caller escalates backoff (doubles, up to MAX_BACKOFF) instead of
-            # re-poking a blocked IP every POLL_INTERVAL, which keeps it flagged.
-            logger.error("Reddit 403 Blocked (unauthenticated .json or flagged IP). Escalating backoff.")
-            return True, 0
-        elif resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", 60))
-            logger.warning(f"Reddit 429 Rate Limited. Retry-After header: {retry_after}s.")
-            return True, retry_after
-        elif resp.status_code != 200:
-            logger.error(f"Reddit JSON error: HTTP {resp.status_code}")
-            return True, 0
+    except httpx.RequestError as error:
+        logger.error("Transient Reddit request error: %s", error)
+        return PollOutcome(PollStatus.TRANSIENT_ERROR)
 
+    if resp.status_code == 403:
+        logger.error(
+            "Reddit 403 blocked (unauthenticated JSON or flagged IP); "
+            "escalating blocked-provider backoff."
+        )
+        return PollOutcome(PollStatus.BLOCKED)
+    if resp.status_code == 429:
+        retry_after = parse_retry_after(resp.headers.get("Retry-After"))
+        logger.warning(
+            "Reddit 429 rate limited; Retry-After=%s",
+            retry_after if retry_after is not None else "unavailable",
+        )
+        return PollOutcome(PollStatus.RATE_LIMITED, retry_after)
+    if 500 <= resp.status_code < 600:
+        logger.error("Transient Reddit server error: HTTP %s", resp.status_code)
+        return PollOutcome(PollStatus.TRANSIENT_ERROR)
+    if resp.status_code != 200:
+        logger.error("Reddit request failed: HTTP %s", resp.status_code)
+        return PollOutcome(PollStatus.ERROR)
+
+    try:
         data = resp.json()
-        children = data.get("data", {}).get("children", [])
-        
-        kw_map = keywords_map()
-        new_posts_count = 0
-        total_entries = len(children)
-        unseen_count = 0
-        matched_symbols = set()
+    except (TypeError, ValueError) as error:
+        logger.error("Invalid Reddit JSON response: %s", error)
+        return PollOutcome(PollStatus.TRANSIENT_ERROR)
 
-        for child in children:
-            comment = child.get("data", {})
-            
-            # 1. Extract ID and Dedup
-            post_id = comment.get("id", "")
-            if not post_id:
+    if not isinstance(data, dict):
+        logger.error("Invalid Reddit response root: expected an object")
+        return PollOutcome(PollStatus.TRANSIENT_ERROR)
+    response_data = data.get("data", {})
+    if not isinstance(response_data, dict):
+        logger.error("Invalid Reddit response data: expected an object")
+        return PollOutcome(PollStatus.TRANSIENT_ERROR)
+    children = response_data.get("children", [])
+    if not isinstance(children, list):
+        logger.error("Invalid Reddit response children: expected a list")
+        return PollOutcome(PollStatus.TRANSIENT_ERROR)
+
+    kw_map = keywords_map()
+    new_posts_count = 0
+    total_entries = len(children)
+    unseen_count = 0
+    matched_symbols = set()
+
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        comment = child.get("data", {})
+        if not isinstance(comment, dict):
+            continue
+
+        raw_post_id = comment.get("id", "")
+        if not isinstance(raw_post_id, (str, int)) or not raw_post_id:
+            continue
+        post_id = str(raw_post_id)
+        if post_id in processed_ids:
+            continue
+
+        unseen_count += 1
+        body = comment.get("body", "")
+        if not isinstance(body, str) or not body:
+            processed_ids.append(post_id)
+            continue
+
+        created_utc = comment.get("created_utc")
+        try:
+            timestamp = (
+                datetime.fromtimestamp(created_utc, tz=timezone.utc)
+                if created_utc is not None
+                else datetime.now(timezone.utc)
+            )
+        except (OSError, OverflowError, TypeError, ValueError):
+            timestamp = datetime.now(timezone.utc)
+
+        try:
+            engagement = max(1, int(comment.get("score", 1)))
+        except (TypeError, ValueError):
+            engagement = 1
+
+        for symbol in kw_map:
+            if not match_symbol(body, symbol):
                 continue
-            
-            if post_id in seen_ids:
-                continue
-            
-            unseen_count += 1
-            # Add to seen_ids immediately
-            seen_ids.append(post_id)
 
-            # 2. Build Searchable Text
-            body = comment.get("body", "")
-            if not body:
-                continue
-                
-            haystack = body
-            
-            # 3. Keyword Match
-            for symbol in kw_map.keys():
-                if match_symbol(haystack, symbol):
-                    # 4. Publish
-                    created_utc = comment.get("created_utc")
-                    ts = datetime.fromtimestamp(created_utc, tz=timezone.utc) if created_utc else datetime.now(timezone.utc)
-                    
-                    engagement = max(1, int(comment.get("score", 1)))
-                    
-                    raw_post = RawPost(
-                        id=f"rd_{post_id}",
-                        symbol=symbol,
-                        platform="reddit",
-                        text=body.strip()[:2000],
-                        timestamp=ts,
-                        engagement=engagement,
-                    )
+            raw_post = RawPost(
+                id=f"rd_{post_id}",
+                symbol=symbol,
+                platform="reddit",
+                text=body.strip()[:2000],
+                timestamp=timestamp,
+                engagement=engagement,
+            )
+            await channel.default_exchange.publish(
+                aio_pika.Message(
+                    body=raw_post.model_dump_json().encode(),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
+                routing_key=QUEUE_RAW_POSTS,
+            )
+            POSTS_INGESTED_TOTAL.labels(platform="reddit", symbol=symbol).inc()
+            new_posts_count += 1
+            matched_symbols.add(symbol)
 
-                    await channel.default_exchange.publish(
-                        aio_pika.Message(
-                            body=raw_post.model_dump_json().encode(),
-                            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                        ),
-                        routing_key=QUEUE_RAW_POSTS,
-                    )
-                    
-                    POSTS_INGESTED_TOTAL.labels(platform="reddit", symbol=symbol).inc()
-                    new_posts_count += 1
-                    matched_symbols.add(symbol)
+        # Advance only after every matching publication succeeds. A broker
+        # failure leaves the ID eligible for retry after reconnection.
+        processed_ids.append(post_id)
 
-        if new_posts_count > 0:
-            logger.info(f"Cycle complete. Published {new_posts_count} new Reddit comments across {len(matched_symbols)} symbols. (Feed: {total_entries}, New: {unseen_count})")
-        else:
-            logger.info(f"Cycle complete. No new matches. (Feed: {total_entries}, New: {unseen_count})")
-            
-        return False, 0
+    logger.info(
+        "Cycle complete. Published %d new Reddit comments across %d symbols. "
+        "(Feed: %d, New: %d)",
+        new_posts_count,
+        len(matched_symbols),
+        total_entries,
+        unseen_count,
+    )
+    return PollOutcome(PollStatus.SUCCESS)
 
-    except Exception as e:
-        logger.error(f"Error in fetch_and_process: {e}", exc_info=True)
-        return True, 0
 
 async def main():
     logger.info("Starting Reddit RSS Producer...")
@@ -171,26 +256,49 @@ async def main():
                 async with httpx.AsyncClient(headers={"User-Agent": REDDIT_USER_AGENT}, proxy=proxy_url) as client:
                     backoff = POLL_INTERVAL
                     while True:
-                        rate_limited, requested_backoff = await fetch_and_process(client, channel)
-                        
-                        if rate_limited:
-                            RATE_LIMITS_HIT_TOTAL.labels(platform="reddit").inc()
-                            if requested_backoff > 0:
-                                backoff = min(requested_backoff, MAX_BACKOFF)
-                            else:
-                                backoff = min(backoff * 2, MAX_BACKOFF)
-                            logger.warning(f"Rate limited by Reddit. Backing off for {backoff}s.")
-                        else:
-                            if backoff != POLL_INTERVAL:
-                                logger.info("Requests succeeding again; resetting poll interval.")
-                            backoff = POLL_INTERVAL
+                        outcome = await fetch_and_process(client, channel)
+                        previous_backoff = backoff
 
-                        logger.info(f"Batch complete. Sleeping for {backoff} seconds...")
+                        if outcome.status is PollStatus.RATE_LIMITED:
+                            RATE_LIMITS_HIT_TOTAL.labels(platform="reddit").inc()
+                        backoff = next_poll_delay(outcome, backoff)
+
+                        if outcome.status is PollStatus.RATE_LIMITED:
+                            logger.warning(
+                                "Rate limited by Reddit. Backing off for %.1fs.",
+                                backoff,
+                            )
+                        elif outcome.status is PollStatus.BLOCKED:
+                            logger.warning(
+                                "Reddit access is blocked. Backing off for %.1fs.",
+                                backoff,
+                            )
+                        elif outcome.status is PollStatus.TRANSIENT_ERROR:
+                            logger.warning(
+                                "Transient Reddit failure. Retrying in %.1fs.",
+                                backoff,
+                            )
+                        elif (
+                            outcome.status is PollStatus.SUCCESS
+                            and previous_backoff != POLL_INTERVAL
+                        ):
+                            logger.info(
+                                "Requests succeeding again; resetting poll interval."
+                            )
+
+                        logger.info(
+                            "Batch complete. Sleeping for %.1f seconds...",
+                            backoff,
+                        )
                         await asyncio.sleep(backoff)
 
         except Exception as e:
-            logger.error(f"RabbitMQ connection error: {e}. Retrying in 10s...")
+            logger.error(
+                "Reddit producer connection or publish error: %s. Retrying in 10s...",
+                e,
+            )
             await asyncio.sleep(10)
+
 
 async def service_main():
     await run_with_symbol_registry(main)

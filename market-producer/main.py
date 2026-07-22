@@ -20,6 +20,7 @@ from shared.config import get_env_int
 from shared.futures import get_futures_session, all_polled_futures
 from shared.symbols import run_with_symbol_registry, sector_map, tickers
 from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
+from shared.polling import PollStatus
 from storage_service.db import DB
 from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 from synthetic_nav import SYNTHETIC_NAV_SYMBOLS, SyntheticNavRunner
@@ -249,13 +250,14 @@ def get_market_session(now_utc: datetime) -> str:
         return 'closed'
 
 
-def fetch_single_quote(symbol: str, now_utc: datetime) -> tuple[StockQuote | None, bool]:
+def fetch_single_quote(
+    symbol: str,
+    now_utc: datetime,
+) -> tuple[StockQuote | None, PollStatus]:
     """Fetch the latest quote for one symbol.
 
-    Returns ``(quote_or_None, was_rate_limited)``. The flag drives per-symbol
-    backoff: only a genuine Yahoo rate-limit (``YFRateLimitError``) counts —
-    empty data or other errors return ``(None, False)`` so a quiet or closed
-    symbol isn't penalized as though it were throttled.
+    Returns the quote, when present, and an explicit polling status. Only a
+    genuine Yahoo rate-limit (``YFRateLimitError``) drives per-symbol backoff.
     """
     try:
         # Determine session based on instrument type
@@ -267,7 +269,7 @@ def fetch_single_quote(symbol: str, now_utc: datetime) -> tuple[StockQuote | Non
         # Skip fetching from yfinance if the market/futures session is closed or on break
         if current_session in ("closed", "futures_closed", "futures_break"):
             print(f"Skipping fetch for {symbol} (Session: {current_session} is closed/inactive)")
-            return None, False
+            return None, PollStatus.NO_DATA
 
         print(f"Fetching {symbol} (Session: {current_session})...")
         ticker = yf.Ticker(symbol)
@@ -276,8 +278,7 @@ def fetch_single_quote(symbol: str, now_utc: datetime) -> tuple[StockQuote | Non
 
         if data.empty:
             print(f"Warning: No data returned for {symbol}")
-            # Treat empty data as potential rate limit/block to trigger backoff
-            return None, True
+            return None, PollStatus.NO_DATA
 
         latest = data.iloc[-1]
         # Convert pandas Timestamp to UTC datetime
@@ -296,22 +297,20 @@ def fetch_single_quote(symbol: str, now_utc: datetime) -> tuple[StockQuote | Non
             price=float(latest["Close"]),
             volume=daily_volume,
             market_session=current_session
-        ), False
+        ), PollStatus.SUCCESS
     except YFRateLimitError as e:
         print(f"RATE LIMITED by Yahoo fetching {symbol}: {e}")
-        return None, True
+        return None, PollStatus.RATE_LIMITED
     except Exception as e:
         print(f"ERROR fetching {symbol}: {e}")
-        # Treat general exceptions (like 403 Forbidden, connection errors) as rate limit/block to trigger backoff
-        return None, True
+        return None, PollStatus.TRANSIENT_ERROR
 
 
 async def fetch_and_store(db: DB, limiter: AsyncRateLimiter, backoff_tracker: PerSymbolBackoff):
     now_utc = datetime.now(timezone.utc)
 
-    # Synthetic-NAV symbols (mutual funds) have no 1m bars; an empty fetch reads
-    # as a rate limit and would park them in permanent backoff, so they are
-    # handled solely by SyntheticNavRunner.
+    # Synthetic-NAV symbols (mutual funds) have no meaningful 1m bars, so they
+    # are handled solely by SyntheticNavRunner.
     current_symbols = [s for s in tickers() if s not in SYNTHETIC_NAV_SYMBOLS] + all_polled_futures()
     # Skip symbols still in their own rate-limit cooldown so one throttled symbol
     # doesn't stall the rest. Each yfinance call is blocking, so run it in a worker
@@ -325,9 +324,10 @@ async def fetch_and_store(db: DB, limiter: AsyncRateLimiter, backoff_tracker: Pe
     )
 
     # Write to database sequentially to prevent concurrent psycopg connection issues
-    for sym, (quote, was_limited) in zip(due, results):
-        backoff_tracker.record(sym, was_limited)
-        if was_limited:
+    for sym, (quote, status) in zip(due, results):
+        was_rate_limited = status is PollStatus.RATE_LIMITED
+        backoff_tracker.record(sym, was_rate_limited)
+        if was_rate_limited:
             RATE_LIMITS_HIT_TOTAL.labels(platform="market").inc()
             continue
         if quote is None:
