@@ -1,7 +1,7 @@
 import React from "react";
 import { Zap } from "lucide-react";
 import { cn } from "./utils";
-import { DashboardDataProps } from "../types";
+import type { DashboardDataProps } from "../hooks/useDashboardData";
 
 export default function TickerActivity({ state, setters }: DashboardDataProps) {
   const { leaderboard, symbol } = state;
@@ -18,7 +18,7 @@ export default function TickerActivity({ state, setters }: DashboardDataProps) {
         </h3>
       </div>
       <div className="flex gap-2 overflow-x-auto pb-1">
-        {leaderboard.map((item: any) => {
+        {leaderboard.map((item) => {
           const active = symbol === item.symbol;
           const si = item.sentiment_index_4h;
           const z = item.buzz_z;

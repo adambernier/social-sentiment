@@ -1,9 +1,43 @@
 import React from "react";
-import { ComposedChart, ReferenceArea, XAxis, YAxis, Tooltip, Bar, Area, Line, ReferenceLine, ResponsiveContainer, CartesianGrid, Cell } from "recharts";
+import {
+  ComposedChart,
+  ReferenceArea,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Bar,
+  Area,
+  Line,
+  ReferenceLine,
+  ResponsiveContainer,
+  CartesianGrid,
+  Cell,
+  type TooltipContentProps,
+  type TooltipValueType,
+} from "recharts";
 import { BarChart2 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "./utils";
-import { DashboardDataProps } from "../types";
+import type { CorrelationBucket } from "../types";
+import type { DashboardDataProps } from "../hooks/useDashboardData";
+
+interface DisplayCorrelationBucket extends CorrelationBucket {
+  positiveCount: number;
+  neutralCount: number;
+  negativeCount: number;
+}
+
+interface OpportunityDotProps {
+  cx?: number;
+  cy?: number;
+  payload?: CorrelationBucket;
+  value?: unknown;
+}
+
+type CorrelationTooltipProps = TooltipContentProps<
+  TooltipValueType,
+  string | number
+>;
 
 // A buy signal fires wherever the algo score clears its threshold; the marker's
 // GLYPH (not its color) reports how that signal turned out, so it never reads as
@@ -12,7 +46,7 @@ import { DashboardDataProps } from "../types";
 //   up-arrow (sky)    = good    -> price rose after the signal (profitable)
 //   down-arrow (amber)= bad     -> price dropped (false signal)
 //   dot (slate)       = pending -> not enough forward data yet (pulses)
-const CustomizedOpportunityDot = (props: any) => {
+const CustomizedOpportunityDot = (props: OpportunityDotProps) => {
   const { cx, cy, payload, value } = props;
   if (!payload || !payload.buySignal || value == null) return null;
   if (cx == null || cy == null) return null;
@@ -50,20 +84,132 @@ const CustomizedOpportunityDot = (props: any) => {
   );
 };
 
+const CorrelationTooltip = ({
+  active,
+  payload,
+  label,
+}: CorrelationTooltipProps) => {
+  if (!active || payload.length === 0) return null;
+
+  const data = payload[0].payload as DisplayCorrelationBucket | undefined;
+  if (!data) return null;
+
+  const formattedLabel =
+    typeof label === "string" || typeof label === "number"
+      ? format(new Date(label), "MMM d, yyyy h:mm a")
+      : "";
+
+  return (
+    <div className="bg-slate-900/90 border border-slate-700 p-3 rounded-lg backdrop-blur-md shadow-xl text-sm min-w-[200px]">
+      <p className="text-slate-300 font-medium mb-3 pb-2 border-b border-white/5">
+        {formattedLabel}
+      </p>
+      {payload.map((entry, index) => {
+        const dataKey = entry.dataKey;
+        const isDollar =
+          dataKey === "rawPrice" ||
+          dataKey === "supportPrice" ||
+          dataKey === "resistancePrice";
+        const isFuture = dataKey === "futurePct";
+        const isSentimentIndex =
+          typeof entry.name === "string" && entry.name.includes("Index");
+        const isVolume =
+          dataKey === "positive" ||
+          dataKey === "neutral" ||
+          dataKey === "negative";
+        let display: string;
+
+        if (typeof entry.value !== "number") {
+          display = String(entry.value ?? "");
+        } else if (isDollar) {
+          display = `$${Math.round(entry.value)}`;
+        } else if (isFuture) {
+          display = `${entry.value > 0 ? "+" : ""}${entry.value.toFixed(1)}%`;
+        } else if (isSentimentIndex) {
+          display = `${entry.value.toFixed(2)}%`;
+        } else if (isVolume) {
+          const count =
+            dataKey === "positive"
+              ? data.positiveCount
+              : dataKey === "neutral"
+                ? data.neutralCount
+                : data.negativeCount;
+          display = `${Math.round(entry.value)}% (${count} ${count === 1 ? "post" : "posts"})`;
+        } else {
+          display = Number.isInteger(entry.value)
+            ? `${entry.value}`
+            : entry.value.toFixed(2);
+        }
+
+        return (
+          <div
+            key={`${String(dataKey)}-${index}`}
+            className="flex justify-between items-center gap-4 mb-1.5"
+          >
+            <div className="flex items-center gap-2">
+              <div
+                className="w-2 h-2 rounded-full shadow-sm"
+                style={{ backgroundColor: entry.color }}
+              ></div>
+              <span className="text-slate-400 text-xs">{entry.name}</span>
+            </div>
+            <span className="text-white font-semibold text-xs">{display}</span>
+          </div>
+        );
+      })}
+      {data.buySignal && (
+        <div className="mt-3 pt-3 border-t border-white/5">
+          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+            Algorithmic Signal
+          </div>
+          <div
+            className={cn(
+              "flex items-center gap-2 text-xs font-semibold px-2.5 py-1.5 rounded-md",
+              data.signalQuality === "good"
+                ? "bg-sky-500/10 text-sky-400 border border-sky-500/20"
+                : data.signalQuality === "bad"
+                  ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                  : "bg-slate-500/10 text-slate-300 border border-slate-500/20",
+            )}
+          >
+            <span
+              className={cn(
+                "w-3 text-center text-sm font-bold leading-none",
+                data.signalQuality === "pending" && "animate-pulse",
+              )}
+            >
+              {data.signalQuality === "good"
+                ? "▲"
+                : data.signalQuality === "bad"
+                  ? "▼"
+                  : "⋯"}
+            </span>
+            {data.signalQuality === "good"
+              ? "Profitable (Price Rose)"
+              : data.signalQuality === "bad"
+                ? "False Signal (Price Dropped)"
+                : "Pending (Awaiting Data)"}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 export default function CorrelationChart({ state, setters }: DashboardDataProps) {
   const { symbol, hours, chartView, correlationData, showSR, selectedHour, hideExtended } = state;
   const { setChartView, setSelectedHour, setHideExtended } = setters;
 
-  const displayData = React.useMemo(() => {
+  const displayData = React.useMemo<DisplayCorrelationBucket[]>(() => {
     if (!correlationData?.data) return [];
     const rows = hideExtended
-      ? correlationData.data.filter((d: any) => d.isMarketOpen)
+      ? correlationData.data.filter((d) => d.isMarketOpen)
       : correlationData.data;
     // Volume bars render as a 100% stacked chart: normalize the sentiment mix to
     // percentages so each hour's bar is the same height and the positive/neutral/
     // negative split is directly comparable regardless of absolute volume. The raw
     // counts are preserved as *Count for the tooltip.
-    return rows.map((d: any) => {
+    return rows.map((d) => {
       const pos = d.positive ?? 0;
       const neu = d.neutral ?? 0;
       const neg = d.negative ?? 0;
@@ -188,11 +334,9 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
           <ComposedChart 
             data={displayData} 
             margin={{ top: 10, right: 10, bottom: 0, left: -20 }}
-            onClick={(e: any) => {
-              // Recharts passes the chart state. We can use activeLabel or activePayload
-              const ts = e?.activePayload?.[0]?.payload?.timestamp || e?.activeLabel;
-              if (ts) {
-                setSelectedHour(ts);
+            onClick={(chartState) => {
+              if (typeof chartState.activeLabel === "string") {
+                setSelectedHour(chartState.activeLabel);
               }
             }}
             style={{ cursor: 'pointer' }}
@@ -206,7 +350,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
 
             <CartesianGrid stroke="#1e293b" vertical={false} strokeDasharray="3 3" />
             
-            {!hideExtended && correlationData.closedRegions.map((region: any, idx: number) => (
+            {!hideExtended && correlationData.closedRegions.map((region, idx) => (
               <ReferenceArea key={idx} x1={region.start} x2={region.end} fill="#0f172a" fillOpacity={0.6} yAxisId="left" />
             ))}
 
@@ -241,70 +385,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
               domain={rightDomain}
             />
 
-            <Tooltip
-              content={({ active, payload, label }: any) => {
-                if (active && payload && payload.length) {
-                  const data = payload[0].payload;
-                  return (
-                    <div className="bg-slate-900/90 border border-slate-700 p-3 rounded-lg backdrop-blur-md shadow-xl text-sm min-w-[200px]">
-                      <p className="text-slate-300 font-medium mb-3 pb-2 border-b border-white/5">{format(new Date(label), "MMM d, yyyy h:mm a")}</p>
-                      {payload.map((p: any) => {
-                        const dk = p.dataKey;
-                        // Price + Support/Resistance live on the left axis in whole dollars.
-                        const isDollar = dk === "rawPrice" || dk === "supportPrice" || dk === "resistancePrice";
-                        const isFuture = dk === "futurePct";
-                        const isSentIndex = typeof p.name === "string" && p.name.includes("Index");
-                        const isVolume = dk === "positive" || dk === "neutral" || dk === "negative";
-                        let display: string;
-                        if (typeof p.value !== "number") {
-                          display = `${p.value}`;
-                        } else if (isDollar) {
-                          display = `$${Math.round(p.value)}`;
-                        } else if (isFuture) {
-                          display = `${p.value > 0 ? "+" : ""}${p.value.toFixed(1)}%`;
-                        } else if (isSentIndex) {
-                          display = `${p.value.toFixed(2)}%`;
-                        } else if (isVolume) {
-                          // Bars are proportions; pair the % with the raw count stashed in displayData.
-                          const count = data[`${dk}Count`] ?? 0;
-                          display = `${Math.round(p.value)}% (${count} ${count === 1 ? "post" : "posts"})`;
-                        } else {
-                          display = Number.isInteger(p.value) ? `${p.value}` : p.value.toFixed(2);
-                        }
-                        return (
-                          <div key={p.name} className="flex justify-between items-center gap-4 mb-1.5">
-                            <div className="flex items-center gap-2">
-                              <div className="w-2 h-2 rounded-full shadow-sm" style={{ backgroundColor: p.color }}></div>
-                              <span className="text-slate-400 text-xs">{p.name}</span>
-                            </div>
-                            <span className="text-white font-semibold text-xs">{display}</span>
-                          </div>
-                        );
-                      })}
-                      {data.buySignal && (
-                        <div className="mt-3 pt-3 border-t border-white/5">
-                          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Algorithmic Signal</div>
-                          <div className={cn(
-                            "flex items-center gap-2 text-xs font-semibold px-2.5 py-1.5 rounded-md",
-                            data.signalQuality === 'good' ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20' :
-                            data.signalQuality === 'bad' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' :
-                            'bg-slate-500/10 text-slate-300 border border-slate-500/20'
-                          )}>
-                            <span className={cn("w-3 text-center text-sm font-bold leading-none", data.signalQuality === 'pending' && 'animate-pulse')}>
-                              {data.signalQuality === 'good' ? '▲' : data.signalQuality === 'bad' ? '▼' : '⋯'}
-                            </span>
-                            {data.signalQuality === 'good' ? 'Profitable (Price Rose)' :
-                             data.signalQuality === 'bad' ? 'False Signal (Price Dropped)' :
-                             'Pending (Awaiting Data)'}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                }
-                return null;
-              }}
-            />
+            <Tooltip content={CorrelationTooltip} />
 
             {chartView === "volume" ? (
               <>
@@ -321,7 +402,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
 
             <Line
               yAxisId="dollar" type="monotone" dataKey="rawPrice" name={`${symbol} Price`}
-              stroke="#fbbf24" strokeWidth={3} dot={<CustomizedOpportunityDot fullData={correlationData.data} />} connectNulls={true}
+              stroke="#fbbf24" strokeWidth={3} dot={<CustomizedOpportunityDot />} connectNulls={true}
             />
             <Line
               yAxisId="right" type="monotone" dataKey="futurePct" name="NQ Futures"
@@ -360,7 +441,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                 <Tooltip contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.9)', borderColor: '#334155', borderRadius: '8px', backdropFilter: 'blur(8px)' }} labelFormatter={(l) => format(new Date(l), "MMM d, yyyy h:mm a")} itemStyle={{ fontSize: '13px' }} formatter={(v) => [typeof v === 'number' ? v.toFixed(2) : v, "Momentum"]} />
                 <ReferenceLine y={0} stroke="#475569" />
                 <Bar dataKey="sentimentHist" name="Sentiment Momentum">
-                  {correlationData.data.map((entry: any, idx: number) => (
+                  {correlationData.data.map((entry, idx) => (
                     <Cell key={idx} fill={(entry.sentimentHist ?? 0) >= 0 ? "#10b981" : "#f43f5e"} />
                   ))}
                 </Bar>

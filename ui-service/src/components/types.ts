@@ -19,6 +19,7 @@ export interface LeaderboardEntry { symbol: string; post_count_4h: number; senti
 export interface MarketQuote { timestamp: string; price: number; volume: number; market_session: string; }
 export interface DeltaData { reference_price: number; latest_price: number; pct_change: number; abs_change: number; }
 export interface MetricsData {
+  symbol: string;
   pe_ratio: number | null; beta: number | null; avg_return_1y: number | null;
   inflation_adj_return_1y: number | null; pe_relative_sector: number | null;
   beta_relative_sector: number | null; return_relative_sector: number | null;
@@ -38,6 +39,7 @@ export interface CorrelationBucket {
   futureChange: number | null; futurePct: number | null;
   isMarketOpen: boolean; sentimentIndex: number; sentimentSMA: number;
   rawPrice: number | null; buySignal: boolean | null; buyScore: number | null;
+  signalQuality?: "good" | "bad" | "pending" | null;
   supportPrice?: number | null; supportPct?: number | null;
   resistancePrice?: number | null; resistancePct?: number | null;
   sentimentMACD?: number | null; sentimentSignal?: number | null; sentimentHist?: number | null;
@@ -50,10 +52,3 @@ export interface CorrelationData {
   maxR: number; bestLag: number; lagSweeps?: LagSweepValue[]; correlationText: string; correlationStrength: string;
   opportunity: OpportunityData | null;
 }
-
-export interface DashboardDataProps {
-  state: any;
-  setters: any;
-  computed: any;
-}
-

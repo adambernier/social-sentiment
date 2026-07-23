@@ -1,7 +1,7 @@
 import React from "react";
 import { Zap, TrendingUp } from "lucide-react";
 import { cn } from "./utils";
-import { DashboardDataProps } from "../types";
+import type { DashboardDataProps } from "../hooks/useDashboardData";
 
 export default function OpportunityScanner({ state }: DashboardDataProps) {
   const { correlationData } = state;

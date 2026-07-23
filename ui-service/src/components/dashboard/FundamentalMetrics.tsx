@@ -1,7 +1,7 @@
 import React from "react";
 import { format } from "date-fns";
 import { cn } from "./utils";
-import { DashboardDataProps } from "../types";
+import type { DashboardDataProps } from "../hooks/useDashboardData";
 
 export default function FundamentalMetrics({ state }: DashboardDataProps) {
   const { metrics } = state;

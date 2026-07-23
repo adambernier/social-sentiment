@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { ResponsiveContainer, BarChart, XAxis, YAxis, Tooltip, ReferenceLine, Bar, Cell } from "recharts";
 import { Share2, X } from "lucide-react";
 import { cn } from "./utils";
-import { DashboardDataProps } from "../types";
+import type { DashboardDataProps } from "../hooks/useDashboardData";
 import { format } from "date-fns";
 
 export default function SectorScorecard({ state, computed }: DashboardDataProps) {
@@ -54,12 +54,15 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
               <Tooltip
                 cursor={{fill: 'rgba(255,255,255,0.02)'}}
                 contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.9)', borderColor: '#334155', borderRadius: '8px', backdropFilter: 'blur(8px)' }}
-                formatter={(value: any) => [`${value > 0 ? '+' : ''}${Number(value).toFixed(1)}%`, 'vs. Sector']}
+                formatter={(value) => {
+                  const numericValue = typeof value === "number" ? value : 0;
+                  return [`${numericValue > 0 ? '+' : ''}${numericValue.toFixed(1)}%`, 'vs. Sector'];
+                }}
                 itemStyle={{ fontSize: '13px' }}
               />
               <ReferenceLine x={0} stroke="#64748b" />
               <Bar dataKey="value" barSize={24} radius={[0, 4, 4, 0]}>
-                {scorecardData.map((entry: any, index: number) => (
+                {scorecardData.map((entry, index) => (
                   <Cell key={`cell-${index}`} fill={entry.value >= 0 ? '#10b981' : '#f43f5e'} />
                 ))}
               </Bar>
@@ -118,7 +121,7 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
                 <div className="flex justify-between items-start">
                   <div>
                     <h2 className="text-4xl font-extrabold text-white tracking-tight">{symbol}</h2>
-                    <p className="text-xs text-slate-400 font-semibold tracking-wider uppercase mt-1">Sector: {metrics?.sector || "General Market"}</p>
+                    <p className="text-xs text-slate-400 font-semibold tracking-wider uppercase mt-1">Sector: General Market</p>
                   </div>
                   <div className="text-right">
                     <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest bg-white/5 px-2.5 py-1 rounded-md border border-white/5">
@@ -174,7 +177,7 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
                         />
                         <ReferenceLine y={0} stroke="#334155" />
                         <Bar dataKey="value" barSize={36} radius={[4, 4, 0, 0]}>
-                          {scorecardData.map((entry: any, index: number) => (
+                          {scorecardData.map((entry, index) => (
                             <Cell 
                               key={`cell-${index}`} 
                               fill={entry.value >= 0 ? '#10b981' : '#f43f5e'} 
@@ -212,7 +215,7 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
                 <div className="flex justify-between items-start">
                   <div>
                     <h2 className="text-4xl font-extrabold text-white tracking-tight">{symbol}</h2>
-                    <p className="text-xs text-slate-400 font-semibold tracking-wider uppercase mt-1">Sector: {metrics?.sector || "General Market"}</p>
+                    <p className="text-xs text-slate-400 font-semibold tracking-wider uppercase mt-1">Sector: General Market</p>
                   </div>
                   <div className="text-right flex flex-col items-end gap-1.5">
                     <span className={cn(
@@ -321,5 +324,4 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
     </>
   );
 }
-
 

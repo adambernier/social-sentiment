@@ -1,7 +1,7 @@
 import React from "react";
-import { MessageSquare, TrendingUp, TrendingDown, AlertCircle, Activity, Zap } from "lucide-react";
+import { TrendingUp, TrendingDown, AlertCircle, Activity, Zap } from "lucide-react";
 import { cn, formatLargeNumber } from "./utils";
-import { DashboardDataProps } from "../types";
+import type { DashboardDataProps } from "../hooks/useDashboardData";
 
 const InfoTooltip = ({ text }: { text: string }) => (
   <div className="group relative ml-1.5 flex items-center justify-center">
@@ -15,7 +15,7 @@ const InfoTooltip = ({ text }: { text: string }) => (
 
 export default function TelemetryGrid({ state, computed }: DashboardDataProps) {
   const { symbol, latestQuote, primaryDelta, futureSymbol, futureQuote, futureDelta, correlationData } = state;
-  const { totalMentions, bullishPct, bearishPct, divergenceStatus, vixRegime } = computed;
+  const { bullishPct, bearishPct, divergenceStatus, vixRegime } = computed;
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-2 2xl:grid-cols-4 gap-4 w-full">

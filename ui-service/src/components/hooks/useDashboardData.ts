@@ -376,3 +376,5 @@ export function useDashboardData() {
     }
   };
 }
+
+export type DashboardDataProps = ReturnType<typeof useDashboardData>;

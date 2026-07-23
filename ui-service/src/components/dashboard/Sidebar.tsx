@@ -1,12 +1,10 @@
 import React from "react";
-import { format } from "date-fns";
 import { cn } from "./utils";
 import { topicProgressColors } from "./constants";
-import { DashboardDataProps } from "../types";
+import type { DashboardDataProps } from "../hooks/useDashboardData";
 import SectorScorecard from "./SectorScorecard";
 
 export default function Sidebar({ state, computed, setters }: DashboardDataProps) {
-  const { metrics } = state;
   const { sortedTopics, totalTopicCount } = computed;
 
   return (
@@ -21,7 +19,7 @@ export default function Sidebar({ state, computed, setters }: DashboardDataProps
         <p className="text-xs text-slate-400 mb-4">NLP zero-shot classification of social volume</p>
 
         <div className="space-y-3 max-h-[220px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
-          {sortedTopics.map((topic: any, idx: number) => {
+          {sortedTopics.map((topic, idx) => {
             const label = topic.topic_label || "General Chat";
             const count = topic.count;
             const pct = totalTopicCount ? Math.round((count / totalTopicCount) * 100) : 0;

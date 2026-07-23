@@ -1,7 +1,7 @@
 import React from "react";
 import { BarChart2 } from "lucide-react";
 import { cn } from "./utils";
-import { DashboardDataProps } from "../types";
+import type { DashboardDataProps } from "../hooks/useDashboardData";
 
 export default function Header({ state, setters, computed }: DashboardDataProps) {
   const { symbol, hours, platform, selectedTopic, isConnected, showSR, leaderboard } = state;
@@ -44,8 +44,8 @@ export default function Header({ state, setters, computed }: DashboardDataProps)
           {leaderboard && leaderboard.length > 0 ? (
             leaderboard
               .slice()
-              .sort((a: any, b: any) => a.symbol.localeCompare(b.symbol))
-              .map((item: any) => (
+              .sort((a, b) => a.symbol.localeCompare(b.symbol))
+              .map((item) => (
                 <option key={item.symbol} value={item.symbol}>{item.symbol}</option>
               ))
           ) : (

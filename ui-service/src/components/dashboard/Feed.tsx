@@ -3,7 +3,7 @@ import { MessageSquare, Newspaper } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "./utils";
 import { platformColors, platformLabels, topicColors } from "./constants";
-import { DashboardDataProps } from "../types";
+import type { DashboardDataProps } from "../hooks/useDashboardData";
 
 export default function Feed({ state, setters, computed }: DashboardDataProps) {
   const { feedTab, selectedHour, isDrillDownLoading } = state;
@@ -56,7 +56,7 @@ export default function Feed({ state, setters, computed }: DashboardDataProps) {
           </div>
         ) : (
           <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
-            {filteredFeedPosts.map((post: any, idx: number) => (
+            {filteredFeedPosts.map((post, idx) => (
             <div key={idx} className="bg-white/5 border border-white/5 rounded-xl p-3 text-sm hover:bg-white/10 transition-colors">
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2 flex-wrap">
