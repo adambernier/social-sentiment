@@ -81,6 +81,9 @@ jobs:
     - name: Install frontend dependencies
       run: npm ci
 
+    - name: Audit frontend production dependencies
+      run: npm audit --omit=dev --audit-level=high
+
     - name: Run frontend tests
       run: npm test
 
