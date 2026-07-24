@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -39,7 +40,100 @@ BATCH_SIZE = 100
 BATCH_TIMEOUT = 1.0  # seconds
 
 
-async def db_writer_worker(queue: asyncio.Queue, db: DB):
+@dataclass(frozen=True)
+class BatchWriteResult:
+    stored_messages: int
+    affected_rows: int
+    dead_lettered_messages: int
+
+
+PERMANENT_POST_ERRORS = (psycopg.DataError, psycopg.IntegrityError)
+
+
+async def _persist_scored_individually(
+    posts: list[ScoredPost],
+    messages: list[aio_pika.IncomingMessage],
+    db: DB,
+    channel: aio_pika.Channel,
+) -> BatchWriteResult:
+    """Store valid posts and dead-letter only permanently invalid posts."""
+    stored_messages = 0
+    affected_rows = 0
+    dead_lettered_messages = 0
+
+    for post, message in zip(posts, messages):
+        try:
+            rows = await db.insert_scored_batch_async([post])
+        except PERMANENT_POST_ERRORS as error:
+            logger.error(
+                "Post %s caused a permanent database error; moving it to "
+                "the dead-letter queue: %s",
+                post.id,
+                error,
+                exc_info=True,
+            )
+            await dead_letter_message(
+                message,
+                channel,
+                INPUT_QUEUE,
+                error,
+            )
+            dead_lettered_messages += 1
+            continue
+
+        await message.ack()
+        stored_messages += 1
+        affected_rows += rows
+
+    return BatchWriteResult(
+        stored_messages=stored_messages,
+        affected_rows=affected_rows,
+        dead_lettered_messages=dead_lettered_messages,
+    )
+
+
+async def persist_scored_batch(
+    posts: list[ScoredPost],
+    messages: list[aio_pika.IncomingMessage],
+    db: DB,
+    channel: aio_pika.Channel,
+) -> BatchWriteResult:
+    """Persist one batch without letting a poison post retry valid neighbors.
+
+    Data and integrity failures can be caused by one payload, so those batches
+    are retried one post at a time. Connection and unexpected failures
+    propagate so the worker returns every unprocessed message to RabbitMQ.
+    """
+    try:
+        affected_rows = await db.insert_scored_batch_async(posts)
+    except PERMANENT_POST_ERRORS as error:
+        logger.warning(
+            "Batch insert hit a permanent data error; isolating %s posts: %s",
+            len(posts),
+            error,
+        )
+        return await _persist_scored_individually(
+            posts,
+            messages,
+            db,
+            channel,
+        )
+
+    for message in messages:
+        await message.ack()
+
+    return BatchWriteResult(
+        stored_messages=len(posts),
+        affected_rows=affected_rows,
+        dead_lettered_messages=0,
+    )
+
+
+async def db_writer_worker(
+    queue: asyncio.Queue,
+    db: DB,
+    channel: aio_pika.Channel,
+):
     batch_posts = []
     batch_messages = []
     last_flush = time.time()
@@ -68,18 +162,32 @@ async def db_writer_worker(queue: asyncio.Queue, db: DB):
             if len(batch_posts) >= BATCH_SIZE or (batch_posts and (time.time() - last_flush >= BATCH_TIMEOUT)):
                 logger.info(f"Inserting batch of {len(batch_posts)} posts...")
                 try:
-                    # Run database writes asynchronously
-                    rows = await db.insert_scored_batch_async(batch_posts)
-                    logger.info(f"Batch inserted: {len(batch_posts)} posts (affected rows: {rows}).")
-                    
-                    MESSAGES_PROCESSED_TOTAL.labels(service="storage").inc(len(batch_posts))
+                    result = await persist_scored_batch(
+                        batch_posts,
+                        batch_messages,
+                        db,
+                        channel,
+                    )
+                    logger.info(
+                        "Batch handled: %s posts stored "
+                        "(affected rows: %s), %s dead-lettered.",
+                        result.stored_messages,
+                        result.affected_rows,
+                        result.dead_lettered_messages,
+                    )
 
-                    # Acknowledge all messages in the batch
-                    for message in batch_messages:
-                        await message.ack()
+                    if result.stored_messages:
+                        MESSAGES_PROCESSED_TOTAL.labels(
+                            service="storage"
+                        ).inc(result.stored_messages)
 
                 except Exception as e:
-                    logger.error(f"Database error during async batch insert: {e}")
+                    logger.error(
+                        "Storage batch failed before all messages were "
+                        "handled: %s",
+                        e,
+                        exc_info=True,
+                    )
                     # Requeue all messages in the batch
                     for message in batch_messages:
                         try:
@@ -177,7 +285,9 @@ async def main():
                 await declare_dead_letter_queue(channel, INPUT_QUEUE)
 
                 # Start the background batch database writer worker
-                worker_task = asyncio.create_task(db_writer_worker(queue, db))
+                worker_task = asyncio.create_task(
+                    db_writer_worker(queue, db, channel)
+                )
                 # Start the background database maintenance scheduler
                 scheduler_task = asyncio.create_task(rollup_scheduler(db))
 
