@@ -13,13 +13,14 @@
 #   scripts/lock.sh api-service ...  # recompile only the named service(s)
 #   scripts/lock.sh --check          # CI mode: fail if any committed lock is stale
 #
-# A --check failure means the committed requirements.txt no longer matches a fresh
-# compile of its inputs — either someone edited a requirements.in / constraints.txt
-# without recompiling, or a newer compatible upstream release is available. Fix it
-# by running `scripts/lock.sh` and committing the result.
+# A --check failure means the committed requirements.txt is no longer compatible
+# with its requirements.in / constraints.txt inputs. Check mode preserves existing
+# locked versions; dependency upgrades happen only in explicit generation mode.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+UV_VERSION="0.11.32"
 
 mode="generate"
 if [ "${1:-}" = "--check" ]; then
@@ -42,14 +43,19 @@ docker run --rm -v "$PWD:/work" -w /work \
   -e MODE="$mode" \
   -e TARGETS="${targets[*]}" \
   -e OWNER="$(id -u):$(id -g)" \
+  -e UV_VERSION="$UV_VERSION" \
   python:3.11-slim bash -lc '
     set -euo pipefail
-    pip install -q uv 1>&2
+    pip install -q "uv==$UV_VERSION" 1>&2
     fail=0
     for s in $TARGETS; do
       if [ "$MODE" = "check" ]; then
         tmp="$(mktemp)"
-        uv pip compile --upgrade --no-cache "$s/requirements.in" --generate-hashes -o "$tmp" 1>&2
+        # uv prefers versions from an existing output file unless --upgrade is
+        # supplied. Seed the temporary output from the committed lock so CI
+        # validates input compatibility without performing surprise upgrades.
+        cp "$s/requirements.txt" "$tmp"
+        uv pip compile --quiet --no-cache "$s/requirements.in" --generate-hashes -o "$tmp" 1>&2
         # Compare ignoring the header comment (it records the output path/command).
         out="$(diff -u <(grep -v "^#" "$s/requirements.txt") <(grep -v "^#" "$tmp") || true)"
         if [ -n "$out" ]; then
