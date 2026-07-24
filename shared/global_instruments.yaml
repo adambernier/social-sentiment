@@ -1,0 +1,202 @@
+version: 1
+instruments:
+  - instrument_key: index:nikkei-225
+    display_name: Nikkei 225
+    asset_class: index
+    currency: JPY
+    exchange: JPX
+    timezone: Asia/Tokyo
+    provider_aliases:
+      yahoo: ^N225
+    session_metadata:
+      open: "09:00"
+      close: "15:30"
+      weekdays: [1, 2, 3, 4, 5]
+
+  - instrument_key: index:hang-seng
+    display_name: Hang Seng
+    asset_class: index
+    currency: HKD
+    exchange: HKEX
+    timezone: Asia/Hong_Kong
+    provider_aliases:
+      yahoo: ^HSI
+    session_metadata:
+      open: "09:30"
+      close: "16:00"
+      weekdays: [1, 2, 3, 4, 5]
+
+  - instrument_key: index:csi-300
+    display_name: CSI 300
+    asset_class: index
+    currency: CNY
+    exchange: SSE/SZSE
+    timezone: Asia/Shanghai
+    provider_aliases:
+      yahoo: 000300.SS
+    session_metadata:
+      open: "09:30"
+      close: "15:00"
+      weekdays: [1, 2, 3, 4, 5]
+
+  - instrument_key: index:taiwan-weighted
+    display_name: Taiwan Weighted
+    asset_class: index
+    currency: TWD
+    exchange: TWSE
+    timezone: Asia/Taipei
+    provider_aliases:
+      yahoo: ^TWII
+    session_metadata:
+      open: "09:00"
+      close: "13:30"
+      weekdays: [1, 2, 3, 4, 5]
+
+  - instrument_key: index:taiwan-semiconductor
+    display_name: Taiwan Semiconductor
+    asset_class: index
+    currency: TWD
+    exchange: TWSE/TPEx
+    timezone: Asia/Taipei
+    provider_aliases:
+      taiwan_index: IX0143
+      yahoo: IX0143.TW
+    session_metadata:
+      open: "09:00"
+      close: "13:30"
+      weekdays: [1, 2, 3, 4, 5]
+
+  - instrument_key: index:kospi
+    display_name: KOSPI
+    asset_class: index
+    currency: KRW
+    exchange: KRX
+    timezone: Asia/Seoul
+    provider_aliases:
+      yahoo: ^KS11
+    session_metadata:
+      open: "09:00"
+      close: "15:30"
+      weekdays: [1, 2, 3, 4, 5]
+
+  - instrument_key: index:nifty-50
+    display_name: Nifty 50
+    asset_class: index
+    currency: INR
+    exchange: NSE
+    timezone: Asia/Kolkata
+    provider_aliases:
+      yahoo: ^NSEI
+    session_metadata:
+      open: "09:15"
+      close: "15:30"
+      weekdays: [1, 2, 3, 4, 5]
+
+  - instrument_key: fx:usd-jpy
+    display_name: USD/JPY
+    asset_class: fx
+    currency: JPY
+    exchange: null
+    timezone: America/New_York
+    provider_aliases:
+      yahoo: JPY=X
+    session_metadata:
+      open: "00:00"
+      close: "17:00"
+      weekdays: [1, 2, 3, 4, 5]
+    quote_convention: local_currency_per_usd
+
+  - instrument_key: fx:usd-cnh
+    display_name: USD/CNH
+    asset_class: fx
+    currency: CNH
+    exchange: null
+    timezone: America/New_York
+    provider_aliases:
+      yahoo: CNH=X
+    session_metadata:
+      open: "00:00"
+      close: "17:00"
+      weekdays: [1, 2, 3, 4, 5]
+    quote_convention: local_currency_per_usd
+
+  - instrument_key: fx:usd-krw
+    display_name: USD/KRW
+    asset_class: fx
+    currency: KRW
+    exchange: null
+    timezone: America/New_York
+    provider_aliases:
+      yahoo: KRW=X
+    session_metadata:
+      open: "00:00"
+      close: "17:00"
+      weekdays: [1, 2, 3, 4, 5]
+    quote_convention: local_currency_per_usd
+
+  - instrument_key: fx:usd-twd
+    display_name: USD/TWD
+    asset_class: fx
+    currency: TWD
+    exchange: null
+    timezone: America/New_York
+    provider_aliases:
+      yahoo: TWD=X
+    session_metadata:
+      open: "00:00"
+      close: "17:00"
+      weekdays: [1, 2, 3, 4, 5]
+    quote_convention: local_currency_per_usd
+
+  - instrument_key: fx:usd-inr
+    display_name: USD/INR
+    asset_class: fx
+    currency: INR
+    exchange: null
+    timezone: America/New_York
+    provider_aliases:
+      yahoo: INR=X
+    session_metadata:
+      open: "00:00"
+      close: "17:00"
+      weekdays: [1, 2, 3, 4, 5]
+    quote_convention: local_currency_per_usd
+
+  - instrument_key: commodity:gold
+    display_name: Gold
+    asset_class: commodity
+    currency: USD
+    exchange: COMEX
+    timezone: America/New_York
+    provider_aliases:
+      yahoo: GC=F
+    session_metadata:
+      open: "18:00"
+      close: "17:00"
+      weekdays: [1, 2, 3, 4, 5]
+
+  - instrument_key: commodity:brent-crude
+    display_name: Brent crude
+    asset_class: commodity
+    currency: USD
+    exchange: ICE
+    timezone: Europe/London
+    provider_aliases:
+      yahoo: BZ=F
+    session_metadata:
+      open: "00:00"
+      close: "22:00"
+      weekdays: [1, 2, 3, 4, 5]
+
+  - instrument_key: commodity:copper
+    display_name: Copper
+    asset_class: commodity
+    currency: USD
+    exchange: COMEX
+    timezone: America/New_York
+    provider_aliases:
+      yahoo: HG=F
+    session_metadata:
+      open: "18:00"
+      close: "17:00"
+      weekdays: [1, 2, 3, 4, 5]

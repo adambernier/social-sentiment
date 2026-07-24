@@ -42,10 +42,6 @@ MIGRATIONS = (
         "0002_global_context",
         Path(__file__).parent / "0002_global_context.sql",
     ),
-    Migration(
-        "0003_taiwan_semiconductor_context",
-        Path(__file__).parent / "0003_taiwan_semiconductor_context.sql",
-    ),
 )
 
 

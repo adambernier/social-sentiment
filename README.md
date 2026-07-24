@@ -244,20 +244,29 @@ increment existing hourly aggregates.
 
 ## Global-context rollout
 
-Keep the flag false while applying the migrations, then run the paced two-year
-daily backfill:
+Schema migrations own tables, constraints, and indexes only. Provider-neutral
+instrument metadata lives in
+`shared/global_instruments.yaml` and is applied with an additive, idempotent
+catalog sync; entries omitted from the catalog are never deleted automatically.
+
+For a new installation, keep the flag false while applying the structural
+migrations, sync the catalog, then run the paced two-year daily backfill:
 
 ```bash
 docker compose up -d postgres schema-migrate
+docker compose run --rm market-producer \
+  python market-producer/sync_global_instruments.py
 GLOBAL_CONTEXT_ENABLED=true docker compose run --rm market-producer \
   python market-producer/global_backfill.py
 ```
 
-After deploying `0003_taiwan_semiconductor_context`, backfill its daily history
-before enabling the panel. The migration atomically replaces an existing NVDA
-`index:taiwan-weighted` exposure while preserving its display order:
+Adding or changing instrument metadata does not require a schema migration.
+After deploying the IX0143 adapter, sync and backfill the targeted instrument:
 
 ```bash
+docker compose run --rm market-producer \
+  python market-producer/sync_global_instruments.py
+
 GLOBAL_CONTEXT_ENABLED=true docker compose run --rm market-producer \
   python market-producer/global_backfill.py \
   --instrument-key index:taiwan-semiconductor
@@ -272,7 +281,20 @@ Curated mappings are replaced atomically through authenticated admin routes:
 curl -X PUT http://localhost:8000/api/admin/global-context/NVDA/exposures \
   -H "X-API-Key: $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"exposures":[{"instrument_key":"index:taiwan-semiconductor","reason":"Taiwan semiconductor manufacturing and supply-chain context","display_order":0}]}'
+  -d '{
+    "exposures": [
+      {
+        "instrument_key": "index:taiwan-semiconductor",
+        "reason": "Taiwan semiconductor manufacturing and supply-chain context",
+        "display_order": 0
+      },
+      {
+        "instrument_key": "fx:usd-twd",
+        "reason": "Taiwan dollar orientation",
+        "display_order": 1
+      }
+    ]
+  }'
 
 curl -X PUT http://localhost:8000/api/admin/global-context/NVDA/event-rules \
   -H "X-API-Key: $ADMIN_API_KEY" \

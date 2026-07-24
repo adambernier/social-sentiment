@@ -8,7 +8,9 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
-from schema_migrations import MIGRATIONS, apply_migrations
+from schema_migrations import apply_migrations
+
+from shared.global_instrument_catalog import load_global_instrument_catalog
 
 TEST_DATABASE_DSN = os.environ.get("TEST_DATABASE_DSN")
 pytestmark = pytest.mark.skipif(
@@ -53,7 +55,7 @@ def test_migration_seeds_provider_independent_universe_and_constraints(
 ):
     with psycopg.connect(global_context_database, autocommit=True) as conn:
         assert conn.execute("SELECT COUNT(*) FROM global_instruments").fetchone() == (
-            15,
+            14,
         )
         assert conn.execute(
             """
@@ -70,17 +72,6 @@ def test_migration_seeds_provider_independent_universe_and_constraints(
             """
         ).fetchone()[0]
         assert aliases == {"yahoo": "^N225"}
-        taiwan_aliases = conn.execute(
-            """
-            SELECT provider_aliases
-            FROM global_instruments
-            WHERE instrument_key = 'index:taiwan-semiconductor'
-            """
-        ).fetchone()[0]
-        assert taiwan_aliases == {
-            "taiwan_index": "IX0143",
-            "yahoo": "IX0143.TW",
-        }
 
         starts_at = datetime(2026, 7, 23, tzinfo=timezone.utc)
         values = [
@@ -121,22 +112,11 @@ def test_migration_seeds_provider_independent_universe_and_constraints(
             )
 
 
-def test_taiwan_semiconductor_migration_replaces_existing_nvda_exposure(
+def test_catalog_sync_is_idempotent_and_does_not_replace_exposures(
     global_context_database,
 ):
+    catalog = load_global_instrument_catalog()
     with psycopg.connect(global_context_database, autocommit=True) as conn:
-        conn.execute(
-            """
-            DELETE FROM schema_migrations
-            WHERE version = '0003_taiwan_semiconductor_context'
-            """
-        )
-        conn.execute(
-            """
-            DELETE FROM global_instruments
-            WHERE instrument_key = 'index:taiwan-semiconductor'
-            """
-        )
         conn.execute(
             """
             INSERT INTO stock_factor_exposures (
@@ -145,26 +125,57 @@ def test_taiwan_semiconductor_migration_replaces_existing_nvda_exposure(
             VALUES ('NVDA', 'index:taiwan-weighted', 'Taiwan context', 2)
             """
         )
-
-    assert apply_migrations(
-        global_context_database,
-        migrations=(MIGRATIONS[-1],),
-    ) == ["0003_taiwan_semiconductor_context"]
+        database = storage_db.DB.__new__(storage_db.DB)
+        database.dsn = global_context_database
+        database.conn = conn
+        assert database.sync_global_instrument_catalog(catalog.instruments) == 15
+        assert database.sync_global_instrument_catalog(catalog.instruments) == 15
 
     with psycopg.connect(global_context_database, autocommit=True) as conn:
+        assert conn.execute(
+            """
+            SELECT provider_aliases
+            FROM global_instruments
+            WHERE instrument_key = 'index:taiwan-semiconductor'
+            """
+        ).fetchone()[0] == {
+            "taiwan_index": "IX0143",
+            "yahoo": "IX0143.TW",
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM global_instruments"
+        ).fetchone() == (15,)
         assert conn.execute(
             """
             SELECT instrument_key, reason, display_order
             FROM stock_factor_exposures
             WHERE symbol = 'NVDA'
             """
-        ).fetchall() == [
-            (
-                "index:taiwan-semiconductor",
-                "Taiwan semiconductor manufacturing and supply-chain context",
-                2,
-            )
-        ]
+        ).fetchall() == [("index:taiwan-weighted", "Taiwan context", 2)]
+
+
+def test_catalog_sync_does_not_delete_unlisted_instruments(
+    global_context_database,
+):
+    catalog = load_global_instrument_catalog()
+    without_copper = [
+        instrument
+        for instrument in catalog.instruments
+        if instrument.instrument_key != "commodity:copper"
+    ]
+    with psycopg.connect(global_context_database, autocommit=True) as conn:
+        database = storage_db.DB.__new__(storage_db.DB)
+        database.dsn = global_context_database
+        database.conn = conn
+
+        assert database.sync_global_instrument_catalog(without_copper) == 14
+        assert conn.execute(
+            """
+            SELECT is_active
+            FROM global_instruments
+            WHERE instrument_key = 'commodity:copper'
+            """
+        ).fetchone() == (True,)
 
 
 def test_backfill_symbol_source_reads_only_active_tracked_symbols(

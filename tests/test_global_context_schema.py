@@ -5,18 +5,12 @@ from schema_migrations import MIGRATIONS
 MIGRATION_SQL = (
     Path(__file__).resolve().parents[1] / "storage-service" / "0002_global_context.sql"
 ).read_text()
-TAIWAN_SEMICONDUCTOR_MIGRATION_SQL = (
-    Path(__file__).resolve().parents[1]
-    / "storage-service"
-    / "0003_taiwan_semiconductor_context.sql"
-).read_text()
 
 
 def test_global_context_migration_is_registered_after_baseline():
     assert [migration.version for migration in MIGRATIONS] == [
         "0001_baseline",
         "0002_global_context",
-        "0003_taiwan_semiconductor_context",
     ]
 
 
@@ -53,15 +47,3 @@ def test_seed_contains_the_complete_initial_universe_and_fx_orientation():
 
     assert MIGRATION_SQL.count("'local_currency_per_usd'") == 5
     assert "ON CONFLICT (instrument_key) DO NOTHING" in MIGRATION_SQL
-
-
-def test_taiwan_semiconductor_migration_adds_aliases_and_replaces_nvda_factor():
-    normalized = " ".join(TAIWAN_SEMICONDUCTOR_MIGRATION_SQL.split())
-
-    assert "'index:taiwan-semiconductor'" in normalized
-    assert "'Taiwan Semiconductor'" in normalized
-    assert '"taiwan_index":"IX0143"' in normalized
-    assert '"yahoo":"IX0143.TW"' in normalized
-    assert "WHERE symbol = 'NVDA'" in normalized
-    assert "instrument_key = 'index:taiwan-weighted'" in normalized
-    assert "ON CONFLICT (symbol, instrument_key) DO UPDATE" in normalized

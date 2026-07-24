@@ -10,6 +10,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.config import DATABASE_DSN
 from shared.global_context import NormalizedMarketBar
+from shared.global_instrument_catalog import CatalogInstrument
 from shared.schemas import ScoredPost, StockMetrics, StockQuote
 
 # Serializes post-retention maintenance across scheduler/manual invocations. The
@@ -70,6 +71,30 @@ UPSERT_GLOBAL_BAR_SQL = """
         volume = EXCLUDED.volume,
         provider = EXCLUDED.provider,
         fetched_at = NOW()
+"""
+
+UPSERT_GLOBAL_INSTRUMENT_SQL = """
+    INSERT INTO global_instruments (
+        instrument_key, display_name, asset_class, currency, exchange,
+        timezone, provider_aliases, session_metadata, quote_convention,
+        is_active
+    )
+    VALUES (
+        %s, %s, %s, %s, %s,
+        %s, %s::jsonb, %s::jsonb, %s,
+        %s
+    )
+    ON CONFLICT (instrument_key) DO UPDATE SET
+        display_name = EXCLUDED.display_name,
+        asset_class = EXCLUDED.asset_class,
+        currency = EXCLUDED.currency,
+        exchange = EXCLUDED.exchange,
+        timezone = EXCLUDED.timezone,
+        provider_aliases = EXCLUDED.provider_aliases,
+        session_metadata = EXCLUDED.session_metadata,
+        quote_convention = EXCLUDED.quote_convention,
+        is_active = EXCLUDED.is_active,
+        updated_at = NOW()
 """
 
 ROLLUP_AND_PRUNE_POSTS_SQL = """
@@ -180,8 +205,8 @@ class DB:
         if self.conn is not None:
             try:
                 self.conn.close()
-            except Exception:
-                pass
+            except psycopg.Error as exc:
+                print(f"Error closing stale database connection: {exc}")
         self.conn = psycopg.connect(self.dsn, autocommit=True)
 
     async def get_async_pool(self) -> AsyncConnectionPool:
@@ -209,10 +234,9 @@ class DB:
             for p in posts
         ]
         pool = await self.get_async_pool()
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.executemany(INSERT_POST_SQL, data)
-                return cur.rowcount
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.executemany(INSERT_POST_SQL, data)
+            return cur.rowcount
 
     def insert_scored_batch(self, posts: list[ScoredPost]) -> int:
         try:
@@ -238,6 +262,7 @@ class DB:
             )
             for p in posts
         ]
+        assert self.conn is not None
         with self.conn.cursor() as cur:
             # executemany is efficient for small-to-medium batches
             cur.executemany(INSERT_POST_SQL, data)
@@ -255,6 +280,7 @@ class DB:
             return self._do_insert_quote(quote)
 
     def _do_insert_quote(self, quote: StockQuote) -> bool:
+        assert self.conn is not None
         with self.conn.cursor() as cur:
             cur.execute(
                 INSERT_QUOTE_SQL,
@@ -277,6 +303,7 @@ class DB:
             return self._do_upsert_metrics(metrics)
 
     def _do_upsert_metrics(self, metrics: StockMetrics) -> bool:
+        assert self.conn is not None
         with self.conn.cursor() as cur:
             cur.execute(
                 UPSERT_METRICS_SQL,
@@ -327,6 +354,41 @@ class DB:
                     for symbol in normalized
                 ],
             )
+
+    def sync_global_instrument_catalog(
+        self,
+        instruments: list[CatalogInstrument],
+    ) -> int:
+        """Atomically upsert catalog entries without deleting unlisted rows."""
+        if not instruments:
+            return 0
+        assert self.conn is not None
+        values = [
+            (
+                instrument.instrument_key,
+                instrument.display_name,
+                instrument.asset_class,
+                instrument.currency,
+                instrument.exchange,
+                instrument.timezone,
+                json.dumps(instrument.provider_aliases),
+                json.dumps(instrument.session_metadata),
+                instrument.quote_convention,
+                instrument.is_active,
+            )
+            for instrument in instruments
+        ]
+        try:
+            with self.conn.transaction(), self.conn.cursor() as cur:
+                cur.executemany(UPSERT_GLOBAL_INSTRUMENT_SQL, values)
+        except psycopg.OperationalError:
+            # The upsert is idempotent, so retrying after an unknown commit
+            # outcome is safe.
+            self._connect()
+            assert self.conn is not None
+            with self.conn.transaction(), self.conn.cursor() as cur:
+                cur.executemany(UPSERT_GLOBAL_INSTRUMENT_SQL, values)
+        return len(values)
 
     def list_active_symbols(self) -> list[str]:
         """Return active tracked symbols directly from the source-of-truth table."""
@@ -409,17 +471,21 @@ class DB:
             return self._do_rollup_and_prune_posts(cutoff_ts)
 
     def _do_rollup_and_prune_posts(self, cutoff_ts) -> tuple[int, int]:
+        assert self.conn is not None
         with self.conn.cursor() as cur:
             cur.execute(
                 ROLLUP_AND_PRUNE_POSTS_SQL,
                 [POST_RETENTION_ADVISORY_LOCK_KEY, cutoff_ts],
             )
-            rolled_up_buckets, pruned_posts = cur.fetchone()
+            result = cur.fetchone()
+            assert result is not None
+            rolled_up_buckets, pruned_posts = result
             return rolled_up_buckets, pruned_posts
 
     def prune_old_quotes(self, cutoff_ts) -> int:
         """Delete stock quotes older than cutoff_ts. Returns the number of rows deleted."""
         sql = "DELETE FROM stock_quotes WHERE timestamp < %s"
+        assert self.conn is not None
         try:
             with self.conn.cursor() as cur:
                 cur.execute(sql, [cutoff_ts])
@@ -427,6 +493,7 @@ class DB:
         except psycopg.OperationalError:
             print("DB connection lost during quote prune, reconnecting...")
             self._connect()
+            assert self.conn is not None
             with self.conn.cursor() as cur:
                 cur.execute(sql, [cutoff_ts])
                 return cur.rowcount
@@ -440,30 +507,29 @@ class DB:
     ) -> tuple[int, int, int]:
         """Apply the 180-day/5-year/1-year context retention policy."""
         assert self.conn is not None
-        with self.conn.transaction():
-            with self.conn.cursor() as cur:
-                cur.execute(
-                    """
-                    DELETE FROM global_market_bars
-                    WHERE interval = '1h' AND ends_at < %s
-                    """,
-                    [hourly_cutoff],
-                )
-                hourly = cur.rowcount
-                cur.execute(
-                    """
-                    DELETE FROM global_market_bars
-                    WHERE interval = '1d' AND ends_at < %s
-                    """,
-                    [daily_cutoff],
-                )
-                daily = cur.rowcount
-                cur.execute(
-                    """
-                    DELETE FROM global_event_signals
-                    WHERE occurred_at < %s
-                    """,
-                    [event_cutoff],
-                )
-                events = cur.rowcount
+        with self.conn.transaction(), self.conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM global_market_bars
+                WHERE interval = '1h' AND ends_at < %s
+                """,
+                [hourly_cutoff],
+            )
+            hourly = cur.rowcount
+            cur.execute(
+                """
+                DELETE FROM global_market_bars
+                WHERE interval = '1d' AND ends_at < %s
+                """,
+                [daily_cutoff],
+            )
+            daily = cur.rowcount
+            cur.execute(
+                """
+                DELETE FROM global_event_signals
+                WHERE occurred_at < %s
+                """,
+                [event_cutoff],
+            )
+            events = cur.rowcount
         return hourly, daily, events
