@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import psycopg
 import pytest
 
+from shared.messaging import RequeueError
 from shared.schemas import ScoredPost
 
 
@@ -199,9 +200,90 @@ async def test_storage_worker_requeues_whole_batch_after_transient_failure(
         await asyncio.wait_for(requeued.wait(), timeout=1)
     finally:
         worker.cancel()
-        await worker
+        with pytest.raises(asyncio.CancelledError):
+            await worker
 
     db.insert_scored_batch_async.assert_awaited_once_with(posts)
     for message in messages:
         message.nack.assert_awaited_once_with(requeue=True)
         message.ack.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_storage_worker_surfaces_requeue_failure_after_attempting_all_messages(
+    monkeypatch,
+):
+    posts = [_post("one"), _post("two")]
+    messages = [_message(post) for post in posts]
+    messages[0].nack.side_effect = RuntimeError("channel closed")
+    db = MagicMock()
+    db.insert_scored_batch_async = AsyncMock(
+        side_effect=psycopg.OperationalError("database unavailable")
+    )
+    queue = asyncio.Queue()
+    for post, message in zip(posts, messages):
+        await queue.put((message, post))
+
+    monkeypatch.setattr(storage_main, "BATCH_SIZE", len(posts))
+
+    with pytest.raises(RequeueError):
+        await asyncio.wait_for(
+            storage_main.db_writer_worker(queue, db, _channel()),
+            timeout=1,
+        )
+
+    for message in messages:
+        message.nack.assert_awaited_once_with(requeue=True)
+
+
+@pytest.mark.asyncio
+async def test_storage_worker_requeues_partial_batch_and_propagates_cancellation(
+    monkeypatch,
+):
+    post = _post("one")
+    message = _message(post)
+    queue = asyncio.Queue()
+    await queue.put((message, post))
+    monkeypatch.setattr(storage_main, "BATCH_SIZE", 2)
+    monkeypatch.setattr(storage_main, "BATCH_TIMEOUT", 10)
+
+    worker = asyncio.create_task(
+        storage_main.db_writer_worker(queue, MagicMock(), _channel())
+    )
+    while not queue.empty():
+        await asyncio.sleep(0)
+    worker.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+
+    message.nack.assert_awaited_once_with(requeue=True)
+
+
+@pytest.mark.asyncio
+async def test_storage_session_requeues_buffer_and_surfaces_worker_failure(
+    monkeypatch,
+):
+    async def fail_supervisor(*_tasks):
+        raise RuntimeError("database worker crashed")
+
+    monkeypatch.setattr(
+        storage_main,
+        "supervise_long_running",
+        fail_supervisor,
+    )
+    post = _post("one")
+    message = _message(post)
+    queue = asyncio.Queue()
+    await queue.put((message, post))
+
+    with pytest.raises(RuntimeError, match="database worker crashed"):
+        await storage_main.run_consumer_session(
+            MagicMock(),
+            queue,
+            MagicMock(),
+            _channel(),
+        )
+
+    assert queue.empty()
+    message.nack.assert_awaited_once_with(requeue=True)

@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -247,3 +248,62 @@ async def test_sentiment_dead_letters_invalid_model_output(monkeypatch):
     }
     message.ack.assert_awaited_once_with()
     metric.labels.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sentiment_session_requeues_buffer_and_surfaces_worker_failure(
+    monkeypatch,
+):
+    async def fail_supervisor(*_tasks):
+        raise RuntimeError("batch worker crashed")
+
+    monkeypatch.setattr(
+        sentiment_main,
+        "supervise_long_running",
+        fail_supervisor,
+    )
+    message = _message(_clean_post().model_dump_json().encode())
+    queue = asyncio.Queue()
+    await queue.put((message, _clean_post()))
+
+    with pytest.raises(RuntimeError, match="batch worker crashed"):
+        await sentiment_main.run_consumer_session(
+            MagicMock(),
+            queue,
+            MagicMock(),
+            _channel(),
+        )
+
+    assert queue.empty()
+    message.nack.assert_awaited_once_with(requeue=True)
+
+
+@pytest.mark.asyncio
+async def test_sentiment_session_preserves_shutdown_cancellation_when_nack_fails(
+    monkeypatch,
+    caplog,
+):
+    async def cancel_supervisor(*_tasks):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        sentiment_main,
+        "supervise_long_running",
+        cancel_supervisor,
+    )
+    message = _message(_clean_post().model_dump_json().encode())
+    message.nack.side_effect = RuntimeError("channel closed")
+    queue = asyncio.Queue()
+    await queue.put((message, _clean_post()))
+
+    with pytest.raises(asyncio.CancelledError):
+        await sentiment_main.run_consumer_session(
+            MagicMock(),
+            queue,
+            MagicMock(),
+            _channel(),
+        )
+
+    assert queue.empty()
+    message.nack.assert_awaited_once_with(requeue=True)
+    assert "closing the channel will return unacked messages" in caplog.text

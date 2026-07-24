@@ -24,10 +24,13 @@ from shared.config import (
 from db import DB
 from shared.metrics import start_metrics_server, MESSAGES_PROCESSED_TOTAL
 from shared.messaging import (
+    RequeueError,
     dead_letter_message,
     declare_dead_letter_queue,
-    requeue_unprocessed,
+    requeue_buffered_messages,
+    requeue_unprocessed_messages,
 )
+from shared.runtime import supervise_long_running
 
 # Configure logging
 logging.basicConfig(
@@ -188,12 +191,7 @@ async def db_writer_worker(
                         e,
                         exc_info=True,
                     )
-                    # Requeue all messages in the batch
-                    for message in batch_messages:
-                        try:
-                            await requeue_unprocessed(message)
-                        except Exception:
-                            pass
+                    await requeue_unprocessed_messages(batch_messages)
 
                 batch_posts = []
                 batch_messages = []
@@ -201,19 +199,20 @@ async def db_writer_worker(
 
         except asyncio.CancelledError:
             # Requeue any messages that are in the current batch if cancelled
-            for message in batch_messages:
-                try:
-                    await requeue_unprocessed(message)
-                except Exception:
-                    pass
-            break
+            try:
+                await requeue_unprocessed_messages(batch_messages)
+            except RequeueError:
+                logger.error(
+                    "Could not requeue every in-flight storage message during "
+                    "shutdown; closing the channel will return unacked messages",
+                    exc_info=True,
+                )
+            raise
+        except RequeueError:
+            raise
         except Exception as e:
             logger.error(f"Error in database writer worker: {e}", exc_info=True)
-            for message in batch_messages:
-                try:
-                    await requeue_unprocessed(message)
-                except Exception:
-                    pass
+            await requeue_unprocessed_messages(batch_messages)
             batch_posts = []
             batch_messages = []
             await asyncio.sleep(1)
@@ -262,6 +261,76 @@ async def rollup_scheduler(db: DB):
         await asyncio.sleep(interval_seconds)
 
 
+async def consume_input_messages(
+    input_queue,
+    queue: asyncio.Queue,
+    channel: aio_pika.Channel,
+) -> None:
+    async with input_queue.iterator() as queue_iter:
+        async for message in queue_iter:
+            try:
+                post = ScoredPost.model_validate_json(message.body)
+                await queue.put((message, post))
+            except ValidationError as e:
+                logger.error(
+                    "Malformed message, moving to dead-letter queue: %s",
+                    e,
+                )
+                await dead_letter_message(
+                    message,
+                    channel,
+                    INPUT_QUEUE,
+                    e,
+                )
+
+
+async def run_consumer_session(
+    input_queue,
+    queue: asyncio.Queue,
+    db: DB,
+    channel: aio_pika.Channel,
+) -> None:
+    try:
+        await supervise_long_running(
+            (
+                "storage batch worker",
+                lambda: db_writer_worker(queue, db, channel),
+            ),
+            (
+                "storage queue consumer",
+                lambda: consume_input_messages(input_queue, queue, channel),
+            ),
+            (
+                "storage rollup scheduler",
+                lambda: rollup_scheduler(db),
+            ),
+        )
+    except asyncio.CancelledError:
+        logger.info(
+            "Shutting down: nacking %s buffered storage messages...",
+            queue.qsize(),
+        )
+        try:
+            await requeue_buffered_messages(queue)
+        except RequeueError:
+            logger.error(
+                "Could not requeue every buffered storage message during "
+                "shutdown; closing the channel will return unacked messages",
+                exc_info=True,
+            )
+        raise
+    except Exception as session_error:
+        logger.info(
+            "Consumer session failed: nacking %s buffered storage messages...",
+            queue.qsize(),
+        )
+        try:
+            await requeue_buffered_messages(queue)
+        except RequeueError as requeue_error:
+            raise requeue_error from session_error
+        raise
+
+
 async def main():
     logger.info("Connecting to database...")
     start_metrics_server(8008)
@@ -269,8 +338,6 @@ async def main():
     logger.info("Database connection established.")
 
     rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"
-    queue = asyncio.Queue()
-
     while True:
         try:
             logger.info("Connecting to RabbitMQ...")
@@ -281,58 +348,32 @@ async def main():
                 # Prefetch count of BATCH_SIZE * 2 to keep local queue buffered
                 await channel.set_qos(prefetch_count=BATCH_SIZE * 2)
 
-                await channel.declare_queue(INPUT_QUEUE, durable=True)
+                input_queue = await channel.declare_queue(
+                    INPUT_QUEUE,
+                    durable=True,
+                )
                 await declare_dead_letter_queue(channel, INPUT_QUEUE)
 
-                # Start the background batch database writer worker
-                worker_task = asyncio.create_task(
-                    db_writer_worker(queue, db, channel)
+                queue = asyncio.Queue(maxsize=BATCH_SIZE * 2)
+                logger.info(
+                    "Listening on '%s' (Batch size: %s, Timeout: %ss)...",
+                    INPUT_QUEUE,
+                    BATCH_SIZE,
+                    BATCH_TIMEOUT,
                 )
-                # Start the background database maintenance scheduler
-                scheduler_task = asyncio.create_task(rollup_scheduler(db))
-
-                logger.info(f"Listening on '{INPUT_QUEUE}' (Batch size: {BATCH_SIZE}, Timeout: {BATCH_TIMEOUT}s)...")
-
-                try:
-                    input_queue = await channel.declare_queue(INPUT_QUEUE, durable=True)
-                    async with input_queue.iterator() as queue_iter:
-                        async for message in queue_iter:
-                            try:
-                                post = ScoredPost.model_validate_json(message.body)
-                                await queue.put((message, post))
-                            except ValidationError as e:
-                                logger.error(
-                                    "Malformed message, moving to dead-letter "
-                                    f"queue: {e}"
-                                )
-                                await dead_letter_message(
-                                    message,
-                                    channel,
-                                    INPUT_QUEUE,
-                                    e,
-                                )
-                finally:
-                    worker_task.cancel()
-                    scheduler_task.cancel()
-                    try:
-                        await worker_task
-                    except asyncio.CancelledError:
-                        pass
-                    try:
-                        await scheduler_task
-                    except asyncio.CancelledError:
-                        pass
-                    # Drain and nack queue
-                    logger.info(f"Shutting down: nacking {queue.qsize()} buffered messages in local queue...")
-                    while not queue.empty():
-                        try:
-                            message, _ = queue.get_nowait()
-                            await requeue_unprocessed(message)
-                        except Exception as e:
-                            logger.error(f"Error nacking message during shutdown: {e}")
+                await run_consumer_session(
+                    input_queue,
+                    queue,
+                    db,
+                    channel,
+                )
 
         except Exception as e:
-            logger.error(f"Error in storage consumer connection: {e}. Retrying in 10s...")
+            logger.error(
+                "Error in storage consumer connection: %s. Retrying in 10s...",
+                e,
+                exc_info=True,
+            )
             await asyncio.sleep(10)
 
 

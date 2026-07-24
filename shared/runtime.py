@@ -10,8 +10,39 @@ These helpers install ``SIGINT``/``SIGTERM`` handlers so shutdown is clean.
 import asyncio
 import logging
 import signal
+from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger("runtime")
+
+LongRunningTaskFactory = Callable[[], Awaitable[None]]
+
+
+async def supervise_long_running(
+    *tasks: tuple[str, LongRunningTaskFactory],
+) -> None:
+    """Run cooperating service tasks and fail the session if any task stops.
+
+    A normal return is unexpected for these long-lived workers and is converted
+    into an error. ``TaskGroup`` cancels and awaits every sibling before
+    propagating failure or caller cancellation, so no detached consumer tasks
+    survive a RabbitMQ session.
+    """
+    if not tasks:
+        raise ValueError("at least one long-running task is required")
+
+    async def require_running(
+        name: str,
+        task_factory: LongRunningTaskFactory,
+    ) -> None:
+        await task_factory()
+        raise RuntimeError(f"{name} stopped unexpectedly")
+
+    async with asyncio.TaskGroup() as task_group:
+        for name, task_factory in tasks:
+            task_group.create_task(
+                require_running(name, task_factory),
+                name=name,
+            )
 
 
 def run(main, *, name: str = "service") -> None:

@@ -22,11 +22,14 @@ from shared.config import (
 from model import SentimentModel
 from shared.metrics import start_metrics_server, MESSAGES_PROCESSED_TOTAL
 from shared.messaging import (
+    RequeueError,
     dead_letter_message,
     declare_dead_letter_queue,
-    requeue_unprocessed,
+    requeue_buffered_messages,
+    requeue_unprocessed_messages,
     retry_or_dead_letter,
 )
+from shared.runtime import supervise_long_running
 
 # Configure logging
 logging.basicConfig(
@@ -161,22 +164,89 @@ async def batch_worker(queue: asyncio.Queue, model: SentimentModel, channel: aio
 
         except asyncio.CancelledError:
             # Requeue any messages that are in the current batch if cancelled
-            for message in batch_messages:
-                try:
-                    await requeue_unprocessed(message)
-                except Exception:
-                    pass
-            break
+            try:
+                await requeue_unprocessed_messages(batch_messages)
+            except RequeueError:
+                logger.error(
+                    "Could not requeue every in-flight sentiment message during "
+                    "shutdown; closing the channel will return unacked messages",
+                    exc_info=True,
+                )
+            raise
+        except RequeueError:
+            raise
         except Exception as e:
             logger.error(f"Error in batch worker loop: {e}", exc_info=True)
-            for message in batch_messages:
-                try:
-                    await requeue_unprocessed(message)
-                except Exception:
-                    pass
+            await requeue_unprocessed_messages(batch_messages)
             batch_posts = []
             batch_messages = []
             await asyncio.sleep(1)
+
+
+async def consume_input_messages(
+    input_queue,
+    queue: asyncio.Queue,
+    channel: aio_pika.Channel,
+) -> None:
+    async with input_queue.iterator() as queue_iter:
+        async for message in queue_iter:
+            try:
+                post = CleanPost.model_validate_json(message.body)
+                await queue.put((message, post))
+            except ValidationError as e:
+                logger.error(
+                    "Malformed message, moving to dead-letter queue: %s",
+                    e,
+                )
+                await dead_letter_message(
+                    message,
+                    channel,
+                    INPUT_QUEUE,
+                    e,
+                )
+
+
+async def run_consumer_session(
+    input_queue,
+    queue: asyncio.Queue,
+    model: SentimentModel,
+    channel: aio_pika.Channel,
+) -> None:
+    try:
+        await supervise_long_running(
+            (
+                "sentiment batch worker",
+                lambda: batch_worker(queue, model, channel),
+            ),
+            (
+                "sentiment queue consumer",
+                lambda: consume_input_messages(input_queue, queue, channel),
+            ),
+        )
+    except asyncio.CancelledError:
+        logger.info(
+            "Shutting down: nacking %s buffered sentiment messages...",
+            queue.qsize(),
+        )
+        try:
+            await requeue_buffered_messages(queue)
+        except RequeueError:
+            logger.error(
+                "Could not requeue every buffered sentiment message during "
+                "shutdown; closing the channel will return unacked messages",
+                exc_info=True,
+            )
+        raise
+    except Exception as session_error:
+        logger.info(
+            "Consumer session failed: nacking %s buffered sentiment messages...",
+            queue.qsize(),
+        )
+        try:
+            await requeue_buffered_messages(queue)
+        except RequeueError as requeue_error:
+            raise requeue_error from session_error
+        raise
 
 
 async def main():
@@ -186,8 +256,6 @@ async def main():
     logger.info("Sentiment model loaded successfully.")
 
     rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"
-    queue = asyncio.Queue()
-
     while True:
         try:
             logger.info("Connecting to RabbitMQ...")
@@ -198,51 +266,33 @@ async def main():
                 # Prefetch a decent amount to allow local queue buffering
                 await channel.set_qos(prefetch_count=BATCH_SIZE * 2)
 
-                await channel.declare_queue(INPUT_QUEUE, durable=True)
+                input_queue = await channel.declare_queue(
+                    INPUT_QUEUE,
+                    durable=True,
+                )
                 await channel.declare_queue(OUTPUT_QUEUE, durable=True)
                 await declare_dead_letter_queue(channel, INPUT_QUEUE)
 
-                # Start background batch worker
-                worker_task = asyncio.create_task(batch_worker(queue, model, channel))
-
-                logger.info(f"Listening on '{INPUT_QUEUE}' (Batch size: {BATCH_SIZE}, Timeout: {BATCH_TIMEOUT}s)...")
-
-                try:
-                    # Fetch messages and push to local queue
-                    input_queue = await channel.declare_queue(INPUT_QUEUE, durable=True)
-                    async with input_queue.iterator() as queue_iter:
-                        async for message in queue_iter:
-                            try:
-                                post = CleanPost.model_validate_json(message.body)
-                                await queue.put((message, post))
-                            except ValidationError as e:
-                                logger.error(
-                                    "Malformed message, moving to dead-letter "
-                                    f"queue: {e}"
-                                )
-                                await dead_letter_message(
-                                    message,
-                                    channel,
-                                    INPUT_QUEUE,
-                                    e,
-                                )
-                finally:
-                    worker_task.cancel()
-                    try:
-                        await worker_task
-                    except asyncio.CancelledError:
-                        pass
-                    # Drain and nack queue
-                    logger.info(f"Shutting down: nacking {queue.qsize()} buffered messages in local queue...")
-                    while not queue.empty():
-                        try:
-                            message, _ = queue.get_nowait()
-                            await requeue_unprocessed(message)
-                        except Exception as e:
-                            logger.error(f"Error nacking message during shutdown: {e}")
+                queue = asyncio.Queue(maxsize=BATCH_SIZE * 2)
+                logger.info(
+                    "Listening on '%s' (Batch size: %s, Timeout: %ss)...",
+                    INPUT_QUEUE,
+                    BATCH_SIZE,
+                    BATCH_TIMEOUT,
+                )
+                await run_consumer_session(
+                    input_queue,
+                    queue,
+                    model,
+                    channel,
+                )
 
         except Exception as e:
-            logger.error(f"Error in sentiment consumer connection: {e}. Retrying in 10s...")
+            logger.error(
+                "Error in sentiment consumer connection: %s. Retrying in 10s...",
+                e,
+                exc_info=True,
+            )
             await asyncio.sleep(10)
 
 

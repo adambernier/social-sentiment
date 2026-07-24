@@ -8,10 +8,32 @@ route malformed or repeatedly failing payloads there before acknowledging the
 original message.
 """
 
+import asyncio
+import logging
+from collections.abc import Iterable
+
 import aio_pika
 
 
 PROCESSING_ATTEMPT_HEADER = "x-processing-attempt"
+logger = logging.getLogger("messaging")
+
+
+class RequeueError(RuntimeError):
+    """One or more RabbitMQ deliveries could not be returned to their queue."""
+
+    def __init__(
+        self,
+        failures: list[tuple[aio_pika.IncomingMessage, Exception]],
+        attempted_count: int,
+    ):
+        self.failures = tuple(failures)
+        self.failed_count = len(failures)
+        self.attempted_count = attempted_count
+        super().__init__(
+            f"failed to requeue {self.failed_count} of "
+            f"{self.attempted_count} unprocessed RabbitMQ messages"
+        )
 
 
 def dead_letter_queue_name(input_queue: str) -> str:
@@ -107,3 +129,62 @@ async def requeue_unprocessed(message: aio_pika.IncomingMessage) -> None:
     """Return in-flight work during shutdown/channel errors without penalizing it."""
     if not message.processed:
         await message.nack(requeue=True)
+
+
+async def requeue_unprocessed_messages(
+    messages: Iterable[aio_pika.IncomingMessage],
+) -> int:
+    """Attempt every unprocessed delivery and report any failed dispositions.
+
+    Continuing after an individual ``nack`` failure prevents one broken
+    delivery object from hiding the disposition of healthy neighbors. Raising
+    after all attempts lets the owning consumer tear down its channel, at which
+    point RabbitMQ returns any deliveries that remain unacknowledged.
+    """
+    attempted_count = 0
+    requeued_count = 0
+    failures: list[tuple[aio_pika.IncomingMessage, Exception]] = []
+
+    for message in messages:
+        if message.processed:
+            continue
+
+        attempted_count += 1
+        try:
+            await requeue_unprocessed(message)
+        except Exception as error:
+            failures.append((message, error))
+            logger.error(
+                "Failed to requeue RabbitMQ delivery %s: %s",
+                getattr(message, "delivery_tag", "unknown"),
+                error,
+                exc_info=True,
+            )
+        else:
+            requeued_count += 1
+
+    if failures:
+        raise RequeueError(failures, attempted_count)
+
+    return requeued_count
+
+
+async def requeue_buffered_messages(
+    queue: asyncio.Queue[tuple[aio_pika.IncomingMessage, object]],
+) -> int:
+    """Drain a local consumer buffer and return every unprocessed delivery.
+
+    Items are removed from the process-local queue before dispositions are
+    attempted. If a disposition fails and the caller reconnects, stale message
+    objects from the closed channel therefore cannot leak into the next
+    RabbitMQ session.
+    """
+    messages: list[aio_pika.IncomingMessage] = []
+    while True:
+        try:
+            message, _payload = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        messages.append(message)
+
+    return await requeue_unprocessed_messages(messages)

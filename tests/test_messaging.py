@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import aio_pika
@@ -5,9 +6,12 @@ import pytest
 
 from shared.messaging import (
     PROCESSING_ATTEMPT_HEADER,
+    RequeueError,
     dead_letter_queue_name,
     declare_dead_letter_queue,
+    requeue_buffered_messages,
     requeue_unprocessed,
+    requeue_unprocessed_messages,
     retry_or_dead_letter,
 )
 
@@ -118,3 +122,50 @@ async def test_shutdown_requeues_only_unprocessed_messages():
 
     unprocessed.nack.assert_awaited_once_with(requeue=True)
     processed.nack.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_batch_requeue_attempts_every_message_and_surfaces_failures(caplog):
+    failed = _message()
+    failed.nack.side_effect = RuntimeError("channel closed")
+    processed = _message(processed=True)
+    requeued = _message()
+
+    with pytest.raises(RequeueError) as exc_info:
+        await requeue_unprocessed_messages([failed, processed, requeued])
+
+    failed.nack.assert_awaited_once_with(requeue=True)
+    processed.nack.assert_not_awaited()
+    requeued.nack.assert_awaited_once_with(requeue=True)
+    assert exc_info.value.failed_count == 1
+    assert exc_info.value.attempted_count == 2
+    assert "channel closed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_batch_requeue_succeeds_when_all_unprocessed_messages_are_nacked():
+    messages = [_message(), _message(), _message(processed=True)]
+
+    requeued_count = await requeue_unprocessed_messages(messages)
+
+    assert requeued_count == 2
+    messages[0].nack.assert_awaited_once_with(requeue=True)
+    messages[1].nack.assert_awaited_once_with(requeue=True)
+    messages[2].nack.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_buffer_requeue_drains_stale_deliveries_even_when_nack_fails():
+    queue = asyncio.Queue()
+    failed = _message()
+    failed.nack.side_effect = RuntimeError("channel closed")
+    requeued = _message()
+    await queue.put((failed, object()))
+    await queue.put((requeued, object()))
+
+    with pytest.raises(RequeueError):
+        await requeue_buffered_messages(queue)
+
+    assert queue.empty()
+    failed.nack.assert_awaited_once_with(requeue=True)
+    requeued.nack.assert_awaited_once_with(requeue=True)
