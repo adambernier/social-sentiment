@@ -11,6 +11,147 @@ from fastapi.testclient import TestClient
 api_main = importlib.import_module("api-service.main")
 app = api_main.app
 
+
+@pytest.mark.asyncio
+async def test_websocket_broadcast_does_not_let_stalled_client_block_healthy_client(
+):
+    manager = api_main.ConnectionManager(send_timeout_seconds=0.5)
+    healthy_sent = asyncio.Event()
+    stalled_cancelled = asyncio.Event()
+
+    async def stall_send(_message):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stalled_cancelled.set()
+
+    async def healthy_send(_message):
+        healthy_sent.set()
+
+    stalled = MagicMock()
+    stalled.send_text = AsyncMock(side_effect=stall_send)
+    healthy = MagicMock()
+    healthy.send_text = AsyncMock(side_effect=healthy_send)
+    manager.active_connections = [stalled, healthy]
+
+    broadcast = asyncio.create_task(manager.broadcast("new-post"))
+    await asyncio.wait_for(healthy_sent.wait(), timeout=0.25)
+
+    assert not broadcast.done()
+
+    await asyncio.wait_for(broadcast, timeout=1)
+
+    stalled.send_text.assert_awaited_once_with("new-post")
+    healthy.send_text.assert_awaited_once_with("new-post")
+    assert stalled_cancelled.is_set()
+    assert manager.active_connections == [healthy]
+
+
+@pytest.mark.asyncio
+async def test_websocket_broadcast_removes_only_clients_with_send_errors(caplog):
+    manager = api_main.ConnectionManager(send_timeout_seconds=0.2)
+    failed = MagicMock()
+    failed.send_text = AsyncMock(side_effect=RuntimeError("connection reset"))
+    healthy = MagicMock()
+    healthy.send_text = AsyncMock()
+    manager.active_connections = [failed, healthy]
+
+    await manager.broadcast("new-post")
+
+    failed.send_text.assert_awaited_once_with("new-post")
+    healthy.send_text.assert_awaited_once_with("new-post")
+    assert manager.active_connections == [healthy]
+    assert "connection reset" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_websocket_broadcast_propagates_cancellation_without_leaking_send_tasks():
+    manager = api_main.ConnectionManager(send_timeout_seconds=10)
+    send_started = asyncio.Event()
+    send_cancelled = asyncio.Event()
+
+    async def blocked_send(_message):
+        send_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            send_cancelled.set()
+
+    connection = MagicMock()
+    connection.send_text = AsyncMock(side_effect=blocked_send)
+    manager.active_connections = [connection]
+
+    broadcast = asyncio.create_task(manager.broadcast("new-post"))
+    await asyncio.wait_for(send_started.wait(), timeout=0.5)
+    broadcast.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await broadcast
+
+    await asyncio.wait_for(send_cancelled.wait(), timeout=0.5)
+    assert broadcast.done()
+    assert manager.active_connections == [connection]
+
+
+@pytest.mark.asyncio
+async def test_websocket_broadcast_uses_connection_snapshot():
+    manager = api_main.ConnectionManager(send_timeout_seconds=0.2)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def delayed_send(_message):
+        first_started.set()
+        await release_first.wait()
+
+    first = MagicMock()
+    first.send_text = AsyncMock(side_effect=delayed_send)
+    newcomer = MagicMock()
+    newcomer.send_text = AsyncMock()
+    manager.active_connections = [first]
+
+    broadcast = asyncio.create_task(manager.broadcast("first-message"))
+    await asyncio.wait_for(first_started.wait(), timeout=0.5)
+    manager.active_connections.append(newcomer)
+    release_first.set()
+    await broadcast
+
+    newcomer.send_text.assert_not_awaited()
+
+    await manager.broadcast("second-message")
+
+    first.send_text.assert_awaited_with("second-message")
+    newcomer.send_text.assert_awaited_once_with("second-message")
+
+
+@pytest.mark.asyncio
+async def test_websocket_endpoint_disconnects_client_when_cancelled():
+    manager = api_main.ConnectionManager(send_timeout_seconds=0.2)
+    receive_started = asyncio.Event()
+    receive_cancelled = asyncio.Event()
+
+    async def blocked_receive():
+        receive_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            receive_cancelled.set()
+
+    websocket = MagicMock()
+    websocket.accept = AsyncMock()
+    websocket.receive_text = AsyncMock(side_effect=blocked_receive)
+
+    with patch.object(api_main, "manager", manager):
+        handler = asyncio.create_task(api_main.websocket_endpoint(websocket))
+        await asyncio.wait_for(receive_started.wait(), timeout=0.5)
+        handler.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await handler
+
+    await asyncio.wait_for(receive_cancelled.wait(), timeout=0.5)
+    assert manager.active_connections == []
+
+
 @pytest.fixture
 def mock_db():
     # Patch postgres_listener to avoid starting background DB listener tasks

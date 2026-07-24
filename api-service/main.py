@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import logging
 import math
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -31,8 +32,22 @@ from shared.symbols import (
 # Global pool instance
 db_pool: Optional[AsyncConnectionPool] = None
 
+logger = logging.getLogger("api-service")
+DEFAULT_WEBSOCKET_SEND_TIMEOUT_SECONDS = 5.0
+
+
 class ConnectionManager:
-    def __init__(self):
+    def __init__(
+        self,
+        send_timeout_seconds: float = DEFAULT_WEBSOCKET_SEND_TIMEOUT_SECONDS,
+    ):
+        if (
+            not math.isfinite(send_timeout_seconds)
+            or send_timeout_seconds <= 0
+        ):
+            raise ValueError("send_timeout_seconds must be positive and finite")
+
+        self.send_timeout_seconds = send_timeout_seconds
         self.active_connections: list[WebSocket] = []
 
     async def connect(self, websocket: WebSocket):
@@ -45,15 +60,40 @@ class ConnectionManager:
         except ValueError:
             pass
 
+    async def _send_text(self, connection: WebSocket, message: str) -> bool:
+        try:
+            await asyncio.wait_for(
+                connection.send_text(message),
+                timeout=self.send_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.warning(
+                "WebSocket send timed out after %.1fs; dropping client",
+                self.send_timeout_seconds,
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "WebSocket send failed; dropping client: %s",
+                exc,
+            )
+            return False
+        return True
+
     async def broadcast(self, message: str):
-        dead: list[WebSocket] = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(message)
-            except Exception:
-                dead.append(connection)
-        for connection in dead:
-            self.disconnect(connection)
+        connections = tuple(self.active_connections)
+        if not connections:
+            return
+
+        delivered = await asyncio.gather(
+            *(
+                self._send_text(connection, message)
+                for connection in connections
+            )
+        )
+        for connection, was_delivered in zip(connections, delivered):
+            if not was_delivered:
+                self.disconnect(connection)
 
 manager = ConnectionManager()
 
@@ -1839,8 +1879,10 @@ async def websocket_endpoint(websocket: WebSocket):
             # Keep connection open and handle client disconnects
             await websocket.receive_text()
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-    except Exception:
+        pass
+    except Exception as exc:
+        logger.warning("WebSocket receive failed; disconnecting client: %s", exc)
+    finally:
         manager.disconnect(websocket)
 
 if __name__ == "__main__":
