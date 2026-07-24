@@ -2,6 +2,7 @@ import importlib
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -226,6 +227,67 @@ async def test_unconfigured_symbol_returns_typed_empty_context():
     assert response.events == []
     assert response.freshness.status == "empty"
     assert len(connection.cursor_instance.executions) == 1
+
+
+@pytest.mark.asyncio
+async def test_global_context_route_accepts_string_encoded_integer_horizon(
+    monkeypatch,
+):
+    observed = {}
+
+    async def fake_build_global_context(
+        _connection,
+        *,
+        symbol,
+        horizon_sessions,
+    ):
+        observed["symbol"] = symbol
+        observed["horizon_sessions"] = horizon_sessions
+        return context_api.GlobalContextResponse(
+            symbol=symbol,
+            configured=False,
+            horizon_sessions=horizon_sessions,
+            as_of=datetime.now(timezone.utc),
+            currency_orientation="test",
+            disclaimer="test",
+            factors=[],
+            events=[],
+            freshness=context_api.GlobalFreshnessResponse(
+                latest_factor_at=None,
+                latest_daily_at=None,
+                latest_event_at=None,
+                status="empty",
+            ),
+        )
+
+    monkeypatch.setattr(api_main, "GLOBAL_CONTEXT_ENABLED", True)
+    monkeypatch.setattr(
+        api_main,
+        "get_db_conn",
+        lambda: AsyncContext(object()),
+    )
+    monkeypatch.setattr(
+        api_main,
+        "build_global_context",
+        fake_build_global_context,
+    )
+    transport = httpx.ASGITransport(app=api_main.app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/api/stats/global-context",
+            params={"symbol": "nvda", "horizon_sessions": "30"},
+        )
+        invalid = await client.get(
+            "/api/stats/global-context",
+            params={"symbol": "NVDA", "horizon_sessions": "45"},
+        )
+
+    assert response.status_code == 200
+    assert observed == {"symbol": "NVDA", "horizon_sessions": 30}
+    assert invalid.status_code == 422
 
 
 @pytest.mark.asyncio

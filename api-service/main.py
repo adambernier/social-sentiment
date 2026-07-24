@@ -4,6 +4,7 @@ import logging
 import math
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from enum import IntEnum
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -29,6 +30,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.config import DATABASE_DSN, GLOBAL_CONTEXT_ENABLED, VIX_SYMBOL
+
 try:
     from .global_context_api import (
         EventRuleReplacement,
@@ -63,10 +65,7 @@ class ConnectionManager:
         self,
         send_timeout_seconds: float = DEFAULT_WEBSOCKET_SEND_TIMEOUT_SECONDS,
     ):
-        if (
-            not math.isfinite(send_timeout_seconds)
-            or send_timeout_seconds <= 0
-        ):
+        if not math.isfinite(send_timeout_seconds) or send_timeout_seconds <= 0:
             raise ValueError("send_timeout_seconds must be positive and finite")
 
         self.send_timeout_seconds = send_timeout_seconds
@@ -108,16 +107,15 @@ class ConnectionManager:
             return
 
         delivered = await asyncio.gather(
-            *(
-                self._send_text(connection, message)
-                for connection in connections
-            )
+            *(self._send_text(connection, message) for connection in connections)
         )
         for connection, was_delivered in zip(connections, delivered):
             if not was_delivered:
                 self.disconnect(connection)
 
+
 manager = ConnectionManager()
+
 
 async def postgres_listener():
     while True:
@@ -126,7 +124,7 @@ async def postgres_listener():
             async with conn:
                 async with conn.cursor() as cur:
                     await cur.execute("LISTEN new_posts;")
-                
+
                 print("Listening for new_posts channel notifications...")
                 async for notify in conn.notifies():
                     await manager.broadcast(notify.payload)
@@ -135,6 +133,7 @@ async def postgres_listener():
         except Exception as e:
             print(f"Postgres listener error: {e}. Reconnecting in 5s...")
             await asyncio.sleep(5)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -148,7 +147,7 @@ async def lifespan(app: FastAPI):
             min_size=5,
             max_size=20,
             open=False,
-            kwargs={"row_factory": psycopg.rows.dict_row}
+            kwargs={"row_factory": psycopg.rows.dict_row},
         )
         await db_pool.open()
 
@@ -169,6 +168,7 @@ async def lifespan(app: FastAPI):
         finally:
             await stop_symbol_registry()
 
+
 app = FastAPI(title="Social Sentiment API", lifespan=lifespan)
 Instrumentator().instrument(app).expose(app)
 
@@ -177,9 +177,7 @@ Instrumentator().instrument(app).expose(app)
 # cross-origin allowed); set CORS_ALLOW_ORIGINS only if an external browser
 # client must call the API cross-origin.
 ALLOWED_ORIGINS = [
-    o.strip()
-    for o in os.environ.get("CORS_ALLOW_ORIGINS", "").split(",")
-    if o.strip()
+    o.strip() for o in os.environ.get("CORS_ALLOW_ORIGINS", "").split(",") if o.strip()
 ]
 
 app.add_middleware(
@@ -193,9 +191,12 @@ app.add_middleware(
 ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
+
 async def verify_api_key(api_key: str = Security(api_key_header)):
     if not ADMIN_API_KEY:
-        raise HTTPException(status_code=403, detail="Admin API Key is not configured on the server")
+        raise HTTPException(
+            status_code=403, detail="Admin API Key is not configured on the server"
+        )
     if api_key != ADMIN_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid API Key")
     return api_key
@@ -204,6 +205,12 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
 def require_global_context_enabled() -> None:
     if not GLOBAL_CONTEXT_ENABLED:
         raise HTTPException(status_code=404, detail="Global context is disabled")
+
+
+class GlobalContextHorizon(IntEnum):
+    THIRTY_SESSIONS = 30
+    NINETY_SESSIONS = 90
+
 
 class TrackedSymbol(BaseModel):
     symbol: str
@@ -214,6 +221,7 @@ class TrackedSymbol(BaseModel):
     require_cashtag: bool = False
     block_phrases: list[str] = []
     is_active: bool = True
+
 
 @app.get("/api/admin/symbols", response_model=list[TrackedSymbol])
 async def get_admin_symbols(api_key: str = Depends(verify_api_key)):
@@ -228,8 +236,11 @@ async def get_admin_symbols(api_key: str = Depends(verify_api_key)):
             rows = await cur.fetchall()
             return rows
 
+
 @app.post("/api/admin/symbols")
-async def create_admin_symbol(symbol_data: TrackedSymbol, api_key: str = Depends(verify_api_key)):
+async def create_admin_symbol(
+    symbol_data: TrackedSymbol, api_key: str = Depends(verify_api_key)
+):
     query = """
         INSERT INTO tracked_symbols (symbol, keywords, future, sector, require_uppercase, require_cashtag, block_phrases, is_active)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -242,7 +253,7 @@ async def create_admin_symbol(symbol_data: TrackedSymbol, api_key: str = Depends
         symbol_data.require_uppercase,
         symbol_data.require_cashtag,
         json.dumps(symbol_data.block_phrases),
-        symbol_data.is_active
+        symbol_data.is_active,
     )
     try:
         async with get_db_conn() as conn:
@@ -252,8 +263,11 @@ async def create_admin_symbol(symbol_data: TrackedSymbol, api_key: str = Depends
     except psycopg.errors.UniqueViolation:
         raise HTTPException(status_code=400, detail="Symbol already exists")
 
+
 @app.put("/api/admin/symbols/{symbol}")
-async def update_admin_symbol(symbol: str, symbol_data: TrackedSymbol, api_key: str = Depends(verify_api_key)):
+async def update_admin_symbol(
+    symbol: str, symbol_data: TrackedSymbol, api_key: str = Depends(verify_api_key)
+):
     query = """
         UPDATE tracked_symbols
         SET keywords = %s, future = %s, sector = %s, require_uppercase = %s, require_cashtag = %s, block_phrases = %s, is_active = %s, updated_at = NOW()
@@ -267,7 +281,7 @@ async def update_admin_symbol(symbol: str, symbol_data: TrackedSymbol, api_key: 
         symbol_data.require_cashtag,
         json.dumps(symbol_data.block_phrases),
         symbol_data.is_active,
-        symbol
+        symbol,
     )
     async with get_db_conn() as conn:
         async with conn.cursor() as cur:
@@ -275,6 +289,7 @@ async def update_admin_symbol(symbol: str, symbol_data: TrackedSymbol, api_key: 
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Symbol not found")
     return {"status": "success"}
+
 
 @app.delete("/api/admin/symbols/{symbol}")
 async def delete_admin_symbol(symbol: str, api_key: str = Depends(verify_api_key)):
@@ -398,13 +413,16 @@ class PostResponse(BaseModel):
     scored_at: datetime
     engagement: int = 1
 
+
 class TopicStats(BaseModel):
     topic_label: Optional[str]
     count: int
 
+
 class SentimentStats(BaseModel):
     sentiment: str
     count: int
+
 
 class LeaderboardEntry(BaseModel):
     symbol: str
@@ -419,6 +437,7 @@ class LeaderboardEntry(BaseModel):
     baseline_hourly: float
     baseline_samples: int
 
+
 class SourceHealth(BaseModel):
     platform: str
     posts_1h: int
@@ -428,6 +447,7 @@ class SourceHealth(BaseModel):
     baseline_per_hour: Optional[float] = None  # recent avg rate (posts_24h / 24)
     status: str  # "active" | "quiet" | "stalled" | "silent"
 
+
 class MarketQuote(BaseModel):
     symbol: str
     timestamp: datetime
@@ -435,12 +455,14 @@ class MarketQuote(BaseModel):
     volume: int
     market_session: str
 
+
 class MarketDelta(BaseModel):
     symbol: str
     reference_price: float
     latest_price: float
     pct_change: float
     abs_change: float
+
 
 class StockMetricsResponse(BaseModel):
     symbol: str
@@ -462,12 +484,12 @@ class DashboardResponse(BaseModel):
     latest_quote: Optional[MarketQuote]
     metrics_data: Optional[StockMetricsResponse]
     primary_delta: Optional[MarketDelta]
-    
+
     primary_future_symbol: Optional[str]
     primary_future_quote: Optional[MarketQuote]
     primary_future_delta: Optional[MarketDelta]
     primary_future_market_data: list[MarketQuote]
-    
+
     vix_quote: Optional[MarketQuote]
     vix_delta: Optional[MarketDelta]
 
@@ -544,21 +566,21 @@ def compute_opportunity(
     vix_price: Optional[float] = None,
     pe_relative: Optional[float] = None,
     prev_prices: Optional[list[float]] = None,
-    prev_sentiments: Optional[list[float]] = None
+    prev_sentiments: Optional[list[float]] = None,
 ) -> dict:
     score = 0.0
     checklist = []
-    
+
     # 1. Price near support
     if price and support and price > 0:
         dist_to_support = (price - support) / price
-        if dist_to_support <= 0.025: # within 2.5% of support
+        if dist_to_support <= 0.025:  # within 2.5% of support
             score += 3.0
             checklist.append("Price near support level")
-        elif dist_to_support <= 0.05: # within 5% of support
+        elif dist_to_support <= 0.05:  # within 5% of support
             score += 1.5
             checklist.append("Price approaching support level")
-            
+
     # 2. Sentiment momentum (crossover)
     if sentiment is not None and sentiment_sma is not None:
         if sentiment > sentiment_sma:
@@ -568,15 +590,22 @@ def compute_opportunity(
             else:
                 score += 1.5
                 checklist.append("Bullish sentiment crossover (above negative SMA)")
-                
+
     # 3. Sentiment-price divergence (price down, sentiment up in recent trailing window)
-    if prev_prices and prev_sentiments and len(prev_prices) >= 3 and len(prev_sentiments) >= 3:
+    if (
+        prev_prices
+        and prev_sentiments
+        and len(prev_prices) >= 3
+        and len(prev_sentiments) >= 3
+    ):
         price_trend = prev_prices[-1] - prev_prices[0]
         sentiment_trend = prev_sentiments[-1] - prev_sentiments[0]
         if price_trend < 0 and sentiment_trend > 0.1:
             score += 2.0
-            checklist.append("Bullish sentiment divergence (price down, sentiment rising)")
-            
+            checklist.append(
+                "Bullish sentiment divergence (price down, sentiment rising)"
+            )
+
     # 4. Valuation vs sector benchmark
     if pe_relative is not None:
         if pe_relative < 0:
@@ -585,9 +614,9 @@ def compute_opportunity(
         elif pe_relative == 0:
             score += 1.0
             checklist.append("Fairly valued relative to sector benchmarks")
-            
+
     opportunity_pct = min(100.0, (score / 10.0) * 100.0)
-    
+
     # Classification
     if opportunity_pct >= 75.0:
         classification = "STRONG BUY"
@@ -601,13 +630,13 @@ def compute_opportunity(
     else:
         classification = "CAUTION / OVERBOUGHT"
         color = "rose"
-        
+
     # Strategy Recommendation
     strategy = "Hold / Sell Covered Calls"
     strategy_desc = "Neutral market stance. Capitalize on range-bound behavior using covered call writing."
-    
+
     vix = vix_price if vix_price is not None else 15.0
-    
+
     if classification in ("STRONG BUY", "ACCUMULATE"):
         if vix < 15.0:
             strategy = "Long Call Option (Buy Call)"
@@ -624,15 +653,17 @@ def compute_opportunity(
             strategy_desc = "High volatility overbought. Sell call credit spreads for fast premium decay."
         else:
             strategy = "Protect Longs / Buy Puts"
-            strategy_desc = "Overbought stance. Trim shares or buy puts to hedge downside risk."
-            
+            strategy_desc = (
+                "Overbought stance. Trim shares or buy puts to hedge downside risk."
+            )
+
     return {
         "score": opportunity_pct,
         "classification": classification,
         "color": color,
         "strategy": strategy,
         "description": strategy_desc,
-        "checklist": checklist
+        "checklist": checklist,
     }
 
 
@@ -695,6 +726,7 @@ def get_db_conn():
         raise RuntimeError("Database pool not initialized")
     return db_pool.connection()
 
+
 @app.get("/api/posts", response_model=list[PostResponse])
 async def get_posts(
     symbol: Optional[str] = None,
@@ -703,7 +735,7 @@ async def get_posts(
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
     limit: int = Query(20, le=1000),
-    offset: int = Query(0, ge=0)
+    offset: int = Query(0, ge=0),
 ):
     query = "SELECT id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, scored_at, engagement FROM posts"
     conditions = []
@@ -736,11 +768,12 @@ async def get_posts(
             await cur.execute(query, params)
             return await cur.fetchall()
 
+
 @app.get("/api/stats/sentiment", response_model=list[SentimentStats])
 async def get_sentiment_stats(
     symbol: Optional[str] = None,
     platform: Optional[str] = None,
-    hours: int = Query(24, gt=0, le=8760)
+    hours: int = Query(24, gt=0, le=8760),
 ):
     query = """
         SELECT sentiment, COUNT(*) as count 
@@ -763,11 +796,12 @@ async def get_sentiment_stats(
             await cur.execute(query, params)
             return await cur.fetchall()
 
+
 @app.get("/api/stats/topics", response_model=list[TopicStats])
 async def get_topic_stats(
     symbol: Optional[str] = None,
     platform: Optional[str] = None,
-    hours: int = Query(24, gt=0, le=8760)
+    hours: int = Query(24, gt=0, le=8760),
 ):
     query = """
         SELECT topic_label, COUNT(*) as count 
@@ -790,6 +824,7 @@ async def get_topic_stats(
             await cur.execute(query, params)
             return await cur.fetchall()
 
+
 # Post-producing data sources we expect to be ingesting. Surfaced read-only so a
 # dead/blocked source (e.g. a rate-limited news feed) is obvious at a glance.
 # "reddit" is omitted while reddit-producer is parked (Reddit 403s unauthenticated
@@ -803,6 +838,7 @@ INGESTION_SOURCES = ["bluesky", "stocktwits", "finnhub", "alpaca"]
 # keeps a high-volume source from tripping on a brief lull.
 SOURCE_STALL_RATIO = 12.0
 SOURCE_STALL_FLOOR_SECONDS = 1800  # 30 min
+
 
 @app.get("/api/stats/sources", response_model=list[SourceHealth])
 async def get_source_health():
@@ -827,7 +863,7 @@ async def get_source_health():
         WHERE platform = ANY(%s) AND timestamp > NOW() - INTERVAL '7 days'
         GROUP BY platform
     """
-    
+
     market_query = """
         SELECT COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 hour')   AS posts_1h,
                COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '24 hours') AS posts_24h,
@@ -835,24 +871,26 @@ async def get_source_health():
         FROM stock_quotes
         WHERE timestamp > NOW() - INTERVAL '7 days'
     """
-    
-    session_query = "SELECT market_session FROM stock_quotes ORDER BY timestamp DESC LIMIT 1"
-    
+
+    session_query = (
+        "SELECT market_session FROM stock_quotes ORDER BY timestamp DESC LIMIT 1"
+    )
+
     async with get_db_conn() as conn:
         async with conn.cursor() as cur:
             await cur.execute(query, [INGESTION_SOURCES])
             rows = {r["platform"]: r for r in await cur.fetchall()}
-            
+
             await cur.execute(market_query)
             market_row = await cur.fetchone()
-            
+
             await cur.execute(session_query)
             session_row = await cur.fetchone()
             market_session = session_row["market_session"] if session_row else "closed"
 
     now = datetime.now(timezone.utc)
     out = []
-    
+
     # Process Social Sources
     for platform in INGESTION_SOURCES:
         r = rows.get(platform)
@@ -865,57 +903,72 @@ async def get_source_health():
             status = "silent"
         else:
             expected_gap = 86400 / posts_24h
-            if age is not None and age > SOURCE_STALL_FLOOR_SECONDS and age > SOURCE_STALL_RATIO * expected_gap:
+            if (
+                age is not None
+                and age > SOURCE_STALL_FLOOR_SECONDS
+                and age > SOURCE_STALL_RATIO * expected_gap
+            ):
                 status = "stalled"
             elif posts_1h > 0:
                 status = "active"
             else:
                 status = "quiet"
 
-        out.append(SourceHealth(
-            platform=platform,
-            status=status,
-            age_seconds=age,
-            posts_1h=posts_1h,
-            posts_24h=posts_24h,
-            baseline_per_hour=posts_24h / 24.0 if posts_24h else None
-        ))
-        
+        out.append(
+            SourceHealth(
+                platform=platform,
+                status=status,
+                age_seconds=age,
+                posts_1h=posts_1h,
+                posts_24h=posts_24h,
+                baseline_per_hour=posts_24h / 24.0 if posts_24h else None,
+            )
+        )
+
     # Process Market Data Source (yfinance)
     if market_row:
         m_posts_1h = market_row["posts_1h"] or 0
         m_posts_24h = market_row["posts_24h"] or 0
         m_last_ingest = market_row["last_ingest"]
         m_age = (now - m_last_ingest).total_seconds() if m_last_ingest else None
-        
+
         if m_posts_24h == 0:
             m_status = "silent"
         else:
             m_expected_gap = 86400 / m_posts_24h
-            if m_age is not None and m_age > SOURCE_STALL_FLOOR_SECONDS and m_age > SOURCE_STALL_RATIO * m_expected_gap:
+            if (
+                m_age is not None
+                and m_age > SOURCE_STALL_FLOOR_SECONDS
+                and m_age > SOURCE_STALL_RATIO * m_expected_gap
+            ):
                 m_status = "stalled"
             elif m_posts_1h > 0:
                 m_status = "active"
             else:
                 m_status = "quiet"
-                
+
         # Handle market closed gracefully
-        if market_session != 'regular' and (m_status == 'stalled' or m_status == 'silent'):
+        if market_session != "regular" and (
+            m_status == "stalled" or m_status == "silent"
+        ):
             m_status = "quiet"
-            
-        out.append(SourceHealth(
-            platform="yfinance",
-            status=m_status,
-            age_seconds=m_age,
-            posts_1h=m_posts_1h,
-            posts_24h=m_posts_24h,
-            baseline_per_hour=m_posts_24h / 24.0 if m_posts_24h else None
-        ))
+
+        out.append(
+            SourceHealth(
+                platform="yfinance",
+                status=m_status,
+                age_seconds=m_age,
+                posts_1h=m_posts_1h,
+                posts_24h=m_posts_24h,
+                baseline_per_hour=m_posts_24h / 24.0 if m_posts_24h else None,
+            )
+        )
 
     # Surface problem sources first: silent (dead) and stalled (degraded) on top.
     rank = {"silent": 0, "stalled": 1, "quiet": 2, "active": 3}
     out.sort(key=lambda s: (rank[s.status], -s.posts_24h))
     return out
+
 
 # Minimum number of historical hourly samples before a buzz z-score is trusted.
 # Below this the stddev is too noisy to be meaningful, so buzz_z is returned None.
@@ -924,6 +977,7 @@ LEADERBOARD_MIN_BASELINE_HOURS = 8
 # (trading vs non-trading) still has enough same-type samples — a holiday/weekend
 # only yields ~2 comparable days per week, so 7d was too sparse once matched.
 LEADERBOARD_BASELINE_DAYS = 28
+
 
 @app.get("/api/stats/leaderboard", response_model=list[LeaderboardEntry])
 async def get_leaderboard():
@@ -1046,11 +1100,9 @@ async def get_leaderboard():
             )
             return await cur.fetchall()
 
+
 @app.get("/api/stats/market", response_model=list[MarketQuote])
-async def get_market_stats(
-    symbol: str,
-    hours: int = Query(24, gt=0, le=8760)
-):
+async def get_market_stats(symbol: str, hours: int = Query(24, gt=0, le=8760)):
     query = """
         SELECT symbol, timestamp, price, volume, market_session 
         FROM stock_quotes 
@@ -1063,6 +1115,7 @@ async def get_market_stats(
         async with conn.cursor() as cur:
             await cur.execute(query, params)
             return await cur.fetchall()
+
 
 @app.get("/api/stats/market/latest", response_model=Optional[MarketQuote])
 async def get_latest_market_quote(symbol: str):
@@ -1077,11 +1130,9 @@ async def get_latest_market_quote(symbol: str):
             await cur.execute(query, [symbol])
             return await cur.fetchone()
 
+
 @app.get("/api/stats/market/delta", response_model=Optional[MarketDelta])
-async def get_market_delta(
-    symbol: str,
-    since: datetime = Query(...)
-):
+async def get_market_delta(symbol: str, since: datetime = Query(...)):
     """
     Calculate pct_change for a symbol since a specific reference timestamp.
     Useful for 'normalization' of futures vs. last cash close.
@@ -1091,34 +1142,34 @@ async def get_market_delta(
             # 1. Get latest price
             await cur.execute(
                 "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
-                [symbol]
+                [symbol],
             )
             latest = await cur.fetchone()
             if not latest:
                 return None
-            
-            latest_price = latest['price']
+
+            latest_price = latest["price"]
 
             # 2. Get reference price (the one closest to 'since' but not after it)
             await cur.execute(
                 "SELECT price FROM stock_quotes WHERE symbol = %s AND timestamp <= %s ORDER BY timestamp DESC LIMIT 1",
-                [symbol, since]
+                [symbol, since],
             )
             ref = await cur.fetchone()
-            
+
             # Fallback: if no quote exists before 'since', get the first one available
             if not ref:
                 await cur.execute(
                     "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp ASC LIMIT 1",
-                    [symbol]
+                    [symbol],
                 )
                 ref = await cur.fetchone()
 
             if not ref:
                 return None
-            
-            ref_price = ref['price']
-            
+
+            ref_price = ref["price"]
+
             pct_change = 0.0
             abs_change = latest_price - ref_price
             if ref_price != 0:
@@ -1129,8 +1180,9 @@ async def get_market_delta(
                 "reference_price": ref_price,
                 "latest_price": latest_price,
                 "pct_change": pct_change,
-                "abs_change": abs_change
+                "abs_change": abs_change,
             }
+
 
 @app.get("/api/stats/metrics", response_model=Optional[StockMetricsResponse])
 async def get_stock_metrics(symbol: str):
@@ -1152,15 +1204,20 @@ async def get_stock_metrics(symbol: str):
 )
 async def get_global_context(
     symbol: str,
-    horizon_sessions: Literal[30, 90] = Query(30),
+    horizon_sessions: GlobalContextHorizon = Query(
+        GlobalContextHorizon.THIRTY_SESSIONS
+    ),
 ):
     require_global_context_enabled()
     normalized_symbol = symbol.strip().upper()
+    normalized_horizon: Literal[30, 90] = (
+        30 if horizon_sessions is GlobalContextHorizon.THIRTY_SESSIONS else 90
+    )
     async with get_db_conn() as conn:
         return await build_global_context(
             conn,
             symbol=normalized_symbol,
-            horizon_sessions=horizon_sessions,
+            horizon_sessions=normalized_horizon,
         )
 
 
@@ -1313,9 +1370,7 @@ def dashboard_market_bucket_minutes(hours: int) -> int:
 
     return max(
         DASHBOARD_MARKET_BUCKET_MINUTES[-1],
-        math.ceil(
-            hours * 60 / (DASHBOARD_MAX_MARKET_POINTS_PER_SYMBOL - 1)
-        ),
+        math.ceil(hours * 60 / (DASHBOARD_MAX_MARKET_POINTS_PER_SYMBOL - 1)),
     )
 
 
@@ -1353,11 +1408,7 @@ def _delta_from_snapshot(snapshot: Optional[dict]) -> Optional[dict]:
 
     latest_price = snapshot["latest_price"]
     abs_change = latest_price - reference_price
-    pct_change = (
-        abs_change / reference_price * 100
-        if reference_price != 0
-        else 0.0
-    )
+    pct_change = abs_change / reference_price * 100 if reference_price != 0 else 0.0
     return {
         "symbol": snapshot["symbol"],
         "reference_price": reference_price,
@@ -1385,17 +1436,14 @@ def _metrics_from_snapshot(snapshot: Optional[dict]) -> Optional[dict]:
 
 @app.get("/api/stats/dashboard", response_model=DashboardResponse)
 async def get_dashboard(
-    symbol: str,
-    hours: int = Query(24, gt=0, le=8760),
-    platform: Optional[str] = None
+    symbol: str, hours: int = Query(24, gt=0, le=8760), platform: Optional[str] = None
 ):
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     futures_map = primary_futures_map()
     primary_future_symbol = futures_map.get(symbol)
     series_symbols = list(
         dict.fromkeys(
-            [symbol]
-            + ([primary_future_symbol] if primary_future_symbol else [])
+            [symbol] + ([primary_future_symbol] if primary_future_symbol else [])
         )
     )
     snapshot_symbols = list(dict.fromkeys(series_symbols + [VIX_SYMBOL]))
@@ -1429,9 +1477,7 @@ async def get_dashboard(
     snapshots = {row["symbol"]: row for row in snapshot_rows}
     primary_snapshot = snapshots.get(symbol)
     future_snapshot = (
-        snapshots.get(primary_future_symbol)
-        if primary_future_symbol
-        else None
+        snapshots.get(primary_future_symbol) if primary_future_symbol else None
     )
     vix_snapshot = snapshots.get(VIX_SYMBOL)
 
@@ -1439,9 +1485,7 @@ async def get_dashboard(
         "sentiment_stats": content.get("sentiment_stats", []),
         "topic_stats": content.get("topic_stats", []),
         "posts": content.get("posts", []),
-        "market_data": [
-            row for row in series_rows if row["symbol"] == symbol
-        ],
+        "market_data": [row for row in series_rows if row["symbol"] == symbol],
         "latest_quote": _quote_from_snapshot(primary_snapshot),
         "metrics_data": _metrics_from_snapshot(primary_snapshot),
         "primary_delta": _delta_from_snapshot(primary_snapshot),
@@ -1514,37 +1558,37 @@ def _apply_hourly_market_rows(
 ) -> list[dict]:
     """Overlay database-resampled market rows and return target-symbol rows."""
     market_data = sorted(
-        (row for row in hourly_rows if row['symbol'] == symbol),
-        key=lambda row: row['bucket_hour'],
+        (row for row in hourly_rows if row["symbol"] == symbol),
+        key=lambda row: row["bucket_hour"],
     )
     future_market_data = sorted(
         (
             row
             for row in hourly_rows
-            if primary_future_symbol and row['symbol'] == primary_future_symbol
+            if primary_future_symbol and row["symbol"] == primary_future_symbol
         ),
-        key=lambda row: row['bucket_hour'],
+        key=lambda row: row["bucket_hour"],
     )
 
     for row in market_data:
-        bucket = buckets.get(_hour_bucket_key(row['bucket_hour']))
+        bucket = buckets.get(_hour_bucket_key(row["bucket_hour"]))
         if bucket is None:
             continue
-        bucket['priceChange'] = row['price_change']
-        bucket['rawPrice'] = row['price']
-        bucket['isMarketOpen'] = row['is_market_open']
+        bucket["priceChange"] = row["price_change"]
+        bucket["rawPrice"] = row["price"]
+        bucket["isMarketOpen"] = row["is_market_open"]
 
     latest_future_price = (
-        future_market_data[-1]['price'] if future_market_data else None
+        future_market_data[-1]["price"] if future_market_data else None
     )
     for row in future_market_data:
-        bucket = buckets.get(_hour_bucket_key(row['bucket_hour']))
+        bucket = buckets.get(_hour_bucket_key(row["bucket_hour"]))
         if bucket is None:
             continue
-        bucket['futureChange'] = row['price_change']
+        bucket["futureChange"] = row["price_change"]
         if latest_future_price and latest_future_price != 0:
-            bucket['futurePct'] = (
-                (row['price'] - latest_future_price) / latest_future_price
+            bucket["futurePct"] = (
+                (row["price"] - latest_future_price) / latest_future_price
             ) * 100
 
     return market_data
@@ -1583,12 +1627,12 @@ def compute_lagged_correlation(
             if not 0 <= price_index < len(data):
                 continue
             price_bucket = data[price_index]
-            sentiment = sentiment_bucket['sentimentIndex']
-            price_change = price_bucket['priceChange']
+            sentiment = sentiment_bucket["sentimentIndex"]
+            price_change = price_bucket["priceChange"]
             if (
                 sentiment is not None
                 and price_change is not None
-                and price_bucket['isMarketOpen']
+                and price_bucket["isMarketOpen"]
             ):
                 sentiment_values.append(sentiment)
                 price_values.append(price_change)
@@ -1607,7 +1651,7 @@ async def get_correlation(
     symbol: str,
     hours: int = Query(24, gt=0, le=8760),
     platform: Optional[str] = None,
-    topic: Optional[str] = None
+    topic: Optional[str] = None,
 ):
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(hours=hours)).replace(minute=0, second=0, microsecond=0)
@@ -1615,11 +1659,13 @@ async def get_correlation(
     primary_future_symbol = futures_map.get(symbol)
     pe_relative = None
     vix_price = 15.0
-    
+
     # Pre-fill hourly buckets to avoid missing hours
     buckets = {}
     for i in range(hours, -1, -1):
-        bucket_time = (now - timedelta(hours=i)).replace(minute=0, second=0, microsecond=0)
+        bucket_time = (now - timedelta(hours=i)).replace(
+            minute=0, second=0, microsecond=0
+        )
         ts_str = bucket_time.isoformat().replace("+00:00", "Z")
         buckets[ts_str] = {
             "timestamp": ts_str,
@@ -1640,7 +1686,7 @@ async def get_correlation(
             "rawPrice": None,
             "buySignal": None,
             "signalQuality": None,
-            "buyScore": None
+            "buyScore": None,
         }
 
     async with get_db_conn() as conn:
@@ -1673,17 +1719,21 @@ async def get_correlation(
             agg_data = await cur.fetchall()
 
             for a in agg_data:
-                a_ts = a['bucket_hour'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                a_ts = (
+                    a["bucket_hour"]
+                    .astimezone(timezone.utc)
+                    .replace(minute=0, second=0, microsecond=0)
+                )
                 a_ts_str = a_ts.isoformat().replace("+00:00", "Z")
                 if a_ts_str in buckets:
-                    buckets[a_ts_str]['positive'] = a['positive_count']
-                    buckets[a_ts_str]['neutral'] = a['neutral_count']
-                    buckets[a_ts_str]['negative'] = a['negative_count']
-                    buckets[a_ts_str]['positiveWeighted'] = a['positive_weighted']
-                    buckets[a_ts_str]['negativeWeighted'] = a['negative_weighted']
-                    buckets[a_ts_str]['neutralWeighted'] = a['neutral_weighted']
-                    buckets[a_ts_str]['totalWeighted'] = a['total_weighted']
-                    buckets[a_ts_str]['sentimentIndex'] = a['sentiment_index']
+                    buckets[a_ts_str]["positive"] = a["positive_count"]
+                    buckets[a_ts_str]["neutral"] = a["neutral_count"]
+                    buckets[a_ts_str]["negative"] = a["negative_count"]
+                    buckets[a_ts_str]["positiveWeighted"] = a["positive_weighted"]
+                    buckets[a_ts_str]["negativeWeighted"] = a["negative_weighted"]
+                    buckets[a_ts_str]["neutralWeighted"] = a["neutral_weighted"]
+                    buckets[a_ts_str]["totalWeighted"] = a["total_weighted"]
+                    buckets[a_ts_str]["sentimentIndex"] = a["sentiment_index"]
 
             # 4. Overlay with live posts data (hot tier).
             # For buckets that still have raw posts, this overwrites the aggregated
@@ -1700,73 +1750,79 @@ async def get_correlation(
             if topic and topic != "all":
                 posts_query += " AND topic_label = %s"
                 posts_params.append(topic)
-                
+
             await cur.execute(posts_query, posts_params)
             posts_data = await cur.fetchall()
 
             # Track which buckets have live posts so we can overwrite agg data
             live_buckets: set[str] = set()
-            
+
             for p in posts_data:
-                p_ts = p['timestamp'].astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                p_ts = (
+                    p["timestamp"]
+                    .astimezone(timezone.utc)
+                    .replace(minute=0, second=0, microsecond=0)
+                )
                 p_ts_str = p_ts.isoformat().replace("+00:00", "Z")
                 if p_ts_str in buckets:
                     # On first live post for this bucket, reset from aggregated values
                     if p_ts_str not in live_buckets:
                         live_buckets.add(p_ts_str)
-                        buckets[p_ts_str]['positive'] = 0
-                        buckets[p_ts_str]['neutral'] = 0
-                        buckets[p_ts_str]['negative'] = 0
-                        buckets[p_ts_str]['positiveWeighted'] = 0.0
-                        buckets[p_ts_str]['negativeWeighted'] = 0.0
-                        buckets[p_ts_str]['neutralWeighted'] = 0.0
-                        buckets[p_ts_str]['totalWeighted'] = 0.0
+                        buckets[p_ts_str]["positive"] = 0
+                        buckets[p_ts_str]["neutral"] = 0
+                        buckets[p_ts_str]["negative"] = 0
+                        buckets[p_ts_str]["positiveWeighted"] = 0.0
+                        buckets[p_ts_str]["negativeWeighted"] = 0.0
+                        buckets[p_ts_str]["neutralWeighted"] = 0.0
+                        buckets[p_ts_str]["totalWeighted"] = 0.0
 
-                    engagement = p['engagement'] if p['engagement'] is not None else 1
+                    engagement = p["engagement"] if p["engagement"] is not None else 1
                     weight = math.log1p(engagement)
-                    sent = p['sentiment']
-                    if sent == 'positive':
-                        buckets[p_ts_str]['positive'] += 1
-                        buckets[p_ts_str]['positiveWeighted'] += weight
-                    elif sent == 'negative':
-                        buckets[p_ts_str]['negative'] += 1
-                        buckets[p_ts_str]['negativeWeighted'] += weight
+                    sent = p["sentiment"]
+                    if sent == "positive":
+                        buckets[p_ts_str]["positive"] += 1
+                        buckets[p_ts_str]["positiveWeighted"] += weight
+                    elif sent == "negative":
+                        buckets[p_ts_str]["negative"] += 1
+                        buckets[p_ts_str]["negativeWeighted"] += weight
                     else:
-                        buckets[p_ts_str]['neutral'] += 1
-                        buckets[p_ts_str]['neutralWeighted'] += weight
-                    buckets[p_ts_str]['totalWeighted'] += weight
+                        buckets[p_ts_str]["neutral"] += 1
+                        buckets[p_ts_str]["neutralWeighted"] += weight
+                    buckets[p_ts_str]["totalWeighted"] += weight
 
             # 5. Fetch latest quote for regular session check
             await cur.execute(
                 "SELECT market_session FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
-                [symbol]
+                [symbol],
             )
             latest_quote = await cur.fetchone()
 
             # 6. Fetch valuation metrics (P/E relative to sector)
             await cur.execute(
                 "SELECT pe_relative_sector FROM stock_metrics WHERE symbol = %s ORDER BY updated_at DESC LIMIT 1",
-                [symbol]
+                [symbol],
             )
             metrics_row = await cur.fetchone()
-            pe_relative = metrics_row['pe_relative_sector'] if metrics_row else None
+            pe_relative = metrics_row["pe_relative_sector"] if metrics_row else None
 
             # 7. Fetch VIX quote
             await cur.execute(
                 "SELECT price FROM stock_quotes WHERE symbol = %s ORDER BY timestamp DESC LIMIT 1",
-                [VIX_SYMBOL]
+                [VIX_SYMBOL],
             )
             vix_row = await cur.fetchone()
-            vix_price = vix_row['price'] if vix_row else 15.0
+            vix_price = vix_row["price"] if vix_row else 15.0
 
     # Post-process sentiment indices
     for b in buckets.values():
-        if b['totalWeighted'] > 0:
-            b['sentimentIndex'] = (b['positiveWeighted'] - b['negativeWeighted']) / b['totalWeighted']
+        if b["totalWeighted"] > 0:
+            b["sentimentIndex"] = (b["positiveWeighted"] - b["negativeWeighted"]) / b[
+                "totalWeighted"
+            ]
         else:
-            b['sentimentIndex'] = 0.0
+            b["sentimentIndex"] = 0.0
 
-    sorted_data = sorted(buckets.values(), key=lambda x: x['timestamp'])
+    sorted_data = sorted(buckets.values(), key=lambda x: x["timestamp"])
 
     # 5. Calculate SMA
     sma_period = 5
@@ -1784,9 +1840,9 @@ async def get_correlation(
         count_sma = 0
         start_idx = max(0, i - sma_period + 1)
         for j in range(start_idx, i + 1):
-            sum_sma += sorted_data[j]['sentimentIndex']
+            sum_sma += sorted_data[j]["sentimentIndex"]
             count_sma += 1
-        sorted_data[i]['sentimentSMA'] = sum_sma / count_sma if count_sma > 0 else 0.0
+        sorted_data[i]["sentimentSMA"] = sum_sma / count_sma if count_sma > 0 else 0.0
 
     # 5b. Sentiment momentum oscillator (MACD-style). Fast period reuses the
     # adaptive sma_period so it stays coherent with sentimentSMA; slow/signal
@@ -1804,16 +1860,15 @@ async def get_correlation(
     # Preserve empty hours as None (totalWeighted == 0) so carry-forward in the
     # oscillator measures sentiment momentum, not posting cadence.
     macd_indices = [
-        (b['sentimentIndex'] if b['totalWeighted'] > 0 else None)
-        for b in sorted_data
+        (b["sentimentIndex"] if b["totalWeighted"] > 0 else None) for b in sorted_data
     ]
     macd_series = compute_sentiment_macd(
         macd_indices, fast_period, slow_period, signal_period
     )
     for i, m in enumerate(macd_series):
-        sorted_data[i]['sentimentMACD'] = m['macd']
-        sorted_data[i]['sentimentSignal'] = m['signal']
-        sorted_data[i]['sentimentHist'] = m['hist']
+        sorted_data[i]["sentimentMACD"] = m["macd"]
+        sorted_data[i]["sentimentSignal"] = m["signal"]
+        sorted_data[i]["sentimentHist"] = m["hist"]
 
     # 6. Calculate Pearson correlation from valid regular-session hourly returns.
     max_r, best_lag, lag_sweeps = compute_lagged_correlation(sorted_data)
@@ -1826,7 +1881,7 @@ async def get_correlation(
             correlation_strength = "strong"
         elif abs(max_r) > 0.35:
             correlation_strength = "moderate"
-        
+
         relationship = "positive" if max_r >= 0 else "negative"
         sign = "+" if max_r >= 0 else ""
         if best_lag > 0:
@@ -1834,7 +1889,9 @@ async def get_correlation(
         elif best_lag < 0:
             correlation_text = f"Price leads sentiment by {abs(best_lag)}h ({relationship}, r = {sign}{max_r:.2f})"
         else:
-            correlation_text = f"Coincident correlation ({relationship}, r = {sign}{max_r:.2f})"
+            correlation_text = (
+                f"Coincident correlation ({relationship}, r = {sign}{max_r:.2f})"
+            )
     else:
         sign = "+" if max_r >= 0 else ""
         correlation_text = f"Weak or no correlation (r = {sign}{max_r:.2f})"
@@ -1843,35 +1900,37 @@ async def get_correlation(
     closed_regions = []
     current_start = None
     for idx, d in enumerate(sorted_data):
-        if not d['isMarketOpen']:
+        if not d["isMarketOpen"]:
             if not current_start:
-                current_start = d['timestamp']
+                current_start = d["timestamp"]
         else:
             if current_start:
-                closed_regions.append({
-                    "start": current_start,
-                    "end": sorted_data[idx - 1]['timestamp']
-                })
+                closed_regions.append(
+                    {"start": current_start, "end": sorted_data[idx - 1]["timestamp"]}
+                )
                 current_start = None
     if current_start:
-        closed_regions.append({
-            "start": current_start,
-            "end": sorted_data[-1]['timestamp']
-        })
+        closed_regions.append(
+            {"start": current_start, "end": sorted_data[-1]["timestamp"]}
+        )
 
-    if latest_quote and latest_quote.get('market_session') == 'regular' and len(closed_regions) > 0:
-        if closed_regions[-1]['end'] == sorted_data[-1]['timestamp']:
+    if (
+        latest_quote
+        and latest_quote.get("market_session") == "regular"
+        and len(closed_regions) > 0
+    ):
+        if closed_regions[-1]["end"] == sorted_data[-1]["timestamp"]:
             closed_regions.pop()
 
     actual_closed_regions = []
     for r in closed_regions:
-        t_start = datetime.fromisoformat(r['start'].replace('Z', '+00:00'))
-        t_end = datetime.fromisoformat(r['end'].replace('Z', '+00:00'))
+        t_start = datetime.fromisoformat(r["start"].replace("Z", "+00:00"))
+        t_end = datetime.fromisoformat(r["end"].replace("Z", "+00:00"))
         if (t_end - t_start) >= timedelta(hours=8):
             actual_closed_regions.append(r)
 
     # 8. Support & Resistance
-    prices = [q['price'] for q in market_data if q['price'] is not None]
+    prices = [q["price"] for q in market_data if q["price"] is not None]
     support_price = 0.0
     resistance_price = 0.0
     support_pct = 0.0
@@ -1891,7 +1950,9 @@ async def get_correlation(
     rolling_window = 24
     for i in range(len(sorted_data)):
         window_data = sorted_data[max(0, i - rolling_window + 1) : i + 1]
-        window_prices = [d['rawPrice'] for d in window_data if d['rawPrice'] is not None]
+        window_prices = [
+            d["rawPrice"] for d in window_data if d["rawPrice"] is not None
+        ]
         if len(window_prices) > 0:
             sorted_window = sorted(window_prices)
             w_idx5 = int((len(sorted_window) - 1) * 0.05)
@@ -1899,54 +1960,60 @@ async def get_correlation(
             local_support = sorted_window[w_idx5]
             local_resistance = sorted_window[w_idx95]
             if latest_price and latest_price != 0:
-                sorted_data[i]['supportPrice'] = local_support
-                sorted_data[i]['supportPct'] = ((local_support - latest_price) / latest_price) * 100
-                sorted_data[i]['resistancePrice'] = local_resistance
-                sorted_data[i]['resistancePct'] = ((local_resistance - latest_price) / latest_price) * 100
+                sorted_data[i]["supportPrice"] = local_support
+                sorted_data[i]["supportPct"] = (
+                    (local_support - latest_price) / latest_price
+                ) * 100
+                sorted_data[i]["resistancePrice"] = local_resistance
+                sorted_data[i]["resistancePct"] = (
+                    (local_resistance - latest_price) / latest_price
+                ) * 100
                 # Price line plotted on the same basis as S/R: cumulative % vs the
                 # latest price, so the yellow line tracks the actual price trajectory
                 # (priceChange, the hourly return, stays reserved for the Pearson math).
-                bucket_raw = sorted_data[i]['rawPrice']
+                bucket_raw = sorted_data[i]["rawPrice"]
                 if bucket_raw is not None:
-                    sorted_data[i]['pricePct'] = ((bucket_raw - latest_price) / latest_price) * 100
+                    sorted_data[i]["pricePct"] = (
+                        (bucket_raw - latest_price) / latest_price
+                    ) * 100
         else:
-            sorted_data[i]['supportPrice'] = support_price
-            sorted_data[i]['supportPct'] = support_pct
-            sorted_data[i]['resistancePrice'] = resistance_price
-            sorted_data[i]['resistancePct'] = resistance_pct
+            sorted_data[i]["supportPrice"] = support_price
+            sorted_data[i]["supportPct"] = support_pct
+            sorted_data[i]["resistancePrice"] = resistance_price
+            sorted_data[i]["resistancePct"] = resistance_pct
 
     # 9. Compute historical buy signals
     for i in range(len(sorted_data)):
-        bucket_price = sorted_data[i]['rawPrice']
-        
+        bucket_price = sorted_data[i]["rawPrice"]
+
         # Build trailing 3-hour lists for divergence check
         prev_prices = []
         prev_sentiments = []
         for k in range(max(0, i - 2), i + 1):
-            if sorted_data[k]['rawPrice'] is not None:
-                prev_prices.append(sorted_data[k]['rawPrice'])
-            if sorted_data[k]['sentimentIndex'] is not None:
-                prev_sentiments.append(sorted_data[k]['sentimentIndex'])
-                
+            if sorted_data[k]["rawPrice"] is not None:
+                prev_prices.append(sorted_data[k]["rawPrice"])
+            if sorted_data[k]["sentimentIndex"] is not None:
+                prev_sentiments.append(sorted_data[k]["sentimentIndex"])
+
         opp = compute_opportunity(
             price=bucket_price,
             support=support_price,
             resistance=resistance_price,
-            sentiment=sorted_data[i]['sentimentIndex'],
-            sentiment_sma=sorted_data[i]['sentimentSMA'],
+            sentiment=sorted_data[i]["sentimentIndex"],
+            sentiment_sma=sorted_data[i]["sentimentSMA"],
             vix_price=vix_price,
             pe_relative=pe_relative,
             prev_prices=prev_prices,
-            prev_sentiments=prev_sentiments
+            prev_sentiments=prev_sentiments,
         )
-        sorted_data[i]['buyScore'] = opp['score']
-        sorted_data[i]['buySignal'] = opp['score'] >= 50.0
-        sorted_data[i]['signalQuality'] = "pending"
+        sorted_data[i]["buyScore"] = opp["score"]
+        sorted_data[i]["buySignal"] = opp["score"] >= 50.0
+        sorted_data[i]["signalQuality"] = "pending"
 
     # Evaluate forward returns for signals
     for i in range(len(sorted_data)):
-        if sorted_data[i]['buySignal']:
-            curr_price = sorted_data[i]['rawPrice']
+        if sorted_data[i]["buySignal"]:
+            curr_price = sorted_data[i]["rawPrice"]
             if curr_price is not None:
                 # Walk forward until we collect 2 buckets with real prices.
                 # Skips non-market hours (after-hours, weekends, holidays) where
@@ -1955,7 +2022,7 @@ async def get_correlation(
                 forward_prices = []
                 end = min(len(sorted_data), i + 1 + 24)
                 for k in range(i + 1, end):
-                    rp = sorted_data[k]['rawPrice']
+                    rp = sorted_data[k]["rawPrice"]
                     if rp is not None:
                         forward_prices.append(rp)
                         if len(forward_prices) >= 2:
@@ -1964,29 +2031,39 @@ async def get_correlation(
                     max_forward = max(forward_prices)
                     # If max favorable excursion was > 0.2%, it's a good trade
                     if max_forward > curr_price * 1.002:
-                        sorted_data[i]['signalQuality'] = "good"
+                        sorted_data[i]["signalQuality"] = "good"
                     else:
-                        sorted_data[i]['signalQuality'] = "bad"
+                        sorted_data[i]["signalQuality"] = "bad"
 
     # 10. Compute final current opportunity
     latest_item = sorted_data[-1] if len(sorted_data) > 0 else None
     latest_prices = []
     latest_sentiments = []
     if len(sorted_data) >= 3:
-        latest_prices = [d['rawPrice'] for d in sorted_data[-3:] if d['rawPrice'] is not None]
-        latest_sentiments = [d['sentimentIndex'] for d in sorted_data[-3:] if d['sentimentIndex'] is not None]
-        
-    current_opp = compute_opportunity(
-        price=latest_item['rawPrice'] if latest_item else None,
-        support=support_price,
-        resistance=resistance_price,
-        sentiment=latest_item['sentimentIndex'] if latest_item else 0.0,
-        sentiment_sma=latest_item['sentimentSMA'] if latest_item else 0.0,
-        vix_price=vix_price,
-        pe_relative=pe_relative,
-        prev_prices=latest_prices,
-        prev_sentiments=latest_sentiments
-    ) if latest_item else None
+        latest_prices = [
+            d["rawPrice"] for d in sorted_data[-3:] if d["rawPrice"] is not None
+        ]
+        latest_sentiments = [
+            d["sentimentIndex"]
+            for d in sorted_data[-3:]
+            if d["sentimentIndex"] is not None
+        ]
+
+    current_opp = (
+        compute_opportunity(
+            price=latest_item["rawPrice"] if latest_item else None,
+            support=support_price,
+            resistance=resistance_price,
+            sentiment=latest_item["sentimentIndex"] if latest_item else 0.0,
+            sentiment_sma=latest_item["sentimentSMA"] if latest_item else 0.0,
+            vix_price=vix_price,
+            pe_relative=pe_relative,
+            prev_prices=latest_prices,
+            prev_sentiments=latest_sentiments,
+        )
+        if latest_item
+        else None
+    )
 
     return {
         "data": sorted_data,
@@ -2000,8 +2077,9 @@ async def get_correlation(
         "lagSweeps": lag_sweeps,
         "correlationText": correlation_text,
         "correlationStrength": correlation_strength,
-        "opportunity": current_opp
+        "opportunity": current_opp,
     }
+
 
 @app.get("/api/health")
 async def health():
@@ -2012,6 +2090,7 @@ async def health():
                 return {"status": "healthy", "database": "connected"}
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
+
 
 @app.websocket("/api/stats/stream")
 async def websocket_endpoint(websocket: WebSocket):
@@ -2027,6 +2106,8 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         manager.disconnect(websocket)
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
