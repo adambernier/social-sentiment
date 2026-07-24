@@ -1,12 +1,13 @@
 """Versioned, single-owner database schema migrations."""
 
 import hashlib
+import logging
 import random
 import sys
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import psycopg
 
@@ -14,7 +15,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.config import DATABASE_DSN
 
-
+logger = logging.getLogger("schema-migrations")
 SCHEMA_APPLY_RETRIES = 5
 SCHEMA_LOCK_TIMEOUT_MS = 5000
 SCHEMA_RETRY_BASE_DELAY = 1.0
@@ -40,6 +41,10 @@ MIGRATIONS = (
     Migration(
         "0002_global_context",
         Path(__file__).parent / "0002_global_context.sql",
+    ),
+    Migration(
+        "0003_taiwan_semiconductor_context",
+        Path(__file__).parent / "0003_taiwan_semiconductor_context.sql",
     ),
 )
 
@@ -111,8 +116,11 @@ def _apply_pending_migrations(
                     "SELECT pg_advisory_unlock(%s)",
                     (SCHEMA_ADVISORY_LOCK_KEY,),
                 )
-            except Exception:
-                pass
+            except psycopg.Error:
+                logger.debug(
+                    "Could not explicitly release schema advisory lock",
+                    exc_info=True,
+                )
 
     return applied_now
 

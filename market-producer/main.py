@@ -1,13 +1,12 @@
 import asyncio
-import time
-import threading
 import sys
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import pandas_market_calendars as mcal
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 
@@ -15,22 +14,31 @@ from yfinance.exceptions import YFRateLimitError
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
-from shared.schemas import StockQuote, StockMetrics
+from storage_service.db import DB
+from synthetic_nav import SYNTHETIC_NAV_SYMBOLS, SyntheticNavRunner
+
 from shared.config import GLOBAL_CONTEXT_ENABLED, get_env_int
-from shared.futures import get_futures_session, all_polled_futures
-from shared.symbols import run_with_symbol_registry, sector_map, tickers
+from shared.futures import all_polled_futures, get_futures_session
+from shared.metrics import (
+    POSTS_INGESTED_TOTAL,
+    RATE_LIMITS_HIT_TOTAL,
+    start_metrics_server,
+)
 from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
 from shared.polling import PollStatus
-from storage_service.db import DB
-from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
-from synthetic_nav import SYNTHETIC_NAV_SYMBOLS, SyntheticNavRunner
+from shared.schemas import StockMetrics, StockQuote
+from shared.symbols import run_with_symbol_registry, sector_map, tickers
+
 try:
     from .global_market import (
         GlobalContextMarketRunner,
-        YahooMarketDataAdapter,
+        default_market_data_adapter,
     )
 except ImportError:  # Running as ``python market-producer/main.py``.
-    from global_market import GlobalContextMarketRunner, YahooMarketDataAdapter
+    from global_market import (
+        GlobalContextMarketRunner,
+        default_market_data_adapter,
+    )
 
 # Initialize market calendar
 nyse = mcal.get_calendar('NYSE')
@@ -396,7 +404,7 @@ async def main():
     if GLOBAL_CONTEXT_ENABLED:
         global_runner = GlobalContextMarketRunner(
             db,
-            YahooMarketDataAdapter(),
+            default_market_data_adapter(),
             tickers,
         )
     last_metrics_update = 0.0

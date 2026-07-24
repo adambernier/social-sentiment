@@ -1,4 +1,6 @@
 import importlib
+import io
+import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -20,7 +22,7 @@ def _instrument(**overrides):
         "currency": "JPY",
         "exchange": "JPX",
         "timezone": "Asia/Tokyo",
-        "provider_alias": "^N225",
+        "provider_aliases": {"yahoo": "^N225"},
         "session_metadata": {
             "open": "09:00",
             "close": "15:30",
@@ -135,10 +137,96 @@ def test_empty_provider_response_is_normalized_to_empty(monkeypatch):
     assert bars == []
 
 
+def test_taiwan_index_adapter_normalizes_recorded_daily_closes(monkeypatch):
+    payload = {
+        "empty": False,
+        "data": {
+            "labels": ["2026/07/22", "2026/07/23"],
+            "datasets": [
+                {
+                    "value_type": "price",
+                    "data": ["19787.48", "19673.47"],
+                },
+                {
+                    "value_type": "return",
+                    "data": ["23918.51", "23782.12"],
+                },
+            ],
+        },
+    }
+    requested = {}
+
+    def fake_urlopen(request, *, timeout):
+        requested["url"] = request.full_url
+        requested["timeout"] = timeout
+        return io.BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr(global_market, "urlopen", fake_urlopen)
+    instrument = _instrument(
+        instrument_key="index:taiwan-semiconductor",
+        display_name="Taiwan Semiconductor",
+        currency="TWD",
+        exchange="TWSE/TPEx",
+        timezone="Asia/Taipei",
+        provider_aliases={
+            "taiwan_index": "IX0143",
+            "yahoo": "IX0143.TW",
+        },
+        session_metadata={
+            "open": "09:00",
+            "close": "13:30",
+            "weekdays": [1, 2, 3, 4, 5],
+        },
+    )
+
+    bars = global_market.TaiwanIndexMarketDataAdapter().fetch_bars(
+        instrument,
+        "1d",
+        datetime(2026, 7, 1, tzinfo=timezone.utc),
+        datetime(2026, 7, 24, tzinfo=timezone.utc),
+    )
+
+    assert len(bars) == 2
+    assert bars[0].session_date.isoformat() == "2026-07-22"
+    assert bars[0].ends_at == datetime(
+        2026,
+        7,
+        22,
+        5,
+        30,
+        tzinfo=timezone.utc,
+    )
+    assert bars[0].open_price == bars[0].high_price == 19787.48
+    assert bars[0].low_price == bars[0].close_price == 19787.48
+    assert bars[0].volume is None
+    assert bars[0].provider == "taiwan_index"
+    assert "/indexes/IX0143/records?" in requested["url"]
+    assert "start=2026-07-01" in requested["url"]
+    assert "end=2026-07-24" in requested["url"]
+    assert requested["timeout"] == 15
+
+
+def test_default_router_prefers_official_daily_and_yahoo_hourly():
+    adapter = global_market.default_market_data_adapter()
+    instrument = _instrument(
+        provider_aliases={
+            "taiwan_index": "IX0143",
+            "yahoo": "IX0143.TW",
+        },
+    )
+
+    assert adapter.provider_name_for(instrument, "1d") == "taiwan_index"
+    assert adapter.provider_name_for(instrument, "1h") == "yahoo"
+
+
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
         (global_market.YFRateLimitError(), PollStatus.RATE_LIMITED),
+        (
+            global_market.MarketDataRateLimitError(),
+            PollStatus.RATE_LIMITED,
+        ),
         (RuntimeError("provider down"), PollStatus.TRANSIENT_ERROR),
     ],
 )
@@ -171,7 +259,7 @@ def test_daily_poll_is_session_and_dst_aware():
         currency="USD",
         exchange="Nasdaq",
         timezone="America/New_York",
-        provider_alias="NVDA",
+        provider_aliases={"yahoo": "NVDA"},
         session_metadata={
             "open": "09:30",
             "close": "16:00",

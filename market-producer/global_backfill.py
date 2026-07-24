@@ -13,7 +13,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 sys.path.append(str(ROOT / "storage-service"))
 
-from global_market import YahooMarketDataAdapter, instrument_from_row
+from global_market import (
+    MarketDataAdapter,
+    default_market_data_adapter,
+    instrument_from_row,
+)
 
 try:
     from storage_service.db import DB
@@ -33,7 +37,7 @@ logger = logging.getLogger("global-backfill")
 
 async def backfill_instrument(
     db: DB,
-    adapter: YahooMarketDataAdapter,
+    adapter: MarketDataAdapter,
     limiter: AsyncRateLimiter,
     instrument: InstrumentMetadata,
     *,
@@ -41,6 +45,7 @@ async def backfill_instrument(
     end: datetime,
 ) -> int:
     await limiter.acquire()
+    provider_name = adapter.provider_name_for(instrument, "1d")
     try:
         bars = await asyncio.to_thread(
             adapter.fetch_bars,
@@ -51,7 +56,7 @@ async def backfill_instrument(
         )
         stored = await asyncio.to_thread(db.upsert_global_bars, bars)
         GLOBAL_PROVIDER_REQUESTS_TOTAL.labels(
-            provider=adapter.provider_name,
+            provider=provider_name,
             data_type="backfill_1d",
             status="success" if bars else "no_data",
         ).inc()
@@ -62,7 +67,7 @@ async def backfill_instrument(
         return stored
     except Exception:
         GLOBAL_PROVIDER_REQUESTS_TOTAL.labels(
-            provider=adapter.provider_name,
+            provider=provider_name,
             data_type="backfill_1d",
             status="error",
         ).inc()
@@ -87,7 +92,7 @@ async def run_backfill(instrument_key: str | None = None) -> None:
     if instrument_key and not instruments:
         raise ValueError(f"Unknown or inactive instrument: {instrument_key}")
 
-    adapter = YahooMarketDataAdapter()
+    adapter = default_market_data_adapter()
     limiter = AsyncRateLimiter(max_rate=10, period=60.0)
     end = datetime.now(timezone.utc) + timedelta(days=1)
     start = end - timedelta(days=365 * 2 + 10)

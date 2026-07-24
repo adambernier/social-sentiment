@@ -90,9 +90,10 @@ Inspired by hockey stat cards, the dashboard features a **Divergent Bar Chart** 
   new API routes, and the client bundle.
 - Stable keys such as `index:nikkei-225`, `fx:usd-jpy`, and
   `us-stock:NVDA` keep provider aliases out of database identity.
-- The seeded universe includes six Asian indices, five Asian USD FX pairs,
-  gold, Brent crude, and copper. Asian FX is normalized as local-currency
-  units per USD, so a positive move means local-currency weakness.
+- The seeded universe includes six broad Asian indices, the targeted TIP
+  Taiwan Semiconductor Total Market Index, five Asian USD FX pairs, gold,
+  Brent crude, and copper. Asian FX is normalized as local-currency units per
+  USD, so a positive move means local-currency weakness.
 - `GET /api/stats/global-context?symbol=NVDA&horizon_sessions=30` returns
   current factor moves, 30/90-session lag statistics, recent event signals,
   next-close reactions, and source timestamps. The existing dashboard response
@@ -243,8 +244,8 @@ increment existing hourly aggregates.
 
 ## Global-context rollout
 
-Keep the flag false while applying `0002_global_context`, then run the paced
-two-year daily backfill:
+Keep the flag false while applying the migrations, then run the paced two-year
+daily backfill:
 
 ```bash
 docker compose up -d postgres schema-migrate
@@ -252,13 +253,26 @@ GLOBAL_CONTEXT_ENABLED=true docker compose run --rm market-producer \
   python market-producer/global_backfill.py
 ```
 
+After deploying `0003_taiwan_semiconductor_context`, backfill its daily history
+before enabling the panel. The migration atomically replaces an existing NVDA
+`index:taiwan-weighted` exposure while preserving its display order:
+
+```bash
+GLOBAL_CONTEXT_ENABLED=true docker compose run --rm market-producer \
+  python market-producer/global_backfill.py \
+  --instrument-key index:taiwan-semiconductor
+```
+
+The official Taiwan Index Plus feed supplies daily closing history for
+`IX0143`; Yahoo's `IX0143.TW` alias remains available for live/hourly polling.
+
 Curated mappings are replaced atomically through authenticated admin routes:
 
 ```bash
 curl -X PUT http://localhost:8000/api/admin/global-context/NVDA/exposures \
   -H "X-API-Key: $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"exposures":[{"instrument_key":"index:nikkei-225","reason":"Asia semiconductor session","display_order":0}]}'
+  -d '{"exposures":[{"instrument_key":"index:taiwan-semiconductor","reason":"Taiwan semiconductor manufacturing and supply-chain context","display_order":0}]}'
 
 curl -X PUT http://localhost:8000/api/admin/global-context/NVDA/event-rules \
   -H "X-API-Key: $ADMIN_API_KEY" \

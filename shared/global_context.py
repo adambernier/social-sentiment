@@ -22,7 +22,7 @@ class InstrumentMetadata:
     currency: str
     exchange: str | None
     timezone: str
-    provider_alias: str
+    provider_aliases: dict[str, str]
     session_metadata: dict[str, object]
     quote_convention: str | None = None
 
