@@ -1,0 +1,28 @@
+{
+  "articles": [
+    {
+      "url": "https://example.com/taiwan-semiconductor-event",
+      "title": "Taiwan supply-chain event reported",
+      "seendate": "20260723T041500Z",
+      "domain": "example.com"
+    },
+    {
+      "url": "https://example.com/taiwan-semiconductor-event",
+      "title": "Duplicate report URL",
+      "seendate": "20260723T041700Z",
+      "domain": "example.com"
+    },
+    {
+      "url": "https://example.net/korea-memory-event",
+      "title": "Korea memory supply update",
+      "seendate": "20260722T233000Z",
+      "domain": "example.net"
+    },
+    {
+      "url": "",
+      "title": "Missing URL is ignored",
+      "seendate": "20260722T230000Z",
+      "domain": "invalid.example"
+    }
+  ]
+}

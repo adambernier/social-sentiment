@@ -11,6 +11,8 @@ COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
 ARG API_URL=http://api-service:8000
 ENV API_URL=${API_URL}
+ARG NEXT_PUBLIC_GLOBAL_CONTEXT_ENABLED=false
+ENV NEXT_PUBLIC_GLOBAL_CONTEXT_ENABLED=${NEXT_PUBLIC_GLOBAL_CONTEXT_ENABLED}
 RUN npm run build
 
 FROM node:20-alpine AS runner

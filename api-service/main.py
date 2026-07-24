@@ -5,11 +5,19 @@ import math
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import psycopg
 from psycopg_pool import AsyncConnectionPool
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Security, HTTPException, Depends, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Security,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -20,7 +28,21 @@ from prometheus_fastapi_instrumentator import Instrumentator
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from shared.config import DATABASE_DSN, VIX_SYMBOL
+from shared.config import DATABASE_DSN, GLOBAL_CONTEXT_ENABLED, VIX_SYMBOL
+try:
+    from .global_context_api import (
+        EventRuleReplacement,
+        ExposureReplacement,
+        GlobalContextResponse,
+        build_global_context,
+    )
+except ImportError:  # Running as ``python api-service/main.py`` in the image.
+    from global_context_api import (
+        EventRuleReplacement,
+        ExposureReplacement,
+        GlobalContextResponse,
+        build_global_context,
+    )
 from shared.symbols import (
     primary_futures_map,
     start_symbol_registry,
@@ -178,6 +200,11 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
         raise HTTPException(status_code=403, detail="Invalid API Key")
     return api_key
 
+
+def require_global_context_enabled() -> None:
+    if not GLOBAL_CONTEXT_ENABLED:
+        raise HTTPException(status_code=404, detail="Global context is disabled")
+
 class TrackedSymbol(BaseModel):
     symbol: str
     keywords: list[str] = []
@@ -259,6 +286,103 @@ async def delete_admin_symbol(symbol: str, api_key: str = Depends(verify_api_key
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Symbol not found")
     return {"status": "success"}
+
+
+@app.put("/api/admin/global-context/{symbol}/exposures")
+async def replace_global_context_exposures(
+    symbol: str,
+    replacement: ExposureReplacement,
+    api_key: str = Depends(verify_api_key),
+):
+    require_global_context_enabled()
+    normalized_symbol = symbol.strip().upper()
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                "SELECT EXISTS (SELECT 1 FROM tracked_symbols WHERE symbol = %s)",
+                [normalized_symbol],
+            )
+            if not (await cursor.fetchone())["exists"]:
+                raise HTTPException(status_code=404, detail="Symbol not found")
+        try:
+            async with conn.transaction():
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "DELETE FROM stock_factor_exposures WHERE symbol = %s",
+                        [normalized_symbol],
+                    )
+                    if replacement.exposures:
+                        await cursor.executemany(
+                            """
+                            INSERT INTO stock_factor_exposures (
+                                symbol, instrument_key, reason, display_order
+                            )
+                            VALUES (%s, %s, %s, %s)
+                            """,
+                            [
+                                (
+                                    normalized_symbol,
+                                    exposure.instrument_key,
+                                    exposure.reason,
+                                    exposure.display_order,
+                                )
+                                for exposure in replacement.exposures
+                            ],
+                        )
+        except psycopg.errors.ForeignKeyViolation as error:
+            raise HTTPException(
+                status_code=400,
+                detail="An exposure references an unknown instrument_key",
+            ) from error
+    return {"status": "success", "replaced": len(replacement.exposures)}
+
+
+@app.put("/api/admin/global-context/{symbol}/event-rules")
+async def replace_global_context_event_rules(
+    symbol: str,
+    replacement: EventRuleReplacement,
+    api_key: str = Depends(verify_api_key),
+):
+    require_global_context_enabled()
+    normalized_symbol = symbol.strip().upper()
+    async with get_db_conn() as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                "SELECT EXISTS (SELECT 1 FROM tracked_symbols WHERE symbol = %s)",
+                [normalized_symbol],
+            )
+            if not (await cursor.fetchone())["exists"]:
+                raise HTTPException(status_code=404, detail="Symbol not found")
+        async with conn.transaction():
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    "DELETE FROM global_event_rules WHERE symbol = %s",
+                    [normalized_symbol],
+                )
+                if replacement.rules:
+                    await cursor.executemany(
+                        """
+                        INSERT INTO global_event_rules (
+                            symbol, name, countries, themes, query_terms,
+                            is_active
+                        )
+                        VALUES (
+                            %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s
+                        )
+                        """,
+                        [
+                            (
+                                normalized_symbol,
+                                rule.name,
+                                json.dumps(rule.countries),
+                                json.dumps(rule.themes),
+                                json.dumps(rule.query_terms),
+                                rule.is_active,
+                            )
+                            for rule in replacement.rules
+                        ],
+                    )
+    return {"status": "success", "replaced": len(replacement.rules)}
 
 
 class PostResponse(BaseModel):
@@ -1020,6 +1144,24 @@ async def get_stock_metrics(symbol: str):
         async with conn.cursor() as cur:
             await cur.execute(query, [symbol])
             return await cur.fetchone()
+
+
+@app.get(
+    "/api/stats/global-context",
+    response_model=GlobalContextResponse,
+)
+async def get_global_context(
+    symbol: str,
+    horizon_sessions: Literal[30, 90] = Query(30),
+):
+    require_global_context_enabled()
+    normalized_symbol = symbol.strip().upper()
+    async with get_db_conn() as conn:
+        return await build_global_context(
+            conn,
+            symbol=normalized_symbol,
+            horizon_sessions=horizon_sessions,
+        )
 
 
 DASHBOARD_MAX_MARKET_POINTS_PER_SYMBOL = 2200

@@ -149,15 +149,23 @@ def test_migration_runner_records_baseline_and_skips_repeat_ddl(
     migration_runner_database,
 ):
     _, scoped_dsn = migration_runner_database
-    baseline = MIGRATIONS[0]
-    expected_checksum = hashlib.sha256(baseline.path.read_bytes()).hexdigest()
+    expected_checksums = {
+        migration.version: hashlib.sha256(
+            migration.path.read_bytes()
+        ).hexdigest()
+        for migration in MIGRATIONS
+    }
 
-    assert apply_migrations(scoped_dsn) == [baseline.version]
+    assert apply_migrations(scoped_dsn) == [
+        migration.version for migration in MIGRATIONS
+    ]
 
     with psycopg.connect(scoped_dsn, autocommit=True) as conn:
-        assert conn.execute(
-            "SELECT version, checksum FROM schema_migrations"
-        ).fetchone() == (baseline.version, expected_checksum)
+        assert dict(
+            conn.execute(
+                "SELECT version, checksum FROM schema_migrations"
+            ).fetchall()
+        ) == expected_checksums
 
         # If a second runner mistakenly reapplies the baseline, CREATE TABLE
         # would recreate `posts`. Renaming it makes that easy to detect.

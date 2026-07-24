@@ -248,12 +248,21 @@ async def rollup_scheduler(db: DB):
                 post_cutoff,
             )
             pruned_quotes = await asyncio.to_thread(db.prune_old_quotes, quote_cutoff)
+            context_counts = await asyncio.to_thread(
+                db.prune_global_context,
+                hourly_cutoff=now - timedelta(days=180),
+                daily_cutoff=now - timedelta(days=365 * 5),
+                event_cutoff=now - timedelta(days=365),
+            )
             
             logger.info(
                 f"Scheduled database maintenance completed: "
                 f"rolled up {rolled_up:,} aggregation rows, "
                 f"pruned {pruned_posts:,} posts, "
-                f"pruned {pruned_quotes:,} stock quotes."
+                f"pruned {pruned_quotes:,} stock quotes, "
+                f"{context_counts[0]:,} hourly context bars, "
+                f"{context_counts[1]:,} daily context bars, and "
+                f"{context_counts[2]:,} event signals."
             )
         except Exception as e:
             logger.error(f"Error in scheduled database maintenance loop: {e}", exc_info=True)

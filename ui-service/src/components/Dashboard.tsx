@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import dynamic from "next/dynamic";
 import { useDashboardData } from "./hooks/useDashboardData";
 import Header from "./dashboard/Header";
 import TickerActivity from "./dashboard/TickerActivity";
@@ -11,6 +12,11 @@ import OpportunityScanner from "./dashboard/OpportunityScanner";
 import FundamentalMetrics from "./dashboard/FundamentalMetrics";
 import Feed from "./dashboard/Feed";
 import Sidebar from "./dashboard/Sidebar";
+
+const GlobalContextPanel =
+  process.env.NEXT_PUBLIC_GLOBAL_CONTEXT_ENABLED === "true"
+    ? dynamic(() => import("./dashboard/GlobalContextPanel"))
+    : null;
 
 export default function Dashboard() {
   const dashboardData = useDashboardData();
@@ -40,6 +46,9 @@ export default function Dashboard() {
             <OpportunityScanner {...dashboardData} />
           </div>
         </div>
+        {GlobalContextPanel ? (
+          <GlobalContextPanel symbol={dashboardData.state.symbol} />
+        ) : null}
         <CorrelationChart {...dashboardData} />
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
           <Feed {...dashboardData} />

@@ -37,6 +37,10 @@ class Migration:
 
 MIGRATIONS = (
     Migration("0001_baseline", Path(__file__).parent / "schema.sql"),
+    Migration(
+        "0002_global_context",
+        Path(__file__).parent / "0002_global_context.sql",
+    ),
 )
 
 

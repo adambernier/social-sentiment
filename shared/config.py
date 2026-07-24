@@ -12,6 +12,13 @@ def get_env_int(key: str, default: int) -> int:
         return default
 
 
+def get_env_bool(key: str, default: bool = False) -> bool:
+    value = os.environ.get(key)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # RabbitMQ Config
 RABBIT_HOST = get_env("RABBITMQ_HOST", "localhost")
 RABBIT_PORT = get_env_int("RABBITMQ_PORT", 5672)
@@ -28,6 +35,10 @@ QUEUE_TOPIC_POSTS = get_env("QUEUE_TOPIC_POSTS", "topic-posts")
 DATABASE_DSN = get_env(
     "DATABASE_DSN", "postgresql://postgres:sentiment@localhost:5432/sentiment"
 )
+
+# Global context is deliberately opt-in. The same switch gates provider work
+# and API contracts; the browser panel also has a build-time flag.
+GLOBAL_CONTEXT_ENABLED = get_env_bool("GLOBAL_CONTEXT_ENABLED", False)
 
 # Reddit Config
 REDDIT_USER_AGENT = get_env(

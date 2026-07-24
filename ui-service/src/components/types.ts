@@ -52,3 +52,67 @@ export interface CorrelationData {
   maxR: number; bestLag: number; lagSweeps?: LagSweepValue[]; correlationText: string; correlationStrength: string;
   opportunity: OpportunityData | null;
 }
+
+export interface GlobalLagRelationship {
+  lag_sessions: number;
+  correlation: number | null;
+  beta: number | null;
+  sample_count: number;
+}
+
+export interface GlobalRelationship {
+  correlation: number | null;
+  beta: number | null;
+  selected_lag: number | null;
+  sample_count: number;
+  strength: "weak" | "moderate" | "strong" | null;
+  lag_statistics: GlobalLagRelationship[];
+}
+
+export interface GlobalFactor {
+  instrument_key: string;
+  display_name: string;
+  asset_class: "index" | "fx" | "commodity";
+  currency: string;
+  exchange: string | null;
+  timezone: string;
+  quote_convention: string | null;
+  exposure_reason: string;
+  current_price: number | null;
+  current_move_pct: number | null;
+  current_as_of: string | null;
+  fetched_at: string | null;
+  provider: string | null;
+  relationship: GlobalRelationship;
+}
+
+export interface GlobalEvent {
+  id: number;
+  title: string;
+  summary: string | null;
+  canonical_url: string | null;
+  source_name: string | null;
+  occurred_at: string;
+  provider: string;
+  rule_names: string[];
+  match_reasons: Record<string, unknown>[];
+  next_close_move_pct: number | null;
+  reaction_label: "next-close move";
+}
+
+export interface GlobalContextData {
+  symbol: string;
+  configured: boolean;
+  horizon_sessions: 30 | 90;
+  as_of: string;
+  currency_orientation: string;
+  disclaimer: string;
+  factors: GlobalFactor[];
+  events: GlobalEvent[];
+  freshness: {
+    latest_factor_at: string | null;
+    latest_daily_at: string | null;
+    latest_event_at: string | null;
+    status: "fresh" | "stale" | "empty";
+  };
+}

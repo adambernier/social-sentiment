@@ -78,6 +78,7 @@ services:
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - RABBITMQ_USER=${RABBITMQ_USER}
     - RABBITMQ_PASS=${RABBITMQ_PASS}
+    - GLOBAL_CONTEXT_ENABLED=${GLOBAL_CONTEXT_ENABLED:-false}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -195,6 +196,11 @@ services:
     - RABBITMQ_PASS=${RABBITMQ_PASS}
     - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-bot/1.0 (DigitalOcean; +github.com/adambernier/social-sentiment)}
     - REDDIT_PROXY_URL=${REDDIT_PROXY_URL}
+    - GLOBAL_CONTEXT_ENABLED=${GLOBAL_CONTEXT_ENABLED:-false}
+    - GLOBAL_MARKET_POLL_SECONDS=${GLOBAL_MARKET_POLL_SECONDS:-900}
+    - GLOBAL_MARKET_MAX_CONCURRENCY=${GLOBAL_MARKET_MAX_CONCURRENCY:-2}
+    - GLOBAL_MARKET_RATE_PER_MINUTE=${GLOBAL_MARKET_RATE_PER_MINUTE:-20}
+    - GLOBAL_MARKET_MAX_BACKOFF=${GLOBAL_MARKET_MAX_BACKOFF:-14400}
     depends_on:
       postgres:
         condition: service_healthy
@@ -202,6 +208,21 @@ services:
         condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
+  global-events-producer:
+    build:
+      context: .
+      dockerfile: global-events-producer/Dockerfile
+    environment:
+    - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    - GLOBAL_CONTEXT_ENABLED=${GLOBAL_CONTEXT_ENABLED:-false}
+    - GLOBAL_EVENTS_POLL_SECONDS=${GLOBAL_EVENTS_POLL_SECONDS:-900}
+    - GLOBAL_EVENTS_MAX_PER_RULE_DAY=${GLOBAL_EVENTS_MAX_PER_RULE_DAY:-20}
+    - GLOBAL_EVENTS_RATE_PER_MINUTE=${GLOBAL_EVENTS_RATE_PER_MINUTE:-10}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      schema-migrate:
+        condition: service_completed_successfully
   api-service:
     build:
       context: .
@@ -209,6 +230,7 @@ services:
     environment:
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - ADMIN_API_KEY=${ADMIN_API_KEY}
+    - GLOBAL_CONTEXT_ENABLED=${GLOBAL_CONTEXT_ENABLED:-false}
     depends_on:
       postgres:
         condition: service_healthy
@@ -218,6 +240,8 @@ services:
     build:
       context: ui-service
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_GLOBAL_CONTEXT_ENABLED: ${GLOBAL_CONTEXT_ENABLED:-false}
     environment:
     - API_URL=http://api-service:8000
     - WATCHPACK_POLLING=true

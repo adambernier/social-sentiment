@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
 from shared.schemas import StockQuote, StockMetrics
-from shared.config import get_env_int
+from shared.config import GLOBAL_CONTEXT_ENABLED, get_env_int
 from shared.futures import get_futures_session, all_polled_futures
 from shared.symbols import run_with_symbol_registry, sector_map, tickers
 from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
@@ -24,6 +24,13 @@ from shared.polling import PollStatus
 from storage_service.db import DB
 from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 from synthetic_nav import SYNTHETIC_NAV_SYMBOLS, SyntheticNavRunner
+try:
+    from .global_market import (
+        GlobalContextMarketRunner,
+        YahooMarketDataAdapter,
+    )
+except ImportError:  # Running as ``python market-producer/main.py``.
+    from global_market import GlobalContextMarketRunner, YahooMarketDataAdapter
 
 # Initialize market calendar
 nyse = mcal.get_calendar('NYSE')
@@ -378,13 +385,20 @@ async def main():
         print(f"CRITICAL: Could not connect to database: {e}")
         return
 
-    print(f"Market Producer started.")
+    print("Market Producer started.")
     start_metrics_server(8003)
     print(f"Polling interval: {POLL_INTERVAL}s")
 
     limiter = AsyncRateLimiter(max_rate=MARKET_RATE_PER_MIN, period=60.0)
     backoff_tracker = PerSymbolBackoff(base_interval=POLL_INTERVAL, max_backoff=MARKET_MAX_BACKOFF)
     nav_runner = SyntheticNavRunner(db, limiter, backoff_tracker, nyse)
+    global_runner = None
+    if GLOBAL_CONTEXT_ENABLED:
+        global_runner = GlobalContextMarketRunner(
+            db,
+            YahooMarketDataAdapter(),
+            tickers,
+        )
     last_metrics_update = 0.0
 
     while True:
@@ -396,6 +410,8 @@ async def main():
         await fetch_and_store(db, limiter, backoff_tracker)
         now_utc = datetime.now(timezone.utc)
         await nav_runner.maybe_run(now_utc, get_market_session(now_utc))
+        if global_runner is not None:
+            await global_runner.maybe_run(now_utc)
         await asyncio.sleep(POLL_INTERVAL)
 
 async def service_main():

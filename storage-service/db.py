@@ -1,5 +1,6 @@
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import psycopg
@@ -7,8 +8,9 @@ from psycopg_pool import AsyncConnectionPool
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from shared.schemas import ScoredPost, StockQuote, StockMetrics
 from shared.config import DATABASE_DSN
+from shared.global_context import NormalizedMarketBar
+from shared.schemas import ScoredPost, StockMetrics, StockQuote
 
 # Serializes post-retention maintenance across scheduler/manual invocations. The
 # transaction-scoped lock is acquired inside the atomic move statement and is
@@ -45,6 +47,29 @@ UPSERT_METRICS_SQL = """
         return_relative_sector = EXCLUDED.return_relative_sector,
         updated_at = NOW()
     RETURNING symbol
+"""
+
+UPSERT_GLOBAL_BAR_SQL = """
+    INSERT INTO global_market_bars (
+        instrument_key, interval, starts_at, ends_at, session_date,
+        open_price, high_price, low_price, close_price, volume, provider,
+        fetched_at
+    )
+    VALUES (
+        %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s,
+        NOW()
+    )
+    ON CONFLICT (instrument_key, interval, starts_at) DO UPDATE SET
+        ends_at = EXCLUDED.ends_at,
+        session_date = EXCLUDED.session_date,
+        open_price = EXCLUDED.open_price,
+        high_price = EXCLUDED.high_price,
+        low_price = EXCLUDED.low_price,
+        close_price = EXCLUDED.close_price,
+        volume = EXCLUDED.volume,
+        provider = EXCLUDED.provider,
+        fetched_at = NOW()
 """
 
 ROLLUP_AND_PRUNE_POSTS_SQL = """
@@ -162,10 +187,7 @@ class DB:
     async def get_async_pool(self) -> AsyncConnectionPool:
         if self.async_pool is None:
             self.async_pool = AsyncConnectionPool(
-                self.dsn,
-                min_size=2,
-                max_size=10,
-                open=False
+                self.dsn, min_size=2, max_size=10, open=False
             )
             await self.async_pool.open()
         return self.async_pool
@@ -219,7 +241,7 @@ class DB:
         with self.conn.cursor() as cur:
             # executemany is efficient for small-to-medium batches
             cur.executemany(INSERT_POST_SQL, data)
-            # Since ON CONFLICT DO NOTHING is used, we might not get 
+            # Since ON CONFLICT DO NOTHING is used, we might not get
             # accurate row counts if we want to know how many were NEW.
             # But the primary goal is bulk insertion.
             return cur.rowcount
@@ -271,6 +293,104 @@ class DB:
             )
             return cur.fetchone() is not None
 
+    def ensure_us_equity_instruments(self, symbols: list[str]) -> None:
+        """Create provider-neutral reference instruments for tracked U.S. stocks."""
+        normalized = sorted({symbol.strip().upper() for symbol in symbols if symbol})
+        if not normalized:
+            return
+        assert self.conn is not None
+        with self.conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO global_instruments (
+                    instrument_key, display_name, asset_class, currency,
+                    exchange, timezone, provider_aliases, session_metadata
+                )
+                VALUES (
+                    %s, %s, 'us_equity', 'USD', 'NYSE/Nasdaq',
+                    'America/New_York', %s::jsonb,
+                    '{"open":"09:30","close":"16:00",'
+                    '"weekdays":[1,2,3,4,5]}'::jsonb
+                )
+                ON CONFLICT (instrument_key) DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    provider_aliases = EXCLUDED.provider_aliases,
+                    is_active = TRUE,
+                    updated_at = NOW()
+                """,
+                [
+                    (
+                        f"us-stock:{symbol}",
+                        symbol,
+                        json.dumps({"yahoo": symbol}),
+                    )
+                    for symbol in normalized
+                ],
+            )
+
+    def list_active_symbols(self) -> list[str]:
+        """Return active tracked symbols directly from the source-of-truth table."""
+        assert self.conn is not None
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT symbol
+                FROM tracked_symbols
+                WHERE is_active
+                ORDER BY symbol
+                """
+            )
+            return [row[0] for row in cur.fetchall()]
+
+    def list_global_instruments(self) -> list[dict]:
+        assert self.conn is not None
+        with self.conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT instrument_key, display_name, asset_class, currency,
+                       exchange, timezone, provider_aliases, session_metadata,
+                       quote_convention
+                FROM global_instruments
+                WHERE is_active
+                ORDER BY asset_class, instrument_key
+                """
+            )
+            return cur.fetchall()
+
+    def upsert_global_bars(
+        self,
+        bars: list[NormalizedMarketBar],
+    ) -> int:
+        if not bars:
+            return 0
+        assert self.conn is not None
+        values = [
+            (
+                bar.instrument_key,
+                bar.interval,
+                bar.starts_at,
+                bar.ends_at,
+                bar.session_date,
+                bar.open_price,
+                bar.high_price,
+                bar.low_price,
+                bar.close_price,
+                bar.volume,
+                bar.provider,
+            )
+            for bar in bars
+        ]
+        try:
+            with self.conn.cursor() as cur:
+                cur.executemany(UPSERT_GLOBAL_BAR_SQL, values)
+        except psycopg.OperationalError:
+            print("DB connection lost during global bar upsert, reconnecting...")
+            self._connect()
+            assert self.conn is not None
+            with self.conn.cursor() as cur:
+                cur.executemany(UPSERT_GLOBAL_BAR_SQL, values)
+        return len(values)
+
     def rollup_and_prune_posts(self, cutoff_ts) -> tuple[int, int]:
         """Atomically aggregate and delete posts older than ``cutoff_ts``.
 
@@ -310,3 +430,40 @@ class DB:
             with self.conn.cursor() as cur:
                 cur.execute(sql, [cutoff_ts])
                 return cur.rowcount
+
+    def prune_global_context(
+        self,
+        *,
+        hourly_cutoff: datetime,
+        daily_cutoff: datetime,
+        event_cutoff: datetime,
+    ) -> tuple[int, int, int]:
+        """Apply the 180-day/5-year/1-year context retention policy."""
+        assert self.conn is not None
+        with self.conn.transaction():
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM global_market_bars
+                    WHERE interval = '1h' AND ends_at < %s
+                    """,
+                    [hourly_cutoff],
+                )
+                hourly = cur.rowcount
+                cur.execute(
+                    """
+                    DELETE FROM global_market_bars
+                    WHERE interval = '1d' AND ends_at < %s
+                    """,
+                    [daily_cutoff],
+                )
+                daily = cur.rowcount
+                cur.execute(
+                    """
+                    DELETE FROM global_event_signals
+                    WHERE occurred_at < %s
+                    """,
+                    [event_cutoff],
+                )
+                events = cur.rowcount
+        return hourly, daily, events

@@ -1,5 +1,6 @@
 import logging
-from prometheus_client import start_http_server, Counter
+
+from prometheus_client import Counter, Gauge, start_http_server
 
 logger = logging.getLogger("metrics")
 
@@ -19,6 +20,36 @@ MESSAGES_PROCESSED_TOTAL = Counter(
     'messages_processed_total',
     'Total messages processed by internal services',
     ['service']
+)
+
+GLOBAL_PROVIDER_REQUESTS_TOTAL = Counter(
+    "global_context_provider_requests_total",
+    "Global-context provider requests by type and result.",
+    ["provider", "data_type", "status"],
+)
+
+GLOBAL_LAST_SUCCESS_TIMESTAMP = Gauge(
+    "global_context_last_success_timestamp_seconds",
+    "Unix timestamp of the latest successful global-context ingestion.",
+    ["provider", "data_type"],
+)
+
+GLOBAL_BACKFILL_PROGRESS = Gauge(
+    "global_context_backfill_progress_ratio",
+    "Per-instrument global-context backfill completion ratio.",
+    ["provider", "instrument_key"],
+)
+
+GLOBAL_RULE_MATCHES_TOTAL = Counter(
+    "global_context_rule_matches_total",
+    "Events linked by an explicit global-context rule.",
+    ["provider", "symbol"],
+)
+
+GLOBAL_RELATIONSHIP_SAMPLE_SUFFICIENT = Gauge(
+    "global_context_relationship_sample_sufficient",
+    "Whether a factor relationship has the minimum required sample.",
+    ["symbol", "instrument_key", "horizon_sessions"],
 )
 
 def start_metrics_server(port: int):

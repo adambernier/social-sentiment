@@ -38,6 +38,10 @@ scrape_configs:
     static_configs:
       - targets: ['storage-service:8008']
 
+  - job_name: 'global-events-producer'
+    static_configs:
+      - targets: ['global-events-producer:8010']
+
   - job_name: 'sentiment-service'
     static_configs:
       - targets: ['sentiment-service:8009']

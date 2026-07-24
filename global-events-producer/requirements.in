@@ -1,0 +1,8 @@
+# Direct dependencies for global-events-producer.
+# Regenerate with scripts/lock.sh global-events-producer.
+-c ../constraints.txt
+
+httpx
+psycopg[binary,pool]
+pydantic
+prometheus_client

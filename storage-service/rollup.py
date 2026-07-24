@@ -24,6 +24,24 @@ def main():
                         help="Posts older than this many days will be rolled up and pruned (default: 7)")
     parser.add_argument("--quote-retention-days", type=int, default=90,
                         help="Stock quotes older than this many days will be pruned (default: 90)")
+    parser.add_argument(
+        "--global-hourly-retention-days",
+        type=int,
+        default=180,
+        help="Hourly global bars older than this are pruned (default: 180)",
+    )
+    parser.add_argument(
+        "--global-daily-retention-days",
+        type=int,
+        default=365 * 5,
+        help="Daily global bars older than this are pruned (default: 1825)",
+    )
+    parser.add_argument(
+        "--global-event-retention-days",
+        type=int,
+        default=365,
+        help="Global event signals older than this are pruned (default: 365)",
+    )
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be done without modifying anything")
     args = parser.parse_args()
@@ -35,6 +53,13 @@ def main():
         minute=0, second=0, microsecond=0
     )
     quote_cutoff = now - timedelta(days=args.quote_retention_days)
+    hourly_context_cutoff = now - timedelta(
+        days=args.global_hourly_retention_days
+    )
+    daily_context_cutoff = now - timedelta(
+        days=args.global_daily_retention_days
+    )
+    event_cutoff = now - timedelta(days=args.global_event_retention_days)
 
     print(f"{'[DRY RUN] ' if args.dry_run else ''}Rollup & Prune")
     print(f"  Post retention:  {args.retention_days} days (cutoff: {post_cutoff.isoformat()})")
@@ -59,11 +84,36 @@ def main():
 
             cur.execute("SELECT COUNT(*) FROM stock_quotes WHERE timestamp < %s", [quote_cutoff])
             quotes_to_prune = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE interval = '1h' AND ends_at < %s
+                    ),
+                    COUNT(*) FILTER (
+                        WHERE interval = '1d' AND ends_at < %s
+                    )
+                FROM global_market_bars
+                """,
+                [hourly_context_cutoff, daily_context_cutoff],
+            )
+            hourly_context_to_prune, daily_context_to_prune = cur.fetchone()
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM global_event_signals
+                WHERE occurred_at < %s
+                """,
+                [event_cutoff],
+            )
+            events_to_prune = cur.fetchone()[0]
 
         print(f"  Posts to roll up:          {posts_to_rollup:,}")
         print(f"  Aggregation rows created:  {agg_rows:,}")
         print(f"  Posts to prune:            {posts_to_rollup:,}")
         print(f"  Stock quotes to prune:     {quotes_to_prune:,}")
+        print(f"  Hourly context bars:       {hourly_context_to_prune:,}")
+        print(f"  Daily context bars:        {daily_context_to_prune:,}")
+        print(f"  Global event signals:      {events_to_prune:,}")
         print()
         print("No changes made (dry run).")
         return
@@ -79,12 +129,25 @@ def main():
     pruned_quotes = db.prune_old_quotes(quote_cutoff)
     print(f"  Deleted {pruned_quotes:,} stock quotes.")
 
+    print("Step 3: Pruning global context...")
+    context_counts = db.prune_global_context(
+        hourly_cutoff=hourly_context_cutoff,
+        daily_cutoff=daily_context_cutoff,
+        event_cutoff=event_cutoff,
+    )
+    print(
+        f"  Deleted {context_counts[0]:,} hourly bars, "
+        f"{context_counts[1]:,} daily bars, and "
+        f"{context_counts[2]:,} event signals."
+    )
+
     # Summary
     print()
     print("Done!")
     print(f"  Aggregation rows upserted: {rolled_up:,}")
     print(f"  Posts pruned:              {pruned_posts:,}")
     print(f"  Quotes pruned:            {pruned_quotes:,}")
+    print(f"  Context rows pruned:      {sum(context_counts):,}")
 
 
 if __name__ == "__main__":

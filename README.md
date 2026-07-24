@@ -33,7 +33,8 @@ real-time market data to drive a stock-performance dashboard.
 | `reddit-producer`       | Polls Reddit API for symbol mentions, publishes raw posts                |
 | `stocktwits-producer`   | Polls Stocktwits streaming/search API, publishes raw posts               |
 | `news-producer`         | Polls Yahoo Finance RSS feeds per symbol, publishes raw posts            |
-| `market-producer`       | Fetches live quotes (price/vol) and background relative-to-sector metrics|
+| `market-producer`       | Fetches live quotes plus separately paced global factor/reference bars   |
+| `global-events-producer`| Polls explicit geopolitical rules through the provider-neutral event API |
 | `preprocessing-service` | Cleans text, runs a quantized ONNX zero-shot topic model, drops short posts |
 | `sentiment-service`     | Scores clean posts with a quantized ONNX FinTwitBERT model, in batches   |
 | `storage-service`       | Consumes scored posts and performs batched, idempotent database writes   |
@@ -82,6 +83,23 @@ Inspired by hockey stat cards, the dashboard features a **Divergent Bar Chart** 
 - Post rollup and pruning are one atomic database operation; late posts add to
   existing hourly aggregates rather than replacing them.
 - Run by the maintenance script below.
+
+### 🌏 Opt-in global context
+
+- `GLOBAL_CONTEXT_ENABLED=false` by default gates market/event ingestion, the
+  new API routes, and the client bundle.
+- Stable keys such as `index:nikkei-225`, `fx:usd-jpy`, and
+  `us-stock:NVDA` keep provider aliases out of database identity.
+- The seeded universe includes six Asian indices, five Asian USD FX pairs,
+  gold, Brent crude, and copper. Asian FX is normalized as local-currency
+  units per USD, so a positive move means local-currency weakness.
+- `GET /api/stats/global-context?symbol=NVDA&horizon_sessions=30` returns
+  current factor moves, 30/90-session lag statistics, recent event signals,
+  next-close reactions, and source timestamps. The existing dashboard response
+  is unchanged.
+- Relationships pair each factor close with the first later U.S. close, test
+  lags 0–2, and remain null below 20 observations or for zero-variance series.
+  They are measured associations, not causal claims or forecasts.
 
 ## Getting Started on a New Machine
 
@@ -205,6 +223,10 @@ if a committed lock is stale.
 
 Database maintenance is fully automated. Inside the `storage-service` container, a background scheduler runs once every 24 hours to automatically roll up old posts into `hourly_sentiment_agg` (posts older than 7 days) and prune expired quotes (quotes older than 90 days).
 
+Global hourly bars are retained for 180 days, daily bars for five years, and
+event signals for one year. These limits are enforced even while the feature
+is disabled.
+
 You can also run database maintenance manually at any time using the `storage-service/rollup.py` script:
 
 ```bash
@@ -218,6 +240,39 @@ python storage-service/rollup.py --retention-days 7 --quote-retention-days 90
 Post rollup and pruning use one atomic `DELETE ... RETURNING` operation. A
 failure rolls back both changes, repeat runs are safe, and late-arriving posts
 increment existing hourly aggregates.
+
+## Global-context rollout
+
+Keep the flag false while applying `0002_global_context`, then run the paced
+two-year daily backfill:
+
+```bash
+docker compose up -d postgres schema-migrate
+GLOBAL_CONTEXT_ENABLED=true docker compose run --rm market-producer \
+  python market-producer/global_backfill.py
+```
+
+Curated mappings are replaced atomically through authenticated admin routes:
+
+```bash
+curl -X PUT http://localhost:8000/api/admin/global-context/NVDA/exposures \
+  -H "X-API-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"exposures":[{"instrument_key":"index:nikkei-225","reason":"Asia semiconductor session","display_order":0}]}'
+
+curl -X PUT http://localhost:8000/api/admin/global-context/NVDA/event-rules \
+  -H "X-API-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"rules":[{"name":"Asia chip supply","countries":["Taiwan","South Korea"],"themes":["SUPPLY_CHAIN"],"query_terms":["semiconductor"]}]}'
+```
+
+Inspect bar/event timestamps and Prometheus metrics before rebuilding with
+`GLOBAL_CONTEXT_ENABLED=true`. Relevant metrics include
+`global_context_provider_requests_total`,
+`global_context_last_success_timestamp_seconds`,
+`global_context_backfill_progress_ratio`,
+`global_context_rule_matches_total`, and
+`global_context_relationship_sample_sufficient`.
 
 ## Smoke test (synthetic posts)
 
