@@ -112,24 +112,18 @@ def test_migration_seeds_provider_independent_universe_and_constraints(
             )
 
 
-def test_catalog_sync_is_idempotent_and_does_not_replace_exposures(
+def test_catalog_sync_is_idempotent_and_syncs_exposures(
     global_context_database,
 ):
     catalog = load_global_instrument_catalog()
     with psycopg.connect(global_context_database, autocommit=True) as conn:
-        conn.execute(
-            """
-            INSERT INTO stock_factor_exposures (
-                symbol, instrument_key, reason, display_order
-            )
-            VALUES ('NVDA', 'index:taiwan-weighted', 'Taiwan context', 2)
-            """
-        )
         database = storage_db.DB.__new__(storage_db.DB)
         database.dsn = global_context_database
         database.conn = conn
         assert database.sync_global_instrument_catalog(catalog.instruments) == 15
         assert database.sync_global_instrument_catalog(catalog.instruments) == 15
+        assert database.sync_stock_factor_exposures(catalog.stock_exposures) == 2
+        assert database.sync_stock_factor_exposures(catalog.stock_exposures) == 2
 
     with psycopg.connect(global_context_database, autocommit=True) as conn:
         assert conn.execute(
@@ -147,11 +141,16 @@ def test_catalog_sync_is_idempotent_and_does_not_replace_exposures(
         ).fetchone() == (15,)
         assert conn.execute(
             """
-            SELECT instrument_key, reason, display_order
+            SELECT instrument_key, display_order
             FROM stock_factor_exposures
             WHERE symbol = 'NVDA'
+            ORDER BY display_order
             """
-        ).fetchall() == [("index:taiwan-weighted", "Taiwan context", 2)]
+        ).fetchall() == [
+            ("index:taiwan-semiconductor", 1),
+            ("index:nikkei-225", 2),
+        ]
+
 
 
 def test_catalog_sync_does_not_delete_unlisted_instruments(

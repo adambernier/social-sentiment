@@ -200,3 +200,14 @@ instruments:
       open: "18:00"
       close: "17:00"
       weekdays: [1, 2, 3, 4, 5]
+
+stock_exposures:
+  - symbol: NVDA
+    exposures:
+      - instrument_key: index:taiwan-semiconductor
+        reason: Taiwan semiconductor manufacturing and supply-chain context
+        display_order: 1
+      - instrument_key: index:nikkei-225
+        reason: Asia-Pacific morning tech equity sentiment
+        display_order: 2
+

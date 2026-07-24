@@ -10,7 +10,10 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.config import DATABASE_DSN
 from shared.global_context import NormalizedMarketBar
-from shared.global_instrument_catalog import CatalogInstrument
+from shared.global_instrument_catalog import (
+    CatalogInstrument,
+    CatalogSymbolExposures,
+)
 from shared.schemas import ScoredPost, StockMetrics, StockQuote
 
 # Serializes post-retention maintenance across scheduler/manual invocations. The
@@ -97,7 +100,19 @@ UPSERT_GLOBAL_INSTRUMENT_SQL = """
         updated_at = NOW()
 """
 
+UPSERT_STOCK_FACTOR_EXPOSURE_SQL = """
+    INSERT INTO stock_factor_exposures (
+        symbol, instrument_key, reason, display_order
+    )
+    VALUES (%s, %s, %s, %s)
+    ON CONFLICT (symbol, instrument_key) DO UPDATE SET
+        reason = EXCLUDED.reason,
+        display_order = EXCLUDED.display_order,
+        updated_at = NOW()
+"""
+
 ROLLUP_AND_PRUNE_POSTS_SQL = """
+
     WITH maintenance_lock AS MATERIALIZED (
         SELECT pg_advisory_xact_lock(%s)
     ),
@@ -388,6 +403,35 @@ class DB:
             assert self.conn is not None
             with self.conn.transaction(), self.conn.cursor() as cur:
                 cur.executemany(UPSERT_GLOBAL_INSTRUMENT_SQL, values)
+        return len(values)
+
+    def sync_stock_factor_exposures(
+        self,
+        symbol_exposures: list[CatalogSymbolExposures],
+    ) -> int:
+        if not symbol_exposures:
+            return 0
+        assert self.conn is not None
+        values = [
+            (
+                entry.symbol,
+                exp.instrument_key,
+                exp.reason,
+                exp.display_order,
+            )
+            for entry in symbol_exposures
+            for exp in entry.exposures
+        ]
+        if not values:
+            return 0
+        try:
+            with self.conn.transaction(), self.conn.cursor() as cur:
+                cur.executemany(UPSERT_STOCK_FACTOR_EXPOSURE_SQL, values)
+        except psycopg.OperationalError:
+            self._connect()
+            assert self.conn is not None
+            with self.conn.transaction(), self.conn.cursor() as cur:
+                cur.executemany(UPSERT_STOCK_FACTOR_EXPOSURE_SQL, values)
         return len(values)
 
     def list_active_symbols(self) -> list[str]:

@@ -24,14 +24,17 @@ from shared.global_instrument_catalog import (
 def sync_global_instruments(
     catalog_path: Path = DEFAULT_GLOBAL_INSTRUMENT_CATALOG,
 ) -> int:
-    """Validate the catalog and atomically upsert all listed instruments."""
+    """Validate the catalog and atomically upsert all listed instruments and stock exposures."""
     catalog = load_global_instrument_catalog(catalog_path)
     database = DB()
     try:
-        return database.sync_global_instrument_catalog(catalog.instruments)
+        instruments_count = database.sync_global_instrument_catalog(catalog.instruments)
+        database.sync_stock_factor_exposures(catalog.stock_exposures)
+        return instruments_count
     finally:
         if database.conn is not None:
             database.conn.close()
+
 
 
 def main() -> None:

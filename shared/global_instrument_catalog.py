@@ -80,22 +80,59 @@ class CatalogInstrument(BaseModel):
         return self
 
 
+class CatalogStockExposure(BaseModel):
+    """One factor exposure definition for a tracked stock symbol."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    instrument_key: str = Field(min_length=3)
+    reason: str = Field(min_length=1)
+    display_order: int = Field(default=0, ge=0)
+
+
+class CatalogSymbolExposures(BaseModel):
+    """List of factor exposures for a specific symbol."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    symbol: str = Field(min_length=1, pattern=r"^[A-Z0-9.-]+$")
+    exposures: list[CatalogStockExposure] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_unique_instrument_keys(self) -> CatalogSymbolExposures:
+        keys = [exposure.instrument_key for exposure in self.exposures]
+        if len(keys) != len(set(keys)):
+            raise ValueError(
+                f"Duplicate exposure instrument keys for symbol {self.symbol}"
+            )
+        return self
+
+
 class GlobalInstrumentCatalog(BaseModel):
-    """Catalog envelope with a format version and unique instrument keys."""
+    """Catalog envelope with a format version, unique instrument keys, and stock factor exposures."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     version: Literal[1]
     instruments: list[CatalogInstrument] = Field(min_length=1)
+    stock_exposures: list[CatalogSymbolExposures] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_unique_keys(self) -> GlobalInstrumentCatalog:
+    def validate_catalog(self) -> GlobalInstrumentCatalog:
         keys = [instrument.instrument_key for instrument in self.instruments]
         duplicates = sorted({key for key in keys if keys.count(key) > 1})
         if duplicates:
             raise ValueError(
                 "Duplicate global instrument keys: " + ", ".join(duplicates)
             )
+        
+        valid_keys = set(keys)
+        for symbol_exp in self.stock_exposures:
+            for exp in symbol_exp.exposures:
+                if exp.instrument_key not in valid_keys:
+                    raise ValueError(
+                        f"Stock exposure for symbol {symbol_exp.symbol} references unknown instrument_key: {exp.instrument_key}"
+                    )
         return self
 
 
@@ -106,3 +143,4 @@ def load_global_instrument_catalog(
     with path.open(encoding="utf-8") as catalog_file:
         payload = yaml.safe_load(catalog_file)
     return GlobalInstrumentCatalog.model_validate(payload)
+
