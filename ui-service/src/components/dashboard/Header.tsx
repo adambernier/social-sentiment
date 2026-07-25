@@ -21,7 +21,7 @@ export default function Header({ state, setters, computed }: DashboardDataProps)
             Social Sentiment vs Market Price
           </h1>
           <span className="text-[10px] text-slate-500 font-medium tracking-wide">
-            Built with <span className="text-rose-500">♥</span> by Adam & Antigravity
+            Built with <span className="text-rose-500">♥</span> by Adam
           </span>
         </div>
       </div>
