@@ -1,19 +1,18 @@
 import os
 import uuid
-from pathlib import Path
+from datetime import datetime, timezone
 
 import psycopg
 import pytest
-from psycopg import sql
-
 from db import INSERT_POST_SQL
+from db import _post_values as serialize_post_values
+from psycopg import sql
+from psycopg.conninfo import make_conninfo
+from schema_migrations import MIGRATIONS, apply_migrations
 
+from shared.schemas import ScoredPost
 
 TEST_DATABASE_DSN = os.environ.get("TEST_DATABASE_DSN")
-SCHEMA_SQL = (
-    Path(__file__).resolve().parents[1] / "storage-service" / "schema.sql"
-).read_text()
-
 pytestmark = pytest.mark.skipif(
     not TEST_DATABASE_DSN,
     reason="TEST_DATABASE_DSN is required for PostgreSQL identity tests",
@@ -59,8 +58,13 @@ def legacy_posts_database():
             )
         """)
 
+    scoped_dsn = make_conninfo(
+        TEST_DATABASE_DSN,
+        options=f"-csearch_path={schema_name}",
+    )
+
     try:
-        yield schema_name
+        yield scoped_dsn
     finally:
         with psycopg.connect(TEST_DATABASE_DSN, autocommit=True) as conn:
             conn.execute(
@@ -71,29 +75,28 @@ def legacy_posts_database():
 
 
 def _post_values(symbol, platform, text):
-    return (
-        "shared-id",
-        symbol,
-        platform,
-        text,
-        "2026-07-21T12:01:00Z",
-        "positive",
-        "{}",
-        None,
-        None,
-        1,
+    return serialize_post_values(
+        ScoredPost(
+            id="shared-id",
+            symbol=symbol,
+            platform=platform,
+            text=text,
+            timestamp=datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc),
+            sentiment="positive",
+            scores={"positive": 1.0, "neutral": 0.0, "negative": 0.0},
+        )
     )
 
 
 def test_schema_migrates_global_id_primary_key_and_scopes_deduplication(
     legacy_posts_database,
 ):
-    with psycopg.connect(TEST_DATABASE_DSN, autocommit=True) as conn:
-        _set_search_path(conn, legacy_posts_database)
+    assert apply_migrations(legacy_posts_database) == [
+        migration.version for migration in MIGRATIONS
+    ]
+    assert apply_migrations(legacy_posts_database) == []
 
-        conn.execute(SCHEMA_SQL)
-        conn.execute(SCHEMA_SQL)  # A retried migration must remain idempotent.
-
+    with psycopg.connect(legacy_posts_database, autocommit=True) as conn:
         primary_key_columns = conn.execute(
             """
             SELECT array_agg(attribute_info.attname ORDER BY key_info.ordinality)
