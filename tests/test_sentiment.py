@@ -1,12 +1,15 @@
-import pytest
-import numpy as np
 from unittest.mock import MagicMock, patch
+
+import numpy as np
+import pytest
 from model import SentimentModel
+
 
 @pytest.fixture
 def mock_sentiment_onnx_and_tokenizer():
     with patch("model.AutoTokenizer") as mock_tokenizer_cls, \
-         patch("model.ort.InferenceSession") as mock_session_cls:
+         patch("model.ort.InferenceSession") as mock_session_cls, \
+         patch("model.sha256_file", return_value="a" * 64):
         
         # Setup tokenizer mock
         mock_tokenizer = MagicMock()
@@ -23,7 +26,7 @@ def mock_sentiment_onnx_and_tokenizer():
         yield mock_tokenizer, mock_session
 
 def test_sentiment_model_prediction(mock_sentiment_onnx_and_tokenizer):
-    tokenizer, session = mock_sentiment_onnx_and_tokenizer
+    _tokenizer, session = mock_sentiment_onnx_and_tokenizer
     
     # We want two predictions:
     # 1. First text maps to positive (idx 1)
@@ -36,6 +39,7 @@ def test_sentiment_model_prediction(mock_sentiment_onnx_and_tokenizer):
     session.run.return_value = [dummy_logits]
     
     model = SentimentModel(model_dir="mock_dir")
+    assert model.model_hash == "a" * 64
     results = model.predict_batch(["AAPL to the moon!", "AAPL down bad!"])
     
     assert len(results) == 2

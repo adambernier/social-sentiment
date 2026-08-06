@@ -1,0 +1,410 @@
+SOCIAL SENTIMENT ANALYTICAL DATA AND BACKUP PLAN
+================================================
+
+Status: Proposed
+Target: PostgreSQL 15 / Docker Compose deployment
+
+
+APPROACH
+--------
+
+Preserve five distinct kinds of state instead of treating them as one backup
+problem:
+
+1. Operational PostgreSQL state, protected by WAL-G point-in-time recovery.
+2. Finalized analytical facts, retained in PostgreSQL and exported to Parquet.
+3. Reproducible as-of signal snapshots for leakage-safe historical analysis.
+4. Pipeline-quality facts for drops, duplicates, and processing failures.
+5. A deterministic sample of post content for future model evaluation.
+
+Canonical facts will store additive sufficient statistics instead of treating
+precalculated, non-additive metrics as source data. Derived metrics such as
+sentiment indexes, z-scores, correlations, and lag coefficients will be
+calculated from those facts or recorded as explicitly versioned snapshots.
+
+
+DESIGN DECISIONS
+----------------
+
+Fact grain
+~~~~~~~~~~
+
+The canonical hourly sentiment fact will use this identity:
+
+    bucket_hour
+    x symbol
+    x platform
+    x topic_model_version
+    x topic_id
+    x sentiment_model_version
+    x agg_version
+
+The aggregation version must be part of the primary key so different formulas
+cannot silently overwrite one another.
+
+Topic identity
+~~~~~~~~~~~~~~
+
+Topic ID 0 is already a real topic, and topic ID -1 already represents
+"General / Outlier". Use -2 for genuinely unassigned topics, or create a
+normalized topic dimension containing an explicit unassigned member. Topic
+identity is the combination of topic_model_version and topic_id; an integer ID
+alone is not stable across classifier revisions.
+
+Model provenance
+~~~~~~~~~~~~~~~~
+
+Track topic and sentiment models independently. Each model version must map to
+an immutable registry record containing at least:
+
+- Model kind and human-readable version.
+- Model artifact SHA-256.
+- Tokenizer/configuration SHA-256.
+- Relevant inference parameters and classification thresholds.
+- Build or Git revision.
+- Registration and activation timestamps.
+
+Propagate both model versions through preprocessing, RabbitMQ messages,
+sentiment scoring, and PostgreSQL storage.
+
+Sufficient statistics
+~~~~~~~~~~~~~~~~~~~~~
+
+For each fact row preserve:
+
+- post_count
+- positive_count, neutral_count, negative_count
+- positive_probability_sum and positive_probability_sq_sum
+- neutral_probability_sum and neutral_probability_sq_sum
+- negative_probability_sum and negative_probability_sq_sum
+- signal_sum and signal_sq_sum
+- engagement_sum
+- weight_sum
+- weighted_signal_sum and weighted_signal_sq_sum
+- first_event_at and last_event_at
+- first_scored_at and last_scored_at
+- computed_at and input_watermark
+
+Define the continuous sentiment signal explicitly, initially as:
+
+    signal = positive_probability - negative_probability
+
+Define the engagement weight explicitly, initially as:
+
+    weight = ln(engagement + 1)
+
+Do not treat a stored sentiment_index as canonical data. Calculate it from the
+appropriate numerator and denominator in a view or query. Add constraints for
+nonnegative counts, probability bounds, hour alignment, temporal ordering, and:
+
+    post_count = positive_count + neutral_count + negative_count
+
+Quality telemetry
+~~~~~~~~~~~~~~~~~
+
+Dropped and duplicate posts do not reliably reach the retained posts table, so
+do not place dropped_posts_count or duplicate_count in the sentiment fact.
+Create an hourly pipeline-quality fact with a grain similar to:
+
+    bucket_hour x platform x pipeline_stage x reason x pipeline_version
+
+Include symbol only where it is actually known at the stage producing the
+quality event.
+
+Event time versus knowledge time
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Model hashes and Git revisions support reproduction but do not prevent
+look-ahead leakage. Preserve when information became available:
+
+- Source/event timestamp.
+- Ingestion timestamp.
+- Scoring timestamp.
+- Aggregate computation timestamp.
+- Input watermark/finalization cutoff.
+- Signal as_of_at timestamp.
+
+The canonical hourly fact represents finalized descriptive history and may be
+updated by late posts until its watermark closes. Maintain a separate,
+append-only analytical_signal_snapshot table for the values actually available
+at each historical as_of_at. Backtests must consume those snapshots, not later
+revisions of event-time facts.
+
+Partitioning
+~~~~~~~~~~~~
+
+Range-partition the new canonical fact by month on bucket_hour. This is mainly
+an archival and retention lifecycle choice rather than an assumption that
+partitioning will automatically improve every query.
+
+- Include bucket_hour in every partitioned primary/unique key.
+- Pre-create the current and next three monthly partitions.
+- Before retention runs, ensure partitions exist for every month represented
+  by posts eligible for pruning.
+- Alert on partition preparation failure.
+- Preserve the atomic aggregate-and-delete transaction so any missing
+  partition or fact constraint rolls back raw-post deletion.
+- Do not detach or delete a partition until its archive is verified and its
+  operational retention period has elapsed.
+
+Legacy aggregates
+~~~~~~~~~~~~~~~~~
+
+Existing (symbol, hour) aggregates have already lost platform and topic
+dimensions. Preserve them as explicitly unfiltered legacy totals. Never assign
+fabricated platform/topic values that make them appear filterable. Unfiltered
+queries may use them; filtered queries must report a shorter coverage window or
+no historical value for that period.
+
+Market facts
+~~~~~~~~~~~~
+
+Create durable hourly and daily market facts before stock_quotes are pruned.
+Define open, high, low, close, volume, provider, event time, and observation
+time semantics before implementation. Historical sentiment facts without their
+corresponding market observations are insufficient for reproducible
+correlations and backtests.
+
+Sampling
+~~~~~~~~
+
+Keep two explicitly distinguishable retained-content cohorts:
+
+1. A deterministic probability sample stratified by relevant dimensions and
+   carrying inclusion_probability, stratum, and sampling_policy_version.
+2. An enriched challenge set containing high-engagement, low-confidence,
+   extreme-score, topic-outlier, and source-anomaly cases, with one or more
+   explicit inclusion reasons.
+
+Use a stable hash of source identity and sampling-policy version instead of
+random() so retries select the same source posts. Do not use the enriched cohort
+for prevalence estimates unless its selection bias is handled deliberately.
+
+The database currently contains cleaned post text, not the original producer
+payload. If future preprocessing experiments require original text, select and
+retain the sample before cleaning. Otherwise describe the artifact accurately
+as a retained cleaned-post corpus.
+
+Define engagement semantics before using high engagement as a sampling rule.
+The current conflict behavior preserves the first stored engagement value; it
+does not refresh engagement as a post ages.
+
+Use a transactional sampling outbox so selected content is committed in the
+same transaction that aggregates and deletes expiring posts. Export workers may
+then retry object-storage uploads without risking loss of selected content.
+
+Analytical archive
+~~~~~~~~~~~~~~~~~~
+
+PostgreSQL 15 does not natively emit Parquet. Use a pinned DuckDB-based exporter
+or another explicitly installed and tested Parquet component.
+
+For every versioned Parquet object, record a manifest containing:
+
+- Dataset and schema version.
+- Partition/month and data coverage.
+- Source table or snapshot identity.
+- Row count and relevant aggregate totals.
+- Minimum and maximum timestamps.
+- Object key and object-storage version ID, when available.
+- File size and cryptographic checksum.
+- Exported and verified timestamps.
+
+Late-arriving data means a calendar month is not automatically final at month
+end. Apply an explicit finalization lag or export versioned revisions. Never
+delete or detach database data merely because an upload request succeeded;
+verify the manifest and round-trip readability first.
+
+Operational backup
+~~~~~~~~~~~~~~~~~~
+
+Configure WAL-G independently from the analytical archive:
+
+- Extend the PostgreSQL 15 image with a pinned, checksum-verified WAL-G binary.
+- Archive WAL continuously to an encrypted, access-controlled object prefix.
+- Take recurring base backups and apply a documented retention policy.
+- Separate upload, retention/delete, and restore credentials where practical.
+- Monitor pg_stat_archiver, archive lag, base-backup age, WAL integrity, and
+  PostgreSQL disk space.
+- Exercise restoration into an isolated PostgreSQL 15 environment regularly.
+
+WAL-G restores the operational database. Parquet preserves portable analytical
+assets. Neither mechanism replaces the other.
+
+
+SCOPE
+-----
+
+In scope
+~~~~~~~~
+
+- Versioned sentiment and market fact tables.
+- Topic and sentiment model provenance.
+- As-of analytical signal snapshots.
+- Pipeline-quality facts.
+- Deterministic content sampling and its transactional outbox.
+- Versioned Parquet exports and verified manifests.
+- WAL-G point-in-time recovery.
+- API migration to the new analytical facts.
+- Tests, monitoring, restore rehearsal, and staged rollout.
+
+Out of scope
+~~~~~~~~~~~~
+
+- Training or fine-tuning models.
+- A general-purpose data lake or external warehouse.
+- Fabricating platform/topic detail for already-flattened legacy aggregates.
+- Treating the retained content sample as ground truth before it is annotated.
+
+
+ACTION ITEMS
+------------
+
+[ ] 1. Define the analytical data contract.
+
+Document event time, observation time, scoring time, model identities,
+aggregation formulas, engagement semantics, finalization watermarks, raw-data
+retention, sampling cohorts, and object-storage retention. Assign explicit
+versions to every contract that can affect historical results.
+
+[ ] 2. Propagate model and temporal provenance.
+
+Add topic_model_version, sentiment_model_version, and required ingest/score
+timestamps to shared message schemas and storage. Populate immutable model
+registry records from artifact and configuration hashes, and validate versions
+at service startup.
+
+[ ] 3. Add versioned database structures.
+
+Create a new immutable migration that adds the model registry, canonical hourly
+sentiment fact, pipeline-quality fact, analytical signal snapshot, market fact,
+sampling outbox, archive manifest, and initial monthly partitions. Do not edit
+already-applied baseline migrations.
+
+[ ] 4. Automate partition management.
+
+Create idempotent partition-management code that prepares current/future
+partitions and all event months about to be rolled up. Add monitoring for
+missing partitions and tests proving that a rollup failure cannot delete source
+posts.
+
+[ ] 5. Replace the sentiment retention rollup.
+
+Extend the existing advisory-lock-protected aggregate-and-delete statement to
+return platform, topic identity, all class probabilities, model versions,
+engagement, event time, and scoring time. Upsert additive components and create
+sample-outbox entries in the same transaction. Preserve concurrency,
+late-arrival, idempotency, and rollback guarantees.
+
+[ ] 6. Preserve legacy coverage honestly.
+
+Keep existing flattened facts as an unfiltered legacy tier. Backfill only data
+whose dimensions are actually known. Add coverage metadata so API consumers can
+distinguish detailed, finalized, live, and legacy-only intervals.
+
+[ ] 7. Add durable market aggregates.
+
+Roll eligible stock quotes into canonical hourly/daily OHLC facts before quote
+deletion. Preserve provider and as-of semantics needed to reproduce the market
+series used by historical correlations.
+
+[ ] 8. Update analytical reads and snapshots.
+
+Refactor dashboard and correlation queries to aggregate sufficient statistics,
+honor platform/topic/model filters, and avoid mixing filtered facts with
+unfiltered legacy totals. Generate append-only, versioned signal snapshots at
+defined as_of_at times for historical simulations.
+
+[ ] 9. Implement sampling and Parquet archival.
+
+Apply deterministic sampling rules, write selected records to the transactional
+outbox, export ready fact partitions and sample batches through a pinned Parquet
+tool, upload versioned objects, write manifests, verify checksums and counts,
+and mark outbox entries complete only after verification.
+
+[ ] 10. Add WAL-G and perform a staged rollout.
+
+Configure continuous WAL archiving, recurring base backups, retention,
+least-privilege credentials, alerting, and isolated restore automation. Run the
+new analytical pipeline in shadow mode, compare it with current results, and
+cut API reads over only after validation passes.
+
+
+VALIDATION AND ACCEPTANCE CRITERIA
+---------------------------------
+
+Database and mathematics
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+- Multi-hour, multi-platform, and multi-topic results equal direct aggregation
+  from raw posts over the same hot-data window.
+- Probability means, sample variances, weighted signals, and class counts are
+  correctly reconstructed from stored additive components.
+- Every fact satisfies count, probability, time-ordering, and bucket-alignment
+  constraints.
+- Different topic, sentiment, and aggregation versions never overwrite one
+  another.
+
+Retention safety
+~~~~~~~~~~~~~~~~
+
+- Boundary rows at the cutoff are handled according to the documented policy.
+- Late posts increment exactly one fact row.
+- Concurrent retention workers move each post exactly once.
+- Repeated retention runs are idempotent.
+- Missing partitions, constraint failures, and connection failures do not
+  delete raw posts without their facts and selected sample records.
+
+Analytical correctness
+~~~~~~~~~~~~~~~~~~~~~~
+
+- Platform/topic filters work across the detailed cold tier.
+- Filtered reads never consume unfiltered legacy totals.
+- APIs expose coverage limitations for legacy periods.
+- Repeating a backtest against the same as_of_at snapshots yields identical
+  inputs and results.
+
+Archive integrity
+~~~~~~~~~~~~~~~~~
+
+- Every Parquet object has a matching verified manifest.
+- Export row counts, timestamp ranges, and aggregate control totals reconcile
+  with the source snapshot.
+- Archived files round-trip into a clean analytical environment with the
+  expected schema and values.
+- Failed or partial uploads remain retryable and cannot be marked complete.
+
+Disaster recovery
+~~~~~~~~~~~~~~~~~
+
+- WAL archive integrity checks report no missing required segments.
+- Base-backup age and archive lag remain within defined objectives.
+- A clean PostgreSQL 15 instance can be restored from object storage.
+- Restored migrations, fact counts, representative API queries, and manifest
+  records pass smoke tests.
+
+Rollout
+~~~~~~~
+
+- Run shadow aggregation for at least one full raw-retention window.
+- Reconcile old and new unfiltered totals for all comparable buckets.
+- Document intentional differences caused by probability-based signals or
+  corrected filtering.
+- Record operational runbooks for partition creation, archive verification,
+  model-version changes, WAL-G recovery, and rollback.
+
+
+DEFAULTS REQUIRING CONFIRMATION BEFORE IMPLEMENTATION
+-----------------------------------------------------
+
+- Full cleaned-post retention: start with 14 days, adjust after measuring size
+  and reprocessing needs.
+- Probability sample: start with a deterministic 1 percent base sample and
+  measure representation before increasing it.
+- Fact partition size: one calendar month.
+- Partition preparation: current month plus three future months, plus any older
+  candidate event month found before retention.
+- WAL archive timeout: 60 seconds.
+- WAL-G operational recovery window: 30 days.
+- Long-lived analytical archive: versioned and retained according to a reviewed
+  source-governance and storage policy rather than an undefined "forever".

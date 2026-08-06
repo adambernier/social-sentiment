@@ -12,6 +12,18 @@ def get_env_int(key: str, default: int) -> int:
         return default
 
 
+def get_env_float(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, str(default)))
+    except ValueError:
+        return default
+
+
+def get_env_csv(key: str, default: str = "") -> tuple[str, ...]:
+    value = os.environ.get(key, default)
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
 def get_env_bool(key: str, default: bool = False) -> bool:
     value = os.environ.get(key)
     if value is None:
@@ -34,6 +46,24 @@ QUEUE_TOPIC_POSTS = get_env("QUEUE_TOPIC_POSTS", "topic-posts")
 # Database Config
 DATABASE_DSN = get_env(
     "DATABASE_DSN", "postgresql://postgres:sentiment@localhost:5432/sentiment"
+)
+
+# Retention and analytical archive defaults. Cleaned post text is only copied
+# into long-lived archive staging for explicitly allowlisted source platforms.
+POST_RETENTION_DAYS = max(1, get_env_int("POST_RETENTION_DAYS", 14))
+QUOTE_RETENTION_DAYS = max(1, get_env_int("QUOTE_RETENTION_DAYS", 90))
+RAW_ARCHIVE_PLATFORMS = get_env_csv("RAW_ARCHIVE_PLATFORMS")
+RAW_ARCHIVE_SAMPLE_RATE = min(
+    1.0,
+    max(0.0, get_env_float("RAW_ARCHIVE_SAMPLE_RATE", 0.01)),
+)
+RAW_ARCHIVE_CHALLENGE_ENGAGEMENT = max(
+    0,
+    get_env_int("RAW_ARCHIVE_CHALLENGE_ENGAGEMENT", 100),
+)
+RAW_ARCHIVE_CHALLENGE_ABS_SIGNAL = min(
+    1.0,
+    max(0.0, get_env_float("RAW_ARCHIVE_CHALLENGE_ABS_SIGNAL", 0.8)),
 )
 
 # Global context is deliberately opt-in. The same switch gates provider work

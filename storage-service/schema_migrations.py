@@ -42,6 +42,22 @@ MIGRATIONS = (
         "0002_global_context",
         Path(__file__).parent / "0002_global_context.sql",
     ),
+    Migration(
+        "0003_analytical_facts",
+        Path(__file__).parent / "0003_analytical_facts.sql",
+    ),
+    Migration(
+        "0004_fact_topic_labels",
+        Path(__file__).parent / "0004_fact_topic_labels.sql",
+    ),
+    Migration(
+        "0005_provenance_and_quality",
+        Path(__file__).parent / "0005_provenance_and_quality.sql",
+    ),
+    Migration(
+        "0006_analytical_constraints",
+        Path(__file__).parent / "0006_analytical_constraints.sql",
+    ),
 )
 
 

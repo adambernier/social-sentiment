@@ -1,0 +1,10 @@
+[Unit]
+Description=Social Sentiment closed-month analytical Parquet archive
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/social-sentiment
+EnvironmentFile=/etc/social-sentiment/analytics-archive.env
+ExecStart=/opt/social-sentiment/scripts/archive_analytical.sh

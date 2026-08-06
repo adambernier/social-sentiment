@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly Social Sentiment WAL-G retention
+
+[Timer]
+OnCalendar=Sun *-*-* 05:15:00
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

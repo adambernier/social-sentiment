@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aio_pika
@@ -10,17 +11,16 @@ from pydantic import ValidationError
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from shared.schemas import CleanPost, ScoredPost
+from model import SentimentModel
+
+from shared.config import QUEUE_CLEAN_POSTS as INPUT_QUEUE
+from shared.config import QUEUE_SCORED_POSTS as OUTPUT_QUEUE
 from shared.config import (
     RABBIT_HOST,
+    RABBIT_PASS,
     RABBIT_PORT,
     RABBIT_USER,
-    RABBIT_PASS,
-    QUEUE_CLEAN_POSTS as INPUT_QUEUE,
-    QUEUE_SCORED_POSTS as OUTPUT_QUEUE,
 )
-from model import SentimentModel
-from shared.metrics import start_metrics_server, MESSAGES_PROCESSED_TOTAL
 from shared.messaging import (
     RequeueError,
     dead_letter_message,
@@ -29,7 +29,9 @@ from shared.messaging import (
     requeue_unprocessed_messages,
     retry_or_dead_letter,
 )
+from shared.metrics import MESSAGES_PROCESSED_TOTAL, start_metrics_server
 from shared.runtime import supervise_long_running
+from shared.schemas import CleanPost, ScoredPost
 
 # Configure logging
 logging.basicConfig(
@@ -80,6 +82,9 @@ async def process_batch(
                 **post.model_dump(),
                 sentiment=label,
                 scores=scores,
+                sentiment_scored_at=datetime.now(timezone.utc),
+                sentiment_model_version=model.version,
+                sentiment_model_hash=model.model_hash,
             )
         except ValidationError as e:
             logger.error(

@@ -1,0 +1,10 @@
+[Unit]
+Description=Monthly Social Sentiment analytical archive
+
+[Timer]
+OnCalendar=*-*-02 06:15:00
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

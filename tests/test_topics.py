@@ -8,7 +8,8 @@ from shared.topics import TopicModel
 def mock_onnx_and_tokenizer():
     with patch("shared.topics.AutoTokenizer") as mock_tokenizer_cls, \
          patch("shared.topics.ort.InferenceSession") as mock_session_cls, \
-         patch("shared.topics.os.path.exists", return_value=True):
+         patch("shared.topics.os.path.exists", return_value=True), \
+         patch("shared.topics.sha256_file", return_value="a" * 64):
         
         # Setup tokenizer mock
         mock_tokenizer = MagicMock()

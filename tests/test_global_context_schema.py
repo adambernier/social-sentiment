@@ -11,6 +11,10 @@ def test_global_context_migration_is_registered_after_baseline():
     assert [migration.version for migration in MIGRATIONS] == [
         "0001_baseline",
         "0002_global_context",
+        "0003_analytical_facts",
+        "0004_fact_topic_labels",
+        "0005_provenance_and_quality",
+        "0006_analytical_constraints",
     ]
 
 

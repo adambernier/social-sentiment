@@ -58,3 +58,33 @@ def test_scored_post_validation():
     post = ScoredPost.model_validate(post_data)
     assert post.sentiment == "positive"
     assert post.scores["positive"] == 0.8
+
+
+@pytest.mark.parametrize(
+    "scores",
+    [
+        pytest.param(
+            {"positive": 0.8, "neutral": 0.2},
+            id="missing-class",
+        ),
+        pytest.param(
+            {"positive": 1.1, "neutral": 0.0, "negative": -0.1},
+            id="outside-unit-interval",
+        ),
+        pytest.param(
+            {"positive": 0.5, "neutral": 0.5, "negative": 0.5},
+            id="does-not-sum-to-one",
+        ),
+    ],
+)
+def test_scored_post_rejects_invalid_probability_contract(scores):
+    with pytest.raises(ValidationError):
+        ScoredPost(
+            id="bad-scores",
+            symbol="NVDA",
+            platform="bluesky",
+            text="invalid score payload",
+            timestamp=datetime.now(timezone.utc),
+            sentiment="positive",
+            scores=scores,
+        )

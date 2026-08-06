@@ -555,6 +555,11 @@ class CorrelationResponse(BaseModel):
     correlationText: str
     correlationStrength: str
     opportunity: Optional[OpportunityResponse] = None
+    coverageStart: Optional[str] = None
+    coverageEnd: str
+    coverageComplete: bool
+    coverageMode: str
+    coverageNotice: Optional[str] = None
 
 
 def compute_opportunity(
@@ -1503,15 +1508,37 @@ async def get_dashboard(
 
 
 HOURLY_MARKET_QUERY = """
-    WITH hourly_closes AS (
+    WITH hourly_sources AS (
+        SELECT
+            symbol,
+            bucket_hour,
+            close_price,
+            had_regular_session AS is_market_open,
+            last_observed_at
+        FROM market_hourly_facts
+        WHERE symbol = ANY(%s) AND bucket_hour >= %s
+
+        UNION ALL
+
         SELECT
             symbol,
             date_trunc('hour', timestamp, 'UTC') AS bucket_hour,
             (array_agg(price ORDER BY timestamp DESC))[1] AS close_price,
-            bool_or(market_session = 'regular') AS is_market_open
+            bool_or(market_session = 'regular') AS is_market_open,
+            MAX(timestamp) AS last_observed_at
         FROM stock_quotes
         WHERE symbol = ANY(%s) AND timestamp >= %s
         GROUP BY symbol, date_trunc('hour', timestamp, 'UTC')
+    ),
+    hourly_closes AS (
+        SELECT
+            symbol,
+            bucket_hour,
+            (array_agg(close_price ORDER BY last_observed_at DESC))[1]
+                AS close_price,
+            bool_or(is_market_open) AS is_market_open
+        FROM hourly_sources
+        GROUP BY symbol, bucket_hour
     ),
     hourly_with_previous AS (
         SELECT
@@ -1646,6 +1673,115 @@ def compute_lagged_correlation(
     return max_r, best_lag, lag_sweeps
 
 
+def _sentiment_aggregate_query(
+    symbol: str,
+    cutoff: datetime,
+    platform: str | None,
+    topic: str | None,
+) -> tuple[str, list, bool]:
+    """Build the cold-tier query without ever filtering legacy aggregates."""
+    canonical_filters = ""
+    params: list = [symbol, cutoff]
+    if platform:
+        canonical_filters += " AND platform = %s"
+        params.append(platform)
+    if topic and topic != "all":
+        canonical_filters += " AND topic_label = %s"
+        params.append(topic)
+
+    is_filtered = bool(platform or (topic and topic != "all"))
+    # Only fixed, code-owned predicates are interpolated; every request value
+    # remains a bound psycopg parameter.
+    query = f"""
+        WITH canonical AS (
+            SELECT
+                bucket_hour,
+                SUM(positive_count) AS positive_count,
+                SUM(neutral_count) AS neutral_count,
+                SUM(negative_count) AS negative_count,
+                SUM(positive_weight_sum) AS positive_weighted,
+                SUM(negative_weight_sum) AS negative_weighted,
+                SUM(neutral_weight_sum) AS neutral_weighted,
+                SUM(weight_sum) AS total_weighted,
+                SUM(weighted_signal_sum) AS weighted_signal_sum
+            FROM hourly_sentiment_facts
+            WHERE symbol = %s AND bucket_hour >= %s
+            {canonical_filters}
+            GROUP BY bucket_hour
+        ),
+        legacy AS (
+            SELECT
+                legacy.bucket_hour,
+                legacy.positive_count,
+                legacy.neutral_count,
+                legacy.negative_count,
+                legacy.positive_weighted,
+                legacy.negative_weighted,
+                legacy.neutral_weighted,
+                legacy.total_weighted,
+                legacy.positive_weighted - legacy.negative_weighted
+                    AS weighted_signal_sum
+            FROM hourly_sentiment_agg AS legacy
+            WHERE legacy.symbol = %s
+              AND legacy.bucket_hour >= %s
+              AND %s::BOOLEAN = FALSE
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM canonical
+                  WHERE canonical.bucket_hour = legacy.bucket_hour
+              )
+        )
+        SELECT *, weighted_signal_sum / NULLIF(total_weighted, 0)
+            AS sentiment_index
+        FROM canonical
+        UNION ALL
+        SELECT *, weighted_signal_sum / NULLIF(total_weighted, 0)
+            AS sentiment_index
+        FROM legacy
+        ORDER BY bucket_hour
+    """
+    params.extend([symbol, cutoff, is_filtered])
+    return query, params, is_filtered
+
+
+def _sentiment_coverage_query(
+    symbol: str,
+    platform: str | None,
+    topic: str | None,
+) -> tuple[str, list]:
+    """Find the first dimension-preserving observation for this request."""
+    filters = ""
+    filter_values: list[str] = []
+    if platform:
+        filters += " AND platform = %s"
+        filter_values.append(platform)
+    if topic and topic != "all":
+        filters += " AND topic_label = %s"
+        filter_values.append(topic)
+
+    is_filtered = bool(filter_values)
+    legacy_source = ""
+    params: list = [symbol, *filter_values, symbol, *filter_values]
+    if not is_filtered:
+        legacy_source = """,
+            (SELECT MIN(bucket_hour) FROM hourly_sentiment_agg
+             WHERE symbol = %s)"""
+        params.append(symbol)
+
+    # `filters` and `legacy_source` contain only the fixed clauses above; no
+    # request value is interpolated into SQL.
+    query = f"""
+        SELECT LEAST(
+            (SELECT MIN(timestamp) FROM posts
+             WHERE symbol = %s {filters}),
+            (SELECT MIN(bucket_hour) FROM hourly_sentiment_facts
+             WHERE symbol = %s {filters})
+            {legacy_source}
+        ) AS coverage_start
+    """
+    return query, params
+
+
 @app.get("/api/stats/correlation", response_model=CorrelationResponse)
 async def get_correlation(
     symbol: str,
@@ -1681,6 +1817,7 @@ async def get_correlation(
             "neutralWeighted": 0.0,
             "negativeWeighted": 0.0,
             "totalWeighted": 0.0,
+            "weightedSignal": 0.0,
             "sentimentIndex": 0.0,
             "sentimentSMA": 0.0,
             "rawPrice": None,
@@ -1697,7 +1834,10 @@ async def get_correlation(
             market_symbols = [symbol]
             if primary_future_symbol and primary_future_symbol != symbol:
                 market_symbols.append(primary_future_symbol)
-            await cur.execute(HOURLY_MARKET_QUERY, [market_symbols, db_cutoff])
+            await cur.execute(
+                HOURLY_MARKET_QUERY,
+                [market_symbols, db_cutoff, market_symbols, db_cutoff],
+            )
             hourly_market_data = await cur.fetchall()
             market_data = _apply_hourly_market_rows(
                 buckets,
@@ -1706,16 +1846,16 @@ async def get_correlation(
                 primary_future_symbol,
             )
 
-            # 3. Load pre-aggregated data from hourly_sentiment_agg (cold tier).
-            # This covers hours where raw posts may have been pruned.
-            agg_query = """
-                SELECT bucket_hour, positive_count, neutral_count, negative_count,
-                       positive_weighted, negative_weighted, neutral_weighted,
-                       total_weighted, sentiment_index
-                FROM hourly_sentiment_agg
-                WHERE symbol = %s AND bucket_hour >= %s
-            """
-            await cur.execute(agg_query, [symbol, cutoff])
+            # 3. Canonical facts retain platform/topic/model dimensions. The
+            # legacy table is eligible only for an unfiltered request, and only
+            # for hours that have no canonical fact.
+            agg_query, agg_params, is_filtered = _sentiment_aggregate_query(
+                symbol,
+                cutoff,
+                platform,
+                topic,
+            )
+            await cur.execute(agg_query, agg_params)
             agg_data = await cur.fetchall()
 
             for a in agg_data:
@@ -1733,13 +1873,21 @@ async def get_correlation(
                     buckets[a_ts_str]["negativeWeighted"] = a["negative_weighted"]
                     buckets[a_ts_str]["neutralWeighted"] = a["neutral_weighted"]
                     buckets[a_ts_str]["totalWeighted"] = a["total_weighted"]
-                    buckets[a_ts_str]["sentimentIndex"] = a["sentiment_index"]
+                    weighted_signal = a.get("weighted_signal_sum")
+                    if weighted_signal is None:
+                        weighted_signal = (
+                            a["positive_weighted"] - a["negative_weighted"]
+                        )
+                    buckets[a_ts_str]["weightedSignal"] = weighted_signal
+                    buckets[a_ts_str]["sentimentIndex"] = (
+                        a["sentiment_index"] or 0.0
+                    )
 
             # 4. Overlay with live posts data (hot tier).
             # For buckets that still have raw posts, this overwrites the aggregated
             # values with fresh counts computed from individual posts.
             posts_query = """
-                SELECT sentiment, timestamp, engagement
+                SELECT sentiment, scores, timestamp, engagement
                 FROM posts
                 WHERE symbol = %s AND timestamp >= %s
             """
@@ -1754,9 +1902,6 @@ async def get_correlation(
             await cur.execute(posts_query, posts_params)
             posts_data = await cur.fetchall()
 
-            # Track which buckets have live posts so we can overwrite agg data
-            live_buckets: set[str] = set()
-
             for p in posts_data:
                 p_ts = (
                     p["timestamp"]
@@ -1765,18 +1910,10 @@ async def get_correlation(
                 )
                 p_ts_str = p_ts.isoformat().replace("+00:00", "Z")
                 if p_ts_str in buckets:
-                    # On first live post for this bucket, reset from aggregated values
-                    if p_ts_str not in live_buckets:
-                        live_buckets.add(p_ts_str)
-                        buckets[p_ts_str]["positive"] = 0
-                        buckets[p_ts_str]["neutral"] = 0
-                        buckets[p_ts_str]["negative"] = 0
-                        buckets[p_ts_str]["positiveWeighted"] = 0.0
-                        buckets[p_ts_str]["negativeWeighted"] = 0.0
-                        buckets[p_ts_str]["neutralWeighted"] = 0.0
-                        buckets[p_ts_str]["totalWeighted"] = 0.0
-
-                    engagement = p["engagement"] if p["engagement"] is not None else 1
+                    engagement = max(
+                        0,
+                        p["engagement"] if p["engagement"] is not None else 1,
+                    )
                     weight = math.log1p(engagement)
                     sent = p["sentiment"]
                     if sent == "positive":
@@ -1789,6 +1926,35 @@ async def get_correlation(
                         buckets[p_ts_str]["neutral"] += 1
                         buckets[p_ts_str]["neutralWeighted"] += weight
                     buckets[p_ts_str]["totalWeighted"] += weight
+
+                    scores = p.get("scores") or {}
+                    positive_probability = scores.get(
+                        "positive",
+                        1.0 if sent == "positive" else 0.0,
+                    )
+                    negative_probability = scores.get(
+                        "negative",
+                        1.0 if sent == "negative" else 0.0,
+                    )
+                    buckets[p_ts_str]["weightedSignal"] += weight * (
+                        positive_probability - negative_probability
+                    )
+
+            # Explicitly describe the earliest interval this query can answer.
+            # Filtered queries never borrow dimensionless legacy aggregates.
+            coverage_query, coverage_params = _sentiment_coverage_query(
+                symbol,
+                platform,
+                topic,
+            )
+            await cur.execute(
+                coverage_query,
+                coverage_params,
+            )
+            coverage_row = await cur.fetchone()
+            coverage_start = (
+                coverage_row.get("coverage_start") if coverage_row else None
+            )
 
             # 5. Fetch latest quote for regular session check
             await cur.execute(
@@ -1816,9 +1982,7 @@ async def get_correlation(
     # Post-process sentiment indices
     for b in buckets.values():
         if b["totalWeighted"] > 0:
-            b["sentimentIndex"] = (b["positiveWeighted"] - b["negativeWeighted"]) / b[
-                "totalWeighted"
-            ]
+            b["sentimentIndex"] = b["weightedSignal"] / b["totalWeighted"]
         else:
             b["sentimentIndex"] = 0.0
 
@@ -2065,6 +2229,20 @@ async def get_correlation(
         else None
     )
 
+    coverage_complete = bool(coverage_start and coverage_start <= cutoff)
+    coverage_start_text = (
+        coverage_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        if coverage_start
+        else None
+    )
+    coverage_notice = None
+    if not coverage_complete:
+        boundary = coverage_start_text or "the first canonical observation"
+        coverage_notice = (
+            f"Requested history begins before {boundary}; earlier buckets are "
+            "reported as unavailable zeros."
+        )
+
     return {
         "data": sorted_data,
         "closedRegions": actual_closed_regions,
@@ -2078,6 +2256,13 @@ async def get_correlation(
         "correlationText": correlation_text,
         "correlationStrength": correlation_strength,
         "opportunity": current_opp,
+        "coverageStart": coverage_start_text,
+        "coverageEnd": now.isoformat().replace("+00:00", "Z"),
+        "coverageComplete": coverage_complete,
+        "coverageMode": (
+            "dimension-preserving" if is_filtered else "legacy-unfiltered+canonical"
+        ),
+        "coverageNotice": coverage_notice,
     }
 
 

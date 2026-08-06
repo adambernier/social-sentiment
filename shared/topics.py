@@ -1,10 +1,14 @@
 import os
+
 import numpy as np
 import onnxruntime as ort
 from transformers import AutoTokenizer
 
+from shared.model_identity import sha256_file
+
+
 class TopicModel:
-    def __init__(self, model_dir: str = None):
+    def __init__(self, model_dir: str | None = None):
         print("Initializing ONNX Zero-Shot Topic Classifier...")
         
         # Check standard path locations (container /app vs local testing)
@@ -24,12 +28,18 @@ class TopicModel:
             raise FileNotFoundError("Could not find model directory from possible paths.")
             
         print(f"Loading tokenizer and quantized ONNX zero-shot model from {model_dir}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_dir,
+            local_files_only=True,
+        )
         
         # Disable execution provider warnings for clean logs
         opts = ort.SessionOptions()
+        model_path = os.path.join(model_dir, "model_quant.onnx")
+        self.version = os.getenv("TOPIC_MODEL_VERSION", "zero-shot-onnx-v1")
+        self.model_hash = sha256_file(model_path)
         self.session = ort.InferenceSession(
-            os.path.join(model_dir, "model_quant.onnx"), 
+            model_path,
             sess_options=opts
         )
         

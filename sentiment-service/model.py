@@ -1,12 +1,23 @@
+import os
+
 import numpy as np
 import onnxruntime as ort
 from transformers import AutoTokenizer
 
+from shared.model_identity import sha256_file
+
+
 class SentimentModel:
     def __init__(self, model_dir: str = "sentiment-service/model_quant"):
         print(f"Loading quantized ONNX sentiment model from {model_dir}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
-        self.session = ort.InferenceSession(f"{model_dir}/model_quant.onnx")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_dir,
+            local_files_only=True,
+        )
+        model_path = f"{model_dir}/model_quant.onnx"
+        self.version = os.getenv("SENTIMENT_MODEL_VERSION", "fintwitbert-onnx-v1")
+        self.model_hash = sha256_file(model_path)
+        self.session = ort.InferenceSession(model_path)
         
         # ID mapping from FinTwitBERT config: {0: 'NEUTRAL', 1: 'BULLISH', 2: 'BEARISH'}
         self.id2label = {0: 'neutral', 1: 'positive', 2: 'negative'}

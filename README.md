@@ -77,12 +77,13 @@ Inspired by hockey stat cards, the dashboard features a **Divergent Bar Chart** 
   lags to surface whether sentiment leads or lags price (`/stats/correlation`).
 
 ### 🗄️ Two-tier retention
-- Hourly sentiment aggregates are kept in `hourly_sentiment_agg` (cold tier),
-  while raw posts (hot tier) are pruned after a retention window. The API
-  transparently overlays live posts on top of the aggregates.
+- Dimension-preserving sufficient statistics are kept in
+  `hourly_sentiment_facts`, while raw posts are pruned after 14 days. The older
+  flattened table remains an explicitly unfiltered legacy tier.
 - Post rollup and pruning are one atomic database operation; late posts add to
   existing hourly aggregates rather than replacing them.
-- Run by the maintenance script below.
+- WAL-G PITR and verified Parquet archives protect operational and analytical
+  state independently. See [the backup and analytics runbook](docs/backups-and-analytics.md).
 
 ### 🌏 Opt-in global context
 
@@ -222,7 +223,10 @@ if a committed lock is stale.
 
 ## Data retention & maintenance
 
-Database maintenance is fully automated. Inside the `storage-service` container, a background scheduler runs once every 24 hours to automatically roll up old posts into `hourly_sentiment_agg` (posts older than 7 days) and prune expired quotes (quotes older than 90 days).
+Database maintenance is fully automated. Inside the `storage-service`
+container, a background scheduler runs once every 24 hours. It atomically
+preserves canonical sentiment facts before pruning posts older than 14 days and
+preserves hourly/daily market facts before pruning quotes older than 90 days.
 
 Global hourly bars are retained for 180 days, daily bars for five years, and
 event signals for one year. These limits are enforced even while the feature
@@ -234,13 +238,19 @@ You can also run database maintenance manually at any time using the `storage-se
 # Preview what would change without writing anything
 python storage-service/rollup.py --dry-run
 
-# Roll up + prune posts older than 7 days, prune quotes older than 90 days
-python storage-service/rollup.py --retention-days 7 --quote-retention-days 90
+# Roll up + prune posts older than 14 days, quotes older than 90 days
+python storage-service/rollup.py --retention-days 14 --quote-retention-days 90
 ```
 
 Post rollup and pruning use one atomic `DELETE ... RETURNING` operation. A
-failure rolls back both changes, repeat runs are safe, and late-arriving posts
-increment existing hourly aggregates.
+failure rolls back all fact/sample/deletion changes, repeat runs are safe, and
+late-arriving posts increment existing facts. Cleaned-text archival is opt-in
+per source; the privacy-safe default retains aggregates but archives no text.
+
+Production PostgreSQL uses the checksum-pinned WAL-G image in
+`postgres/Dockerfile`. Daily base backups, retention, isolated restore drills,
+monthly Parquet exports, credential separation, encryption, and activation are
+documented in [Backups and analytical retention](docs/backups-and-analytics.md).
 
 ## Global-context rollout
 

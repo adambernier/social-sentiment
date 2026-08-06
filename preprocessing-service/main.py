@@ -1,6 +1,7 @@
 import asyncio
-import sys
 import logging
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aio_pika
@@ -9,24 +10,25 @@ from pydantic import ValidationError
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from shared.schemas import RawPost, CleanPost
-from shared.topics import TopicModel
+from preprocess import clean_text, is_valid
+
+from shared.config import QUEUE_CLEAN_POSTS as OUTPUT_QUEUE
+from shared.config import QUEUE_RAW_POSTS as INPUT_QUEUE
 from shared.config import (
     RABBIT_HOST,
+    RABBIT_PASS,
     RABBIT_PORT,
     RABBIT_USER,
-    RABBIT_PASS,
-    QUEUE_RAW_POSTS as INPUT_QUEUE,
-    QUEUE_CLEAN_POSTS as OUTPUT_QUEUE,
 )
-from preprocess import clean_text, is_valid
-from shared.metrics import start_metrics_server, MESSAGES_PROCESSED_TOTAL
 from shared.messaging import (
     dead_letter_message,
     declare_dead_letter_queue,
     requeue_unprocessed,
     retry_or_dead_letter,
 )
+from shared.metrics import MESSAGES_PROCESSED_TOTAL, start_metrics_server
+from shared.schemas import CleanPost, RawPost
+from shared.topics import TopicModel
 
 # Configure logger
 logging.basicConfig(
@@ -64,6 +66,14 @@ async def process_message(message: aio_pika.IncomingMessage, topic_model: TopicM
             topic_id=topic_id,
             topic_label=topic_label,
             engagement=raw.engagement,
+            ingested_at=raw.ingested_at,
+            engagement_observed_at=raw.engagement_observed_at,
+            source_schema_version=raw.source_schema_version,
+            pipeline_git_commit=raw.pipeline_git_commit,
+            cleaned_at=datetime.now(timezone.utc),
+            topic_scored_at=datetime.now(timezone.utc),
+            topic_model_version=topic_model.version,
+            topic_model_hash=topic_model.model_hash,
         )
 
         # Publish asynchronously

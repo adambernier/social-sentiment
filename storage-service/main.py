@@ -3,7 +3,7 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aio_pika
@@ -13,16 +13,17 @@ from pydantic import ValidationError
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from shared.schemas import ScoredPost
+from db import DB
+
 from shared.config import (
+    POST_RETENTION_DAYS,
+    QUOTE_RETENTION_DAYS,
     RABBIT_HOST,
+    RABBIT_PASS,
     RABBIT_PORT,
     RABBIT_USER,
-    RABBIT_PASS,
-    QUEUE_SCORED_POSTS as INPUT_QUEUE,
 )
-from db import DB
-from shared.metrics import start_metrics_server, MESSAGES_PROCESSED_TOTAL
+from shared.config import QUEUE_SCORED_POSTS as INPUT_QUEUE
 from shared.messaging import (
     RequeueError,
     dead_letter_message,
@@ -30,7 +31,9 @@ from shared.messaging import (
     requeue_buffered_messages,
     requeue_unprocessed_messages,
 )
+from shared.metrics import MESSAGES_PROCESSED_TOTAL, start_metrics_server
 from shared.runtime import supervise_long_running
+from shared.schemas import ScoredPost
 
 # Configure logging
 logging.basicConfig(
@@ -224,8 +227,8 @@ async def rollup_scheduler(db: DB):
     Runs once every 24 hours. Offloads blocking synchronous database operations 
     to a background thread to prevent halting the async event loop.
     """
-    retention_days = 7
-    quote_retention_days = 90
+    retention_days = POST_RETENTION_DAYS
+    quote_retention_days = QUOTE_RETENTION_DAYS
     interval_seconds = 24 * 3600  # 24 hours
     
     # Wait 60 seconds on service startup before performing the first cleanup
@@ -247,7 +250,12 @@ async def rollup_scheduler(db: DB):
                 db.rollup_and_prune_posts,
                 post_cutoff,
             )
-            pruned_quotes = await asyncio.to_thread(db.prune_old_quotes, quote_cutoff)
+            hourly_market_facts, daily_market_facts, pruned_quotes = (
+                await asyncio.to_thread(
+                    db.rollup_and_prune_quotes,
+                    quote_cutoff,
+                )
+            )
             context_counts = await asyncio.to_thread(
                 db.prune_global_context,
                 hourly_cutoff=now - timedelta(days=180),
@@ -259,6 +267,8 @@ async def rollup_scheduler(db: DB):
                 f"Scheduled database maintenance completed: "
                 f"rolled up {rolled_up:,} aggregation rows, "
                 f"pruned {pruned_posts:,} posts, "
+                f"preserved {hourly_market_facts:,} hourly and "
+                f"{daily_market_facts:,} daily market facts, "
                 f"pruned {pruned_quotes:,} stock quotes, "
                 f"{context_counts[0]:,} hourly context bars, "
                 f"{context_counts[1]:,} daily context bars, and "

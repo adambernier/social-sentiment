@@ -1,0 +1,10 @@
+[Unit]
+Description=Social Sentiment PostgreSQL WAL-G base backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/social-sentiment
+EnvironmentFile=/etc/social-sentiment/backup.env
+ExecStart=/opt/social-sentiment/scripts/postgres_backup.sh

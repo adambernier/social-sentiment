@@ -4,7 +4,7 @@ Rollup & Prune maintenance script for Social Sentiment data retention.
 Atomically moves old posts into hourly_sentiment_agg and prunes raw data.
 
 Usage:
-    python rollup.py [--retention-days 7] [--quote-retention-days 90] [--dry-run]
+    python rollup.py [--retention-days 14] [--quote-retention-days 90] [--dry-run]
 """
 
 import argparse
@@ -15,15 +15,24 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from db import DB
-from shared.config import DATABASE_DSN
+
+from shared.config import DATABASE_DSN, POST_RETENTION_DAYS, QUOTE_RETENTION_DAYS
 
 
 def main():
     parser = argparse.ArgumentParser(description="Rollup old posts into hourly aggregates and prune raw data.")
-    parser.add_argument("--retention-days", type=int, default=7,
-                        help="Posts older than this many days will be rolled up and pruned (default: 7)")
-    parser.add_argument("--quote-retention-days", type=int, default=90,
-                        help="Stock quotes older than this many days will be pruned (default: 90)")
+    parser.add_argument(
+        "--retention-days",
+        type=int,
+        default=POST_RETENTION_DAYS,
+        help="Posts older than this many days will be rolled up and pruned",
+    )
+    parser.add_argument(
+        "--quote-retention-days",
+        type=int,
+        default=QUOTE_RETENTION_DAYS,
+        help="Stock quotes older than this many days will be rolled up and pruned",
+    )
     parser.add_argument(
         "--global-hourly-retention-days",
         type=int,
@@ -124,10 +133,15 @@ def main():
     print(f"  Upserted {rolled_up:,} aggregation rows.")
     print(f"  Deleted {pruned_posts:,} posts.")
 
-    # Step 2: Prune quotes
-    print("Step 2: Pruning old stock quotes...")
-    pruned_quotes = db.prune_old_quotes(quote_cutoff)
-    print(f"  Deleted {pruned_quotes:,} stock quotes.")
+    # Step 2: Preserve durable market facts, then prune their source quotes.
+    print("Step 2: Rolling up and pruning old stock quotes...")
+    hourly_market, daily_market, pruned_quotes = db.rollup_and_prune_quotes(
+        quote_cutoff
+    )
+    print(
+        f"  Upserted {hourly_market:,} hourly and {daily_market:,} daily "
+        f"market facts; deleted {pruned_quotes:,} stock quotes."
+    )
 
     print("Step 3: Pruning global context...")
     context_counts = db.prune_global_context(

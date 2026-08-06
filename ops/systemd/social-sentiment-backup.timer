@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Social Sentiment PostgreSQL base backup
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

@@ -551,7 +551,12 @@ async def test_correlation_endpoint(mock_db):
     
     # Mock data for live posts
     mock_posts = [
-        {"sentiment": "positive", "timestamp": now_hour, "engagement": 10}
+        {
+            "sentiment": "positive",
+            "scores": {"positive": 1.0, "neutral": 0.0, "negative": 0.0},
+            "timestamp": now_hour,
+            "engagement": 10,
+        }
     ]
     
     # Setup mock_db.fetchall side_effect to return mocks for sequential queries:
@@ -566,6 +571,7 @@ async def test_correlation_endpoint(mock_db):
     
     mock_db.fetchone = AsyncMock()
     mock_db.fetchone.side_effect = [
+        {"coverage_start": now_hour - timedelta(hours=48)},
         {"market_session": "regular"},
         {"pe_relative_sector": -0.25}, # Undervalued relative to sector
         {"price": 12.5}               # Low VIX (options are cheap)
@@ -585,6 +591,18 @@ async def test_correlation_endpoint(mock_db):
         assert "maxR" in data
         assert "bestLag" in data
         assert "opportunity" in data
+        assert data["coverageComplete"] is True
+        assert data["coverageMode"] == "legacy-unfiltered+canonical"
+        current_bucket = next(
+            bucket
+            for bucket in data["data"]
+            if bucket["timestamp"]
+            == now_hour.isoformat().replace("+00:00", "Z")
+        )
+        assert current_bucket["positive"] == 6
+        assert current_bucket["totalWeighted"] == pytest.approx(
+            8.0 + math.log1p(10)
+        )
 
         # Lag sweep: one Pearson r per integer lag across the ±5h window, and
         # the reported bestLag must be one of the swept lags.
@@ -629,8 +647,12 @@ async def test_correlation_endpoint(mock_db):
         # cutoff hour requested to seed the first in-window hourly return.
         market_query_call = mock_db.execute.call_args_list[0]
         assert market_query_call.args[0] == api_main.HOURLY_MARKET_QUERY
-        assert market_query_call.args[1][0] == ["NVDA", "NQ"]
-        assert market_query_call.args[1][1] == now_hour - timedelta(hours=25)
+        assert market_query_call.args[1] == [
+            ["NVDA", "NQ"],
+            now_hour - timedelta(hours=25),
+            ["NVDA", "NQ"],
+            now_hour - timedelta(hours=25),
+        ]
 
 
 def test_hourly_market_query_resamples_quotes_by_symbol_and_utc_hour():
@@ -641,12 +663,71 @@ def test_hourly_market_query_resamples_quotes_by_symbol_and_utc_hour():
     assert "(array_agg(price order by timestamp desc))[1]" in query
     assert "bool_or(market_session = 'regular')" in query
     assert "date_trunc('hour', timestamp, 'utc')" in query
+    assert "from market_hourly_facts" in query
 
     # LAG is isolated per symbol and a return is emitted only for a genuinely
     # adjacent hour. This prevents both cross-symbol and missing-hour returns.
     assert query.count("partition by symbol order by bucket_hour") == 2
     assert "previous_hour = bucket_hour - interval '1 hour'" in query
     assert "where symbol = any(%s) and timestamp >= %s" in query
+
+
+def test_filtered_cold_tier_query_never_uses_dimensionless_legacy_rows():
+    cutoff = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+    query, params, is_filtered = api_main._sentiment_aggregate_query(
+        "NVDA",
+        cutoff,
+        "bluesky",
+        "AI & Compute",
+    )
+    normalized = " ".join(query.lower().split())
+
+    assert is_filtered is True
+    assert "and platform = %s" in normalized
+    assert "and topic_label = %s" in normalized
+    assert "and %s::boolean = false" in normalized
+    assert params == [
+        "NVDA",
+        cutoff,
+        "bluesky",
+        "AI & Compute",
+        "NVDA",
+        cutoff,
+        True,
+    ]
+
+
+def test_filtered_coverage_uses_the_requested_dimensions_and_not_legacy():
+    query, params = api_main._sentiment_coverage_query(
+        "NVDA",
+        "bluesky",
+        "AI & Compute",
+    )
+    normalized = " ".join(query.lower().split())
+
+    assert normalized.count("and platform = %s") == 2
+    assert normalized.count("and topic_label = %s") == 2
+    assert "hourly_sentiment_agg" not in normalized
+    assert params == [
+        "NVDA",
+        "bluesky",
+        "AI & Compute",
+        "NVDA",
+        "bluesky",
+        "AI & Compute",
+    ]
+
+
+def test_unfiltered_coverage_can_include_legacy_history():
+    query, params = api_main._sentiment_coverage_query(
+        "NVDA",
+        None,
+        "all",
+    )
+
+    assert "hourly_sentiment_agg" in query
+    assert params == ["NVDA", "NVDA", "NVDA"]
 
 
 def test_apply_hourly_market_rows_preserves_gaps_sessions_and_symbols():

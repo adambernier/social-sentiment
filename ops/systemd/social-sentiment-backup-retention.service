@@ -1,0 +1,10 @@
+[Unit]
+Description=Social Sentiment WAL-G backup retention
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/social-sentiment
+EnvironmentFile=/etc/social-sentiment/backup-maintenance.env
+ExecStart=/opt/social-sentiment/scripts/postgres_backup_retention.sh

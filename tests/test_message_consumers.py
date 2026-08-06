@@ -62,6 +62,13 @@ def _clean_post():
     )
 
 
+def _model_with_identity() -> MagicMock:
+    model = MagicMock()
+    model.version = "test-model-v1"
+    model.model_hash = "a" * 64
+    return model
+
+
 @pytest.mark.asyncio
 async def test_preprocessing_dead_letters_malformed_payload():
     message = _message(b"not-json")
@@ -81,7 +88,7 @@ async def test_preprocessing_dead_letters_malformed_payload():
 
 @pytest.mark.asyncio
 async def test_preprocessing_retries_then_dead_letters_inference_failure():
-    topic_model = MagicMock()
+    topic_model = _model_with_identity()
     topic_model.predict.side_effect = RuntimeError("inference failed")
 
     first_message = _message(_raw_post().model_dump_json().encode())
@@ -118,7 +125,7 @@ async def test_preprocessing_retries_then_dead_letters_inference_failure():
 async def test_preprocessing_acks_only_after_successful_publish(monkeypatch):
     message = _message(_raw_post().model_dump_json().encode())
     channel = _channel()
-    topic_model = MagicMock()
+    topic_model = _model_with_identity()
     topic_model.predict.return_value = (1, "Earnings & Guidance")
     metric = MagicMock()
     monkeypatch.setattr(preprocessing_main, "MESSAGES_PROCESSED_TOTAL", metric)
@@ -142,7 +149,7 @@ async def test_sentiment_retries_failed_publish_and_acks_retry_copy(
     channel = _channel(
         publish_side_effect=[RuntimeError("publish failed"), None]
     )
-    model = MagicMock()
+    model = _model_with_identity()
     model.predict_batch.return_value = [
         (
             "positive",
@@ -171,7 +178,7 @@ async def test_sentiment_retries_failed_publish_and_acks_retry_copy(
 async def test_sentiment_acks_and_counts_successful_publish(monkeypatch):
     message = _message(_clean_post().model_dump_json().encode())
     channel = _channel()
-    model = MagicMock()
+    model = _model_with_identity()
     model.predict_batch.return_value = [
         (
             "positive",
