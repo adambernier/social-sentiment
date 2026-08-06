@@ -47,6 +47,7 @@ jobs:
         # 1. Install service dependencies using their hashed lockfiles
         pip install --require-hashes \
                     -r api-service/requirements.txt \
+                    -r archive-service/requirements.txt \
                     -r market-producer/requirements.txt \
                     -r preprocessing-service/requirements.txt \
                     -r sentiment-service/requirements.txt \
