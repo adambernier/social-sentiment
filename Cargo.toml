@@ -2,6 +2,9 @@
 members = [
     "crates/social-sentiment-core",
     "crates/preprocessing-service",
+    "crates/sentiment-service",
+    "crates/storage-service",
+    "crates/api-service",
 ]
 resolver = "2"
 
