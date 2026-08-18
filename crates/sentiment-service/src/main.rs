@@ -1,37 +1,43 @@
-mod sentiment_model;
-
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use futures_util::stream::StreamExt;
 use lapin::{
-    options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions, QueueDeclareOptions},
+    options::{
+        BasicAckOptions, BasicConsumeOptions, BasicQosOptions, ConfirmSelectOptions,
+        QueueDeclareOptions,
+    },
     types::{AMQPValue, FieldTable},
     BasicProperties, Channel, Connection, ConnectionProperties,
 };
+use service_sentiment::sentiment_model::SentimentModel;
 use social_sentiment_core::{
     config::Config,
-    messaging::{dead_letter_queue_name, ERROR_HEADER, ERROR_TYPE_HEADER, ORIGINAL_QUEUE_HEADER, PROCESSING_ATTEMPT_HEADER},
+    messaging::{
+        dead_letter_queue_name, publish_confirmed, truncate_error, ERROR_HEADER, ERROR_TYPE_HEADER,
+        ORIGINAL_QUEUE_HEADER, PROCESSING_ATTEMPT_HEADER,
+    },
+    observability::{increment_errors, increment_processed, start_metrics_server},
+    runtime::shutdown_signal,
     schemas::{CleanPost, ScoredPost},
 };
 use std::sync::Arc;
 use std::time::Duration;
-use sentiment_model::SentimentModel;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 const BATCH_SIZE: usize = 32;
-const BATCH_TIMEOUT_MS: u64 = 1000;
+const BATCH_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn get_attempt_header(delivery: &lapin::message::Delivery) -> i32 {
     delivery
         .properties
         .headers()
         .as_ref()
-        .and_then(|h| h.inner().get(PROCESSING_ATTEMPT_HEADER))
-        .and_then(|val| match val {
-            AMQPValue::ShortShortInt(v) => Some(*v as i32),
-            AMQPValue::ShortInt(v) => Some(*v as i32),
-            AMQPValue::LongInt(v) => Some(*v),
-            AMQPValue::LongLongInt(v) => Some(*v as i32),
+        .and_then(|headers| headers.inner().get(PROCESSING_ATTEMPT_HEADER))
+        .and_then(|value| match value {
+            AMQPValue::ShortShortInt(value) => Some(i32::from(*value)),
+            AMQPValue::ShortInt(value) => Some(i32::from(*value)),
+            AMQPValue::LongInt(value) => Some(*value),
+            AMQPValue::LongLongInt(value) => i32::try_from(*value).ok(),
             _ => None,
         })
         .unwrap_or(0)
@@ -40,103 +46,217 @@ fn get_attempt_header(delivery: &lapin::message::Delivery) -> i32 {
 async fn dead_letter_message(
     channel: &Channel,
     input_queue: &str,
-    msg_bytes: &[u8],
+    payload: &[u8],
     delivery_tag: u64,
-    error_msg: &str,
+    error_message: &str,
 ) -> Result<()> {
-    let dlq_name = dead_letter_queue_name(input_queue);
     let mut headers = FieldTable::default();
-    headers.insert(ORIGINAL_QUEUE_HEADER.into(), AMQPValue::LongString(input_queue.into()));
-    headers.insert(ERROR_TYPE_HEADER.into(), AMQPValue::LongString("ProcessingError".into()));
-    headers.insert(ERROR_HEADER.into(), AMQPValue::LongString(error_msg.into()));
-
-    let props = BasicProperties::default()
-        .with_delivery_mode(2) // persistent
+    headers.insert(
+        ORIGINAL_QUEUE_HEADER.into(),
+        AMQPValue::LongString(input_queue.into()),
+    );
+    headers.insert(
+        ERROR_TYPE_HEADER.into(),
+        AMQPValue::LongString("ProcessingError".into()),
+    );
+    headers.insert(
+        ERROR_HEADER.into(),
+        AMQPValue::LongString(truncate_error(error_message, 500).into()),
+    );
+    let properties = BasicProperties::default()
+        .with_delivery_mode(2)
+        .with_content_type("application/json".into())
         .with_headers(headers);
-
+    publish_confirmed(
+        channel,
+        &dead_letter_queue_name(input_queue),
+        payload,
+        properties,
+    )
+    .await?;
     channel
-        .basic_publish("", &dlq_name, BasicPublishOptions::default(), msg_bytes, props)
+        .basic_ack(delivery_tag, BasicAckOptions::default())
         .await?;
-    channel.basic_ack(delivery_tag, BasicAckOptions::default()).await?;
+    increment_errors(1);
     Ok(())
 }
 
 async fn retry_or_dead_letter(
     channel: &Channel,
     input_queue: &str,
-    msg_bytes: &[u8],
+    payload: &[u8],
     delivery_tag: u64,
     attempt: i32,
-    error_msg: &str,
+    error_message: &str,
 ) -> Result<()> {
     if attempt >= 1 {
-        dead_letter_message(channel, input_queue, msg_bytes, delivery_tag, error_msg).await
-    } else {
-        let mut headers = FieldTable::default();
-        headers.insert(PROCESSING_ATTEMPT_HEADER.into(), AMQPValue::LongInt(attempt + 1));
-
-        let props = BasicProperties::default()
-            .with_delivery_mode(2)
-            .with_headers(headers);
-
-        channel
-            .basic_publish("", input_queue, BasicPublishOptions::default(), msg_bytes, props)
-            .await?;
-        channel.basic_ack(delivery_tag, BasicAckOptions::default()).await?;
-        Ok(())
+        return dead_letter_message(channel, input_queue, payload, delivery_tag, error_message)
+            .await;
     }
+
+    let mut headers = FieldTable::default();
+    headers.insert(
+        PROCESSING_ATTEMPT_HEADER.into(),
+        AMQPValue::LongInt(attempt + 1),
+    );
+    let properties = BasicProperties::default()
+        .with_delivery_mode(2)
+        .with_content_type("application/json".into())
+        .with_headers(headers);
+    publish_confirmed(channel, input_queue, payload, properties).await?;
+    channel
+        .basic_ack(delivery_tag, BasicAckOptions::default())
+        .await?;
+    increment_errors(1);
+    Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-    info!("Starting Rust sentiment-service...");
+async fn process_batch(
+    posts: Vec<CleanPost>,
+    deliveries: Vec<(lapin::message::Delivery, Vec<u8>)>,
+    model: Arc<SentimentModel>,
+    channel: &Channel,
+    input_queue: &str,
+    output_queue: &str,
+) -> Result<()> {
+    let texts: Vec<String> = posts.iter().map(|post| post.text.clone()).collect();
+    let inference_model = Arc::clone(&model);
+    let results =
+        match tokio::task::spawn_blocking(move || inference_model.predict_batch(&texts)).await {
+            Ok(Ok(results)) if results.len() == posts.len() => results,
+            Ok(Ok(results)) => {
+                let error_message = format!(
+                    "model returned {} results for {} posts",
+                    results.len(),
+                    posts.len()
+                );
+                for (delivery, payload) in deliveries {
+                    retry_or_dead_letter(
+                        channel,
+                        input_queue,
+                        &payload,
+                        delivery.delivery_tag,
+                        get_attempt_header(&delivery),
+                        &error_message,
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+            Ok(Err(err)) => {
+                for (delivery, payload) in deliveries {
+                    retry_or_dead_letter(
+                        channel,
+                        input_queue,
+                        &payload,
+                        delivery.delivery_tag,
+                        get_attempt_header(&delivery),
+                        &err.to_string(),
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+            Err(err) => {
+                for (delivery, payload) in deliveries {
+                    retry_or_dead_letter(
+                        channel,
+                        input_queue,
+                        &payload,
+                        delivery.delivery_tag,
+                        get_attempt_header(&delivery),
+                        &err.to_string(),
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+        };
 
-    let config = Config::from_env();
-    let model_dir = std::env::var("MODEL_DIR").unwrap_or_else(|_| "sentiment-service/model_quant".to_string());
+    for ((clean_post, (delivery, input_payload)), (sentiment, scores)) in
+        posts.into_iter().zip(deliveries).zip(results)
+    {
+        let scored_post = ScoredPost {
+            clean: clean_post,
+            sentiment,
+            scores,
+            sentiment_scored_at: Utc::now(),
+            sentiment_model_version: model.version.clone(),
+            sentiment_model_hash: model.model_hash.clone(),
+        };
+        if let Err(validation_error) = scored_post.validate() {
+            dead_letter_message(
+                channel,
+                input_queue,
+                &input_payload,
+                delivery.delivery_tag,
+                &validation_error,
+            )
+            .await?;
+            continue;
+        }
 
-    info!("Initializing ONNX FinTwitBERT Sentiment Model from {}...", model_dir);
-    let sentiment_model = Arc::new(SentimentModel::new(&model_dir)?);
-    info!("Sentiment Model loaded successfully (hash: {}).", sentiment_model.model_hash);
+        let output_payload = serde_json::to_vec(&scored_post)?;
+        let properties = BasicProperties::default()
+            .with_delivery_mode(2)
+            .with_content_type("application/json".into());
+        if let Err(err) =
+            publish_confirmed(channel, output_queue, &output_payload, properties).await
+        {
+            retry_or_dead_letter(
+                channel,
+                input_queue,
+                &input_payload,
+                delivery.delivery_tag,
+                get_attempt_header(&delivery),
+                &err.to_string(),
+            )
+            .await?;
+            continue;
+        }
+        channel
+            .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
+            .await?;
+        increment_processed(1);
+    }
+    Ok(())
+}
 
-    let rabbit_url = config.rabbit_url();
-    info!("Connecting to RabbitMQ at {}...", rabbit_url);
-
-    let conn = Connection::connect(&rabbit_url, ConnectionProperties::default()).await?;
-    let channel = conn.create_channel().await?;
-
-    // Set prefetch to double batch size for buffering
-    channel.basic_qos((BATCH_SIZE * 2) as u16, BasicQosOptions::default()).await?;
+async fn run_consumer_session(config: &Config, model: Arc<SentimentModel>) -> Result<()> {
+    info!(
+        host = %config.rabbit_host,
+        port = config.rabbit_port,
+        "connecting to RabbitMQ"
+    );
+    let connection =
+        Connection::connect(&config.rabbit_url(), ConnectionProperties::default()).await?;
+    let channel = connection.create_channel().await?;
+    channel
+        .confirm_select(ConfirmSelectOptions::default())
+        .await?;
+    channel
+        .basic_qos((BATCH_SIZE * 2) as u16, BasicQosOptions::default())
+        .await?;
 
     let input_queue = &config.queue_clean_posts;
     let output_queue = &config.queue_scored_posts;
-    let dlq = dead_letter_queue_name(input_queue);
-
-    channel
-        .queue_declare(
-            input_queue,
-            QueueDeclareOptions { durable: true, ..Default::default() },
-            FieldTable::default(),
-        )
-        .await?;
-
-    channel
-        .queue_declare(
-            output_queue,
-            QueueDeclareOptions { durable: true, ..Default::default() },
-            FieldTable::default(),
-        )
-        .await?;
-
-    channel
-        .queue_declare(
-            &dlq,
-            QueueDeclareOptions { durable: true, ..Default::default() },
-            FieldTable::default(),
-        )
-        .await?;
-
-    info!("Listening on '{}'. Ready to consume clean posts...", input_queue);
+    let dead_letter_queue = dead_letter_queue_name(input_queue);
+    for queue_name in [
+        input_queue.as_str(),
+        output_queue.as_str(),
+        dead_letter_queue.as_str(),
+    ] {
+        channel
+            .queue_declare(
+                queue_name,
+                QueueDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await?;
+    }
 
     let mut consumer = channel
         .basic_consume(
@@ -146,142 +266,74 @@ async fn main() -> Result<()> {
             FieldTable::default(),
         )
         .await?;
-
-    let mut pending_deliveries = Vec::with_capacity(BATCH_SIZE);
-    let mut pending_posts = Vec::with_capacity(BATCH_SIZE);
+    let mut deliveries = Vec::with_capacity(BATCH_SIZE);
+    let mut posts = Vec::with_capacity(BATCH_SIZE);
 
     loop {
-        let timeout = tokio::time::sleep(Duration::from_millis(BATCH_TIMEOUT_MS));
+        let timeout = tokio::time::sleep(BATCH_TIMEOUT);
         tokio::pin!(timeout);
-
         tokio::select! {
-            delivery_opt = consumer.next() => {
-                match delivery_opt {
-                    Some(Ok(delivery)) => {
-                        let body = delivery.data.clone();
-                        let clean_post: CleanPost = match serde_json::from_slice(&body) {
-                            Ok(post) => post,
-                            Err(e) => {
-                                error!("Malformed clean post message: {}", e);
-                                let _ = dead_letter_message(&channel, input_queue, &body, delivery.delivery_tag, &e.to_string()).await;
-                                continue;
-                            }
-                        };
-
-                        pending_deliveries.push((delivery, body));
-                        pending_posts.push(clean_post);
-
-                        if pending_posts.len() < BATCH_SIZE {
+            delivery_result = consumer.next() => {
+                let delivery = delivery_result.ok_or_else(|| anyhow!("RabbitMQ consumer stream ended"))??;
+                let payload = delivery.data.clone();
+                match serde_json::from_slice::<CleanPost>(&payload) {
+                    Ok(post) => {
+                        deliveries.push((delivery, payload));
+                        posts.push(post);
+                        if posts.len() < BATCH_SIZE {
                             continue;
                         }
                     }
-                    Some(Err(e)) => {
-                        warn!("Error receiving delivery from RabbitMQ: {}", e);
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    Err(err) => {
+                        dead_letter_message(
+                            &channel,
+                            input_queue,
+                            &payload,
+                            delivery.delivery_tag,
+                            &err.to_string(),
+                        ).await?;
                         continue;
                     }
-                    None => {
-                        info!("Consumer stream ended.");
-                        break;
-                    }
                 }
             }
-            _ = &mut timeout => {
-                // Timeout fired, process whatever batch we have accumulated
-            }
+            () = &mut timeout => {}
         }
 
-        if pending_posts.is_empty() {
-            continue;
-        }
-
-        let batch_posts = std::mem::take(&mut pending_posts);
-        let batch_deliveries = std::mem::take(&mut pending_deliveries);
-
-        let texts: Vec<String> = batch_posts.iter().map(|p| p.text.clone()).collect();
-        let model_ref = Arc::clone(&sentiment_model);
-
-        let results = match tokio::task::spawn_blocking(move || model_ref.predict_batch(&texts)).await {
-            Ok(Ok(res)) => res,
-            Ok(Err(e)) => {
-                error!("Sentiment prediction batch error: {}", e);
-                for (del, body) in batch_deliveries {
-                    let attempt = get_attempt_header(&del);
-                    let _ = retry_or_dead_letter(&channel, input_queue, &body, del.delivery_tag, attempt, &e.to_string()).await;
-                }
-                continue;
-            }
-            Err(e) => {
-                error!("Sentiment model thread panic: {}", e);
-                for (del, body) in batch_deliveries {
-                    let attempt = get_attempt_header(&del);
-                    let _ = retry_or_dead_letter(&channel, input_queue, &body, del.delivery_tag, attempt, &e.to_string()).await;
-                }
-                continue;
-            }
-        };
-
-        if results.len() != batch_posts.len() {
-            let err_msg = format!("Model returned {} results for {} posts", results.len(), batch_posts.len());
-            error!("{}", err_msg);
-            for (del, body) in batch_deliveries {
-                let attempt = get_attempt_header(&del);
-                let _ = retry_or_dead_letter(&channel, input_queue, &body, del.delivery_tag, attempt, &err_msg).await;
-            }
-            continue;
-        }
-
-        let now = Utc::now();
-
-        for ((clean_post, (delivery, body)), (sentiment_label, scores)) in
-            batch_posts.into_iter().zip(batch_deliveries).zip(results)
-        {
-            let attempt = get_attempt_header(&delivery);
-            let scored_post = ScoredPost {
-                clean: clean_post,
-                sentiment: sentiment_label,
-                scores,
-                sentiment_scored_at: now,
-                sentiment_model_version: sentiment_model.version.clone(),
-                sentiment_model_hash: sentiment_model.model_hash.clone(),
-            };
-
-            if let Err(val_err) = scored_post.validate() {
-                error!("Invalid ScoredPost validation for {}: {}", scored_post.clean.id, val_err);
-                let _ = dead_letter_message(&channel, input_queue, &body, delivery.delivery_tag, &val_err).await;
-                continue;
-            }
-
-            let scored_bytes = match serde_json::to_vec(&scored_post) {
-                Ok(b) => b,
-                Err(e) => {
-                    error!("Failed to serialize scored post {}: {}", scored_post.clean.id, e);
-                    let _ = retry_or_dead_letter(&channel, input_queue, &body, delivery.delivery_tag, attempt, &e.to_string()).await;
-                    continue;
-                }
-            };
-
-            let props = BasicProperties::default().with_delivery_mode(2);
-            if let Err(e) = channel
-                .basic_publish("", output_queue, BasicPublishOptions::default(), &scored_bytes, props)
-                .await
-            {
-                error!("Error publishing scored post {}: {}", scored_post.clean.id, e);
-                let _ = retry_or_dead_letter(&channel, input_queue, &body, delivery.delivery_tag, attempt, &e.to_string()).await;
-                continue;
-            }
-
-            let _ = channel.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).await;
-            info!(
-                "Scored {}: sentiment='{}', pos={:.4}, neu={:.4}, neg={:.4}",
-                scored_post.clean.id,
-                scored_post.sentiment,
-                scored_post.scores.get("positive").cloned().unwrap_or(0.0),
-                scored_post.scores.get("neutral").cloned().unwrap_or(0.0),
-                scored_post.scores.get("negative").cloned().unwrap_or(0.0),
-            );
+        if !posts.is_empty() {
+            process_batch(
+                std::mem::take(&mut posts),
+                std::mem::take(&mut deliveries),
+                Arc::clone(&model),
+                &channel,
+                input_queue,
+                output_queue,
+            )
+            .await?;
         }
     }
+}
 
-    Ok(())
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    start_metrics_server(8009, "sentiment");
+
+    let config = Config::from_env();
+    let model_dir =
+        std::env::var("MODEL_DIR").unwrap_or_else(|_| "sentiment-service/model_quant".to_string());
+    let model = Arc::new(SentimentModel::new(&model_dir)?);
+    info!(model_hash = %model.model_hash, "sentiment model loaded");
+
+    loop {
+        tokio::select! {
+            result = run_consumer_session(&config, Arc::clone(&model)) => {
+                warn!(error = ?result.err(), "consumer session ended; reconnecting");
+            }
+            () = shutdown_signal() => {
+                info!("shutdown requested; unacknowledged messages will be requeued");
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }

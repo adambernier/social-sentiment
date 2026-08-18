@@ -620,7 +620,11 @@ impl DatabaseService {
 
         for post in posts {
             let text_clean = post.clean.text.replace('\x00', "");
-            let topic_label_clean = post.clean.topic_label.as_ref().map(|l| l.replace('\x00', ""));
+            let topic_label_clean = post
+                .clean
+                .topic_label
+                .as_ref()
+                .map(|l| l.replace('\x00', ""));
             let topic_id = post.clean.topic_id.unwrap_or(-2);
             let scores_json = serde_json::to_value(&post.scores)?;
 
@@ -717,7 +721,10 @@ impl DatabaseService {
         Ok((rolled_up, pruned))
     }
 
-    pub async fn rollup_and_prune_quotes(&self, cutoff_ts: DateTime<Utc>) -> Result<(i64, i64, i64)> {
+    pub async fn rollup_and_prune_quotes(
+        &self,
+        cutoff_ts: DateTime<Utc>,
+    ) -> Result<(i64, i64, i64)> {
         let row = sqlx::query(ROLLUP_AND_PRUNE_QUOTES_SQL)
             .bind(QUOTE_RETENTION_ADVISORY_LOCK_KEY)
             .bind(cutoff_ts)
@@ -739,15 +746,17 @@ impl DatabaseService {
     ) -> Result<(u64, u64, u64)> {
         let mut tx = self.pool.begin().await?;
 
-        let res_h = sqlx::query("DELETE FROM global_market_bars WHERE interval = '1h' AND ends_at < $1")
-            .bind(hourly_cutoff)
-            .execute(&mut *tx)
-            .await?;
+        let res_h =
+            sqlx::query("DELETE FROM global_market_bars WHERE interval = '1h' AND ends_at < $1")
+                .bind(hourly_cutoff)
+                .execute(&mut *tx)
+                .await?;
 
-        let res_d = sqlx::query("DELETE FROM global_market_bars WHERE interval = '1d' AND ends_at < $1")
-            .bind(daily_cutoff)
-            .execute(&mut *tx)
-            .await?;
+        let res_d =
+            sqlx::query("DELETE FROM global_market_bars WHERE interval = '1d' AND ends_at < $1")
+                .bind(daily_cutoff)
+                .execute(&mut *tx)
+                .await?;
 
         let res_e = sqlx::query("DELETE FROM global_event_signals WHERE occurred_at < $1")
             .bind(event_cutoff)
@@ -756,6 +765,10 @@ impl DatabaseService {
 
         tx.commit().await?;
 
-        Ok((res_h.rows_affected(), res_d.rows_affected(), res_e.rows_affected()))
+        Ok((
+            res_h.rows_affected(),
+            res_d.rows_affected(),
+            res_e.rows_affected(),
+        ))
     }
 }

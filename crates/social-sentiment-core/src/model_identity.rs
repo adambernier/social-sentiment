@@ -35,6 +35,9 @@ mod tests {
 
         let hash = sha256_file(tmp.path()).unwrap();
         assert_eq!(hash.len(), 64);
-        assert_eq!(hash, "8cf3a78cc64a1d9952a895d574d82ce37ad3b4328893e97dff9611fe3e52706d");
+        assert_eq!(
+            hash,
+            "8cf3a78cc64a1d9952a895d574d82ce37ad3b4328893e97dff9611fe3e52706d"
+        );
     }
 }

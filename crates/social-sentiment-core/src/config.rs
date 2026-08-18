@@ -40,8 +40,10 @@ impl Config {
             quote_retention_days: get_env_i32("QUOTE_RETENTION_DAYS", 90).max(1),
             raw_archive_platforms: get_env_csv("RAW_ARCHIVE_PLATFORMS"),
             raw_archive_sample_rate: get_env_f64("RAW_ARCHIVE_SAMPLE_RATE", 0.01).clamp(0.0, 1.0),
-            raw_archive_challenge_engagement: get_env_i32("RAW_ARCHIVE_CHALLENGE_ENGAGEMENT", 100).max(0),
-            raw_archive_challenge_abs_signal: get_env_f64("RAW_ARCHIVE_CHALLENGE_ABS_SIGNAL", 0.8).clamp(0.0, 1.0),
+            raw_archive_challenge_engagement: get_env_i32("RAW_ARCHIVE_CHALLENGE_ENGAGEMENT", 100)
+                .max(0),
+            raw_archive_challenge_abs_signal: get_env_f64("RAW_ARCHIVE_CHALLENGE_ABS_SIGNAL", 0.8)
+                .clamp(0.0, 1.0),
             global_context_enabled: get_env_bool("GLOBAL_CONTEXT_ENABLED", false),
             vix_symbol: get_env("VIX_SYMBOL", "^VIX"),
         }

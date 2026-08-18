@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 fn default_engagement() -> i32 {
     1
@@ -113,6 +113,13 @@ pub struct ScoredPost {
 
 impl ScoredPost {
     pub fn validate(&self) -> Result<(), String> {
+        if !matches!(self.sentiment.as_str(), "positive" | "neutral" | "negative") {
+            return Err(format!(
+                "sentiment must be positive, neutral, or negative, got {}",
+                self.sentiment
+            ));
+        }
+
         let required = ["positive", "neutral", "negative"];
         for label in &required {
             if !self.scores.contains_key(*label) {
@@ -126,13 +133,19 @@ impl ScoredPost {
 
         for (label, val) in [("positive", pos), ("neutral", neu), ("negative", neg)] {
             if !val.is_finite() || !(0.0..=1.0).contains(&val) {
-                return Err(format!("score for {} must be finite and in [0, 1], got {}", label, val));
+                return Err(format!(
+                    "score for {} must be finite and in [0, 1], got {}",
+                    label, val
+                ));
             }
         }
 
         let sum = pos + neu + neg;
         if (sum - 1.0).abs() > 0.0001 {
-            return Err(format!("scores sum to {}, which is not 1.0 (abs_tol 0.0001)", sum));
+            return Err(format!(
+                "scores sum to {}, which is not 1.0 (abs_tol 0.0001)",
+                sum
+            ));
         }
 
         Ok(())
@@ -213,7 +226,7 @@ mod tests {
             topic_model_hash: "abc".into(),
         };
 
-        let scored = ScoredPost {
+        let mut scored = ScoredPost {
             clean,
             sentiment: "positive".into(),
             scores,
@@ -223,6 +236,8 @@ mod tests {
         };
 
         assert!(scored.validate().is_ok());
+        scored.sentiment = "bullish".into();
+        assert!(scored.validate().is_err());
     }
 
     #[test]

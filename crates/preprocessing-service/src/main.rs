@@ -1,21 +1,28 @@
-mod topic_model;
-
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use futures_util::stream::StreamExt;
 use lapin::{
-    options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions, QueueDeclareOptions},
+    options::{
+        BasicAckOptions, BasicConsumeOptions, BasicQosOptions, ConfirmSelectOptions,
+        QueueDeclareOptions,
+    },
     types::{AMQPValue, FieldTable},
     BasicProperties, Channel, Connection, ConnectionProperties,
 };
+use service_preprocessing::topic_model::TopicModel;
 use social_sentiment_core::{
     cleaner::{clean_text, is_valid},
     config::Config,
-    messaging::{dead_letter_queue_name, ERROR_HEADER, ERROR_TYPE_HEADER, ORIGINAL_QUEUE_HEADER, PROCESSING_ATTEMPT_HEADER},
+    messaging::{
+        dead_letter_queue_name, publish_confirmed, truncate_error, ERROR_HEADER, ERROR_TYPE_HEADER,
+        ORIGINAL_QUEUE_HEADER, PROCESSING_ATTEMPT_HEADER,
+    },
+    observability::{increment_errors, increment_processed, start_metrics_server},
+    runtime::shutdown_signal,
     schemas::{CleanPost, RawPost},
 };
 use std::sync::Arc;
-use topic_model::TopicModel;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 fn get_attempt_header(delivery: &lapin::message::Delivery) -> i32 {
@@ -23,12 +30,12 @@ fn get_attempt_header(delivery: &lapin::message::Delivery) -> i32 {
         .properties
         .headers()
         .as_ref()
-        .and_then(|h| h.inner().get(PROCESSING_ATTEMPT_HEADER))
-        .and_then(|val| match val {
-            AMQPValue::ShortShortInt(v) => Some(*v as i32),
-            AMQPValue::ShortInt(v) => Some(*v as i32),
-            AMQPValue::LongInt(v) => Some(*v),
-            AMQPValue::LongLongInt(v) => Some(*v as i32),
+        .and_then(|headers| headers.inner().get(PROCESSING_ATTEMPT_HEADER))
+        .and_then(|value| match value {
+            AMQPValue::ShortShortInt(value) => Some(i32::from(*value)),
+            AMQPValue::ShortInt(value) => Some(i32::from(*value)),
+            AMQPValue::LongInt(value) => Some(*value),
+            AMQPValue::LongLongInt(value) => i32::try_from(*value).ok(),
             _ => None,
         })
         .unwrap_or(0)
@@ -37,102 +44,105 @@ fn get_attempt_header(delivery: &lapin::message::Delivery) -> i32 {
 async fn dead_letter_message(
     channel: &Channel,
     input_queue: &str,
-    msg_bytes: &[u8],
+    payload: &[u8],
     delivery_tag: u64,
-    error_msg: &str,
+    error_message: &str,
 ) -> Result<()> {
-    let dlq_name = dead_letter_queue_name(input_queue);
     let mut headers = FieldTable::default();
-    headers.insert(ORIGINAL_QUEUE_HEADER.into(), AMQPValue::LongString(input_queue.into()));
-    headers.insert(ERROR_TYPE_HEADER.into(), AMQPValue::LongString("ProcessingError".into()));
-    headers.insert(ERROR_HEADER.into(), AMQPValue::LongString(error_msg.into()));
-
-    let props = BasicProperties::default()
-        .with_delivery_mode(2) // persistent
+    headers.insert(
+        ORIGINAL_QUEUE_HEADER.into(),
+        AMQPValue::LongString(input_queue.into()),
+    );
+    headers.insert(
+        ERROR_TYPE_HEADER.into(),
+        AMQPValue::LongString("ProcessingError".into()),
+    );
+    headers.insert(
+        ERROR_HEADER.into(),
+        AMQPValue::LongString(truncate_error(error_message, 500).into()),
+    );
+    let properties = BasicProperties::default()
+        .with_delivery_mode(2)
+        .with_content_type("application/json".into())
         .with_headers(headers);
 
+    publish_confirmed(
+        channel,
+        &dead_letter_queue_name(input_queue),
+        payload,
+        properties,
+    )
+    .await?;
     channel
-        .basic_publish("", &dlq_name, BasicPublishOptions::default(), msg_bytes, props)
+        .basic_ack(delivery_tag, BasicAckOptions::default())
         .await?;
-    channel.basic_ack(delivery_tag, BasicAckOptions::default()).await?;
+    increment_errors(1);
     Ok(())
 }
 
 async fn retry_or_dead_letter(
     channel: &Channel,
     input_queue: &str,
-    msg_bytes: &[u8],
+    payload: &[u8],
     delivery_tag: u64,
     attempt: i32,
-    error_msg: &str,
+    error_message: &str,
 ) -> Result<()> {
     if attempt >= 1 {
-        dead_letter_message(channel, input_queue, msg_bytes, delivery_tag, error_msg).await
-    } else {
-        let mut headers = FieldTable::default();
-        headers.insert(PROCESSING_ATTEMPT_HEADER.into(), AMQPValue::LongInt(attempt + 1));
-
-        let props = BasicProperties::default()
-            .with_delivery_mode(2)
-            .with_headers(headers);
-
-        channel
-            .basic_publish("", input_queue, BasicPublishOptions::default(), msg_bytes, props)
-            .await?;
-        channel.basic_ack(delivery_tag, BasicAckOptions::default()).await?;
-        Ok(())
+        return dead_letter_message(channel, input_queue, payload, delivery_tag, error_message)
+            .await;
     }
+
+    let mut headers = FieldTable::default();
+    headers.insert(
+        PROCESSING_ATTEMPT_HEADER.into(),
+        AMQPValue::LongInt(attempt + 1),
+    );
+    let properties = BasicProperties::default()
+        .with_delivery_mode(2)
+        .with_content_type("application/json".into())
+        .with_headers(headers);
+    publish_confirmed(channel, input_queue, payload, properties).await?;
+    channel
+        .basic_ack(delivery_tag, BasicAckOptions::default())
+        .await?;
+    increment_errors(1);
+    Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-    info!("Starting Rust preprocessing-service...");
-
-    let config = Config::from_env();
-    let model_dir = std::env::var("MODEL_DIR").unwrap_or_else(|_| "preprocessing-service/model_quant".to_string());
-
-    info!("Initializing ONNX Zero-Shot Topic Model from {}...", model_dir);
-    let topic_model = Arc::new(TopicModel::new(&model_dir)?);
-    info!("Topic Model loaded successfully (hash: {}).", topic_model.model_hash);
-
-    let rabbit_url = config.rabbit_url();
-    info!("Connecting to RabbitMQ at {}...", rabbit_url);
-
-    let conn = Connection::connect(&rabbit_url, ConnectionProperties::default()).await?;
-    let channel = conn.create_channel().await?;
-
+async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> Result<()> {
+    info!(
+        host = %config.rabbit_host,
+        port = config.rabbit_port,
+        "connecting to RabbitMQ"
+    );
+    let connection =
+        Connection::connect(&config.rabbit_url(), ConnectionProperties::default()).await?;
+    let channel = connection.create_channel().await?;
+    channel
+        .confirm_select(ConfirmSelectOptions::default())
+        .await?;
     channel.basic_qos(10, BasicQosOptions::default()).await?;
 
     let input_queue = &config.queue_raw_posts;
     let output_queue = &config.queue_clean_posts;
-    let dlq = dead_letter_queue_name(input_queue);
-
-    channel
-        .queue_declare(
-            input_queue,
-            QueueDeclareOptions { durable: true, ..Default::default() },
-            FieldTable::default(),
-        )
-        .await?;
-
-    channel
-        .queue_declare(
-            output_queue,
-            QueueDeclareOptions { durable: true, ..Default::default() },
-            FieldTable::default(),
-        )
-        .await?;
-
-    channel
-        .queue_declare(
-            &dlq,
-            QueueDeclareOptions { durable: true, ..Default::default() },
-            FieldTable::default(),
-        )
-        .await?;
-
-    info!("Listening on '{}'. Ready to consume raw posts...", input_queue);
+    let dead_letter_queue = dead_letter_queue_name(input_queue);
+    for queue_name in [
+        input_queue.as_str(),
+        output_queue.as_str(),
+        dead_letter_queue.as_str(),
+    ] {
+        channel
+            .queue_declare(
+                queue_name,
+                QueueDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await?;
+    }
 
     let mut consumer = channel
         .basic_consume(
@@ -142,106 +152,139 @@ async fn main() -> Result<()> {
             FieldTable::default(),
         )
         .await?;
+    info!(queue = %input_queue, "ready to consume raw posts");
 
     while let Some(delivery_result) = consumer.next().await {
-        match delivery_result {
-            Ok(delivery) => {
-                let body = delivery.data.as_slice();
-                let delivery_tag = delivery.delivery_tag;
+        let delivery = delivery_result?;
+        let payload = delivery.data.as_slice();
+        let delivery_tag = delivery.delivery_tag;
+        let attempt = get_attempt_header(&delivery);
 
-                let attempt = get_attempt_header(&delivery);
-
-                let raw: RawPost = match serde_json::from_slice(body) {
-                    Ok(post) => post,
-                    Err(e) => {
-                        error!("Malformed raw post message: {}", e);
-                        let _ = dead_letter_message(&channel, input_queue, body, delivery_tag, &e.to_string()).await;
-                        continue;
-                    }
-                };
-
-                let cleaned = clean_text(&raw.text);
-                if !is_valid(&cleaned) {
-                    info!("{}: dropped (too short after cleaning)", raw.id);
-                    let _ = channel.basic_ack(delivery_tag, BasicAckOptions::default()).await;
-                    continue;
-                }
-
-                let topic_model_ref = Arc::clone(&topic_model);
-                let cleaned_clone = cleaned.clone();
-
-                let (topic_id, topic_label) = match tokio::task::spawn_blocking(move || {
-                    topic_model_ref.predict(&cleaned_clone)
-                })
-                .await
-                {
-                    Ok(Ok((id, lbl))) => (id, lbl),
-                    Ok(Err(e)) => {
-                        error!("Topic model prediction error for {}: {}", raw.id, e);
-                        let _ = retry_or_dead_letter(&channel, input_queue, body, delivery_tag, attempt, &e.to_string()).await;
-                        continue;
-                    }
-                    Err(e) => {
-                        error!("Topic model thread panic for {}: {}", raw.id, e);
-                        let _ = retry_or_dead_letter(&channel, input_queue, body, delivery_tag, attempt, &e.to_string()).await;
-                        continue;
-                    }
-                };
-
-                let now = Utc::now();
-                let clean_post = CleanPost {
-                    id: raw.id.clone(),
-                    symbol: raw.symbol.clone(),
-                    platform: raw.platform.clone(),
-                    text: cleaned.clone(),
-                    timestamp: raw.timestamp,
-                    topic_id: Some(topic_id),
-                    topic_label: Some(topic_label.clone()),
-                    engagement: raw.engagement,
-                    ingested_at: raw.ingested_at,
-                    engagement_observed_at: raw.engagement_observed_at,
-                    source_schema_version: raw.source_schema_version,
-                    pipeline_git_commit: raw.pipeline_git_commit,
-                    cleaned_at: now,
-                    topic_scored_at: now,
-                    topic_model_version: topic_model.version.clone(),
-                    topic_model_hash: topic_model.model_hash.clone(),
-                };
-
-                let clean_bytes = match serde_json::to_vec(&clean_post) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        error!("Failed to serialize clean post {}: {}", raw.id, e);
-                        let _ = retry_or_dead_letter(&channel, input_queue, body, delivery_tag, attempt, &e.to_string()).await;
-                        continue;
-                    }
-                };
-
-                let props = BasicProperties::default().with_delivery_mode(2);
-                if let Err(e) = channel
-                    .basic_publish("", output_queue, BasicPublishOptions::default(), &clean_bytes, props)
-                    .await
-                {
-                    error!("Error publishing clean post {}: {}", raw.id, e);
-                    let _ = retry_or_dead_letter(&channel, input_queue, body, delivery_tag, attempt, &e.to_string()).await;
-                    continue;
-                }
-
-                let _ = channel.basic_ack(delivery_tag, BasicAckOptions::default()).await;
-                info!(
-                    "{} ({}): topic='{}', text='{}'",
-                    raw.id,
-                    raw.symbol,
-                    topic_label,
-                    cleaned.chars().take(70).collect::<String>()
-                );
+        let raw: RawPost = match serde_json::from_slice(payload) {
+            Ok(post) => post,
+            Err(err) => {
+                error!(%err, "malformed raw post message");
+                dead_letter_message(
+                    &channel,
+                    input_queue,
+                    payload,
+                    delivery_tag,
+                    &err.to_string(),
+                )
+                .await?;
+                continue;
             }
-            Err(e) => {
-                warn!("Error receiving delivery from RabbitMQ: {}", e);
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
+        };
+
+        let cleaned = clean_text(&raw.text);
+        if !is_valid(&cleaned) {
+            channel
+                .basic_ack(delivery_tag, BasicAckOptions::default())
+                .await?;
+            increment_processed(1);
+            continue;
         }
+
+        let model = Arc::clone(&topic_model);
+        let model_input = cleaned.clone();
+        let prediction = tokio::task::spawn_blocking(move || model.predict(&model_input)).await;
+        let (topic_id, topic_label) = match prediction {
+            Ok(Ok(result)) => result,
+            Ok(Err(err)) => {
+                retry_or_dead_letter(
+                    &channel,
+                    input_queue,
+                    payload,
+                    delivery_tag,
+                    attempt,
+                    &err.to_string(),
+                )
+                .await?;
+                continue;
+            }
+            Err(err) => {
+                retry_or_dead_letter(
+                    &channel,
+                    input_queue,
+                    payload,
+                    delivery_tag,
+                    attempt,
+                    &err.to_string(),
+                )
+                .await?;
+                continue;
+            }
+        };
+
+        let now = Utc::now();
+        let clean_post = CleanPost {
+            id: raw.id.clone(),
+            symbol: raw.symbol.clone(),
+            platform: raw.platform,
+            text: cleaned,
+            timestamp: raw.timestamp,
+            topic_id: Some(topic_id),
+            topic_label: Some(topic_label),
+            engagement: raw.engagement,
+            ingested_at: raw.ingested_at,
+            engagement_observed_at: raw.engagement_observed_at,
+            source_schema_version: raw.source_schema_version,
+            pipeline_git_commit: raw.pipeline_git_commit,
+            cleaned_at: now,
+            topic_scored_at: now,
+            topic_model_version: topic_model.version.clone(),
+            topic_model_hash: topic_model.model_hash.clone(),
+        };
+        let clean_payload = serde_json::to_vec(&clean_post)?;
+        let properties = BasicProperties::default()
+            .with_delivery_mode(2)
+            .with_content_type("application/json".into());
+
+        if let Err(err) =
+            publish_confirmed(&channel, output_queue, &clean_payload, properties).await
+        {
+            retry_or_dead_letter(
+                &channel,
+                input_queue,
+                payload,
+                delivery_tag,
+                attempt,
+                &err.to_string(),
+            )
+            .await?;
+            continue;
+        }
+        channel
+            .basic_ack(delivery_tag, BasicAckOptions::default())
+            .await?;
+        increment_processed(1);
+        info!(post_id = %raw.id, symbol = %raw.symbol, "preprocessed post");
     }
 
-    Ok(())
+    Err(anyhow!("RabbitMQ consumer stream ended"))
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    start_metrics_server(8007, "preprocessing");
+
+    let config = Config::from_env();
+    let model_dir = std::env::var("MODEL_DIR")
+        .unwrap_or_else(|_| "preprocessing-service/model_quant".to_string());
+    let topic_model = Arc::new(TopicModel::new(&model_dir)?);
+    info!(model_hash = %topic_model.model_hash, "topic model loaded");
+
+    loop {
+        tokio::select! {
+            result = run_consumer_session(&config, Arc::clone(&topic_model)) => {
+                warn!(error = ?result.err(), "consumer session ended; reconnecting");
+            }
+            () = shutdown_signal() => {
+                info!("shutdown requested; unacknowledged messages will be requeued");
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }

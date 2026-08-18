@@ -1,0 +1,77 @@
+[
+  {
+    "scenario": "valid",
+    "queue": "raw-posts",
+    "payload": {
+      "id": "fixture-1",
+      "symbol": "NVDA",
+      "platform": "fixture",
+      "text": "NVDA reports stronger demand",
+      "timestamp": "2026-08-18T12:00:00Z",
+      "engagement": 3
+    },
+    "headers": {},
+    "expected": "publish-and-ack"
+  },
+  {
+    "scenario": "duplicate",
+    "queue": "raw-posts",
+    "payload": {
+      "id": "fixture-1",
+      "symbol": "NVDA",
+      "platform": "fixture",
+      "text": "NVDA reports stronger demand",
+      "timestamp": "2026-08-18T12:00:00Z",
+      "engagement": 3
+    },
+    "headers": {},
+    "expected": "idempotent"
+  },
+  {
+    "scenario": "malformed",
+    "queue": "raw-posts",
+    "payload": "{not-json",
+    "headers": {},
+    "expected": "dead-letter"
+  },
+  {
+    "scenario": "retried",
+    "queue": "raw-posts",
+    "payload": {
+      "id": "fixture-retry",
+      "symbol": "NVDA",
+      "platform": "fixture",
+      "text": "NVDA transient model failure",
+      "timestamp": "2026-08-18T12:01:00Z"
+    },
+    "headers": {"x-processing-attempt": 0},
+    "expected": "requeue-with-attempt-1"
+  },
+  {
+    "scenario": "dead-lettered",
+    "queue": "raw-posts",
+    "payload": {
+      "id": "fixture-poison",
+      "symbol": "NVDA",
+      "platform": "fixture",
+      "text": "NVDA repeated model failure",
+      "timestamp": "2026-08-18T12:02:00Z"
+    },
+    "headers": {"x-processing-attempt": 1},
+    "expected": "dead-letter"
+  },
+  {
+    "scenario": "interrupted",
+    "queue": "raw-posts",
+    "payload": {
+      "id": "fixture-shutdown",
+      "symbol": "NVDA",
+      "platform": "fixture",
+      "text": "NVDA in flight during shutdown",
+      "timestamp": "2026-08-18T12:03:00Z"
+    },
+    "headers": {},
+    "expected": "broker-requeue-without-attempt"
+  }
+]
+

@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+
+FROM rust:1.94.0-trixie AS rust-source
+WORKDIR /usr/src/app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libssl-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+COPY . .
+
+# Build all worker executables in one shared layer. Each runtime target below
+# reuses this stage instead of compiling the full dependency graph separately.
+FROM rust-source AS worker-builder
+ENV CARGO_BUILD_JOBS=1
+RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=social-sentiment-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=social-sentiment-cargo-target,target=/usr/src/app/target \
+    --mount=type=cache,id=social-sentiment-ort-cache,target=/root/.cache/ort.pyke.io \
+    cargo build --locked --release \
+        --bin service-preprocessing \
+        --bin service-sentiment \
+        --bin service-storage \
+    && mkdir -p /usr/src/app/out \
+    && cp target/release/service-preprocessing /usr/src/app/out/ \
+    && cp target/release/service-sentiment /usr/src/app/out/ \
+    && cp target/release/service-storage /usr/src/app/out/
+
+FROM rust-source AS api-builder
+ENV CARGO_BUILD_JOBS=1
+RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=social-sentiment-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=social-sentiment-cargo-target,target=/usr/src/app/target \
+    cargo build --locked --release --bin service-api \
+    && mkdir -p /usr/src/app/out \
+    && cp target/release/service-api /usr/src/app/out/
+
+FROM debian:trixie-slim AS runtime-base
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --create-home app
+WORKDIR /app
+USER app
+
+FROM runtime-base AS rust-preprocessing
+COPY --from=worker-builder /usr/src/app/out/service-preprocessing /app/service-preprocessing
+COPY --chown=10001:10001 preprocessing-service/model_quant /app/preprocessing-service/model_quant
+ENV MODEL_DIR=/app/preprocessing-service/model_quant
+CMD ["/app/service-preprocessing"]
+
+FROM runtime-base AS rust-sentiment
+COPY --from=worker-builder /usr/src/app/out/service-sentiment /app/service-sentiment
+COPY --chown=10001:10001 sentiment-service/model_quant /app/sentiment-service/model_quant
+ENV MODEL_DIR=/app/sentiment-service/model_quant
+CMD ["/app/service-sentiment"]
+
+FROM runtime-base AS rust-storage
+COPY --from=worker-builder /usr/src/app/out/service-storage /app/service-storage
+CMD ["/app/service-storage"]
+
+FROM runtime-base AS rust-api
+COPY --from=api-builder /usr/src/app/out/service-api /app/service-api
+ENV PORT=8000
+EXPOSE 8000
+CMD ["/app/service-api"]

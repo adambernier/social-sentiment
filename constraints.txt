@@ -23,7 +23,7 @@ httpx==0.28.1
 feedparser==6.0.12
 
 # ML inference (sentiment, preprocessing)
-onnxruntime==1.26.0
+onnxruntime==1.28.0
 transformers==5.9.0
 numpy==2.4.6
 

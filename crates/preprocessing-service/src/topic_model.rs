@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Mutex;
 use anyhow::Result;
 use ort::session::Session;
 use ort::value::Value;
 use social_sentiment_core::model_identity::sha256_file;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Mutex;
 use tokenizers::{EncodeInput, Tokenizer};
 
 pub struct TopicModel {
@@ -22,15 +22,18 @@ impl TopicModel {
         let tokenizer_path = model_dir_ref.join("tokenizer.json");
         let model_path = model_dir_ref.join("model_quant.onnx");
 
-        let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer from {:?}: {}", tokenizer_path, e))?;
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+            anyhow::anyhow!("Failed to load tokenizer from {:?}: {}", tokenizer_path, e)
+        })?;
 
-        tokenizer.with_truncation(Some(tokenizers::TruncationParams {
-            max_length: 512,
-            strategy: tokenizers::TruncationStrategy::LongestFirst,
-            stride: 0,
-            direction: tokenizers::TruncationDirection::Right,
-        })).map_err(|e| anyhow::anyhow!("Failed to set truncation: {}", e))?;
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: 512,
+                strategy: tokenizers::TruncationStrategy::LongestFirst,
+                stride: 0,
+                direction: tokenizers::TruncationDirection::Right,
+            }))
+            .map_err(|e| anyhow::anyhow!("Failed to set truncation: {}", e))?;
 
         tokenizer.with_padding(Some(tokenizers::PaddingParams {
             strategy: tokenizers::PaddingStrategy::BatchLongest,
@@ -41,8 +44,7 @@ impl TopicModel {
             pad_token: "[PAD]".to_string(),
         }));
 
-        let session = Session::builder()?
-            .commit_from_file(&model_path)?;
+        let session = Session::builder()?.commit_from_file(&model_path)?;
 
         let model_hash = sha256_file(&model_path)?;
         let version = std::env::var("TOPIC_MODEL_VERSION")
@@ -63,10 +65,16 @@ impl TopicModel {
         label_map.insert("financial earnings", "Earnings & Guidance");
         label_map.insert("federal reserve and interest rates", "Fed & Macro");
         label_map.insert("technical analysis and stock charts", "Technical Analysis");
-        label_map.insert("artificial intelligence and computer technology", "AI & Compute");
+        label_map.insert(
+            "artificial intelligence and computer technology",
+            "AI & Compute",
+        );
         label_map.insert("space exploration and satellites", "Space & Satellite");
         label_map.insert("company management and leadership", "Management & Insider");
-        label_map.insert("business partnerships and corporate mergers", "M&A & Partnerships");
+        label_map.insert(
+            "business partnerships and corporate mergers",
+            "M&A & Partnerships",
+        );
         label_map.insert("options trading", "Options & Volatility");
 
         Ok(Self {
@@ -80,6 +88,11 @@ impl TopicModel {
     }
 
     pub fn predict(&self, text: &str) -> Result<(i32, String)> {
+        let (topic_id, topic_label, _) = self.predict_with_scores(text)?;
+        Ok((topic_id, topic_label))
+    }
+
+    pub fn predict_with_scores(&self, text: &str) -> Result<(i32, String, Vec<f32>)> {
         // Spam / outlier heuristic check
         let words = text.split_whitespace();
         let mut non_spam_count = 0;
@@ -100,7 +113,7 @@ impl TopicModel {
         }
 
         if non_spam_count < 3 {
-            return Ok((-1, "General / Outlier".to_string()));
+            return Ok((-1, "General / Outlier".to_string(), Vec::new()));
         }
 
         let hypothesis_template = "This text is about {}.";
@@ -119,7 +132,11 @@ impl TopicModel {
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
         let num_pairs = self.candidate_labels.len(); // 8
-        let max_len = encodings.iter().map(|e| e.get_ids().len()).max().unwrap_or(0);
+        let max_len = encodings
+            .iter()
+            .map(|e| e.get_ids().len())
+            .max()
+            .unwrap_or(0);
 
         let mut input_ids_vec = vec![0i64; num_pairs * max_len];
         let mut attention_mask_vec = vec![0i64; num_pairs * max_len];
@@ -152,16 +169,18 @@ impl TopicModel {
             return Err(anyhow::anyhow!("Unexpected logits shape: {:?}", out_shape));
         }
 
-        let mut best_idx = 0;
         let mut max_entail_prob = -1.0f32;
+        let mut best_idx = 0;
+        let mut entail_probs = Vec::with_capacity(num_pairs);
 
         for i in 0..num_pairs {
-            let entail = logits[i * 3 + 0];
+            let entail = logits[i * 3];
             let contra = logits[i * 3 + 2];
 
             let exp_entail = entail.exp();
             let exp_contra = contra.exp();
             let entail_prob = exp_entail / (exp_entail + exp_contra);
+            entail_probs.push(entail_prob);
 
             if entail_prob > max_entail_prob {
                 max_entail_prob = entail_prob;
@@ -170,11 +189,11 @@ impl TopicModel {
         }
 
         if max_entail_prob < 0.60 {
-            Ok((-1, "General / Outlier".to_string()))
+            Ok((-1, "General / Outlier".to_string(), entail_probs))
         } else {
             let desc_label = self.candidate_labels[best_idx];
             let mapped_label = self.label_map.get(desc_label).unwrap_or(&desc_label);
-            Ok((best_idx as i32, mapped_label.to_string()))
+            Ok((best_idx as i32, mapped_label.to_string(), entail_probs))
         }
     }
 }

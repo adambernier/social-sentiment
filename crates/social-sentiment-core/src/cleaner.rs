@@ -1,17 +1,13 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-static URL_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)https?://\S+|www\.\S+").expect("valid url regex")
-});
+static URL_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)https?://\S+|www\.\S+").expect("valid url regex"));
 
-static USERNAME_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"@\w+").expect("valid username regex")
-});
+static USERNAME_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"@\w+").expect("valid username regex"));
 
-static WHITESPACE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\s+").expect("valid whitespace regex")
-});
+static WHITESPACE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
 
 pub const MIN_LENGTH: usize = 3;
 
@@ -33,7 +29,8 @@ mod tests {
 
     #[test]
     fn test_clean_text_html_urls_usernames() {
-        let raw = "Check out &quot;NVDA&quot; at https://example.com/chart! CC @trader_joe &amp; @alex";
+        let raw =
+            "Check out &quot;NVDA&quot; at https://example.com/chart! CC @trader_joe &amp; @alex";
         let cleaned = clean_text(raw);
         assert_eq!(cleaned, "Check out \"NVDA\" at http CC @user & @user");
     }

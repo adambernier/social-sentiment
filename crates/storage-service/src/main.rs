@@ -1,224 +1,220 @@
 mod db;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Timelike, Utc};
 use db::DatabaseService;
 use futures_util::stream::StreamExt;
 use lapin::{
-    options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions, QueueDeclareOptions},
+    options::{
+        BasicAckOptions, BasicConsumeOptions, BasicQosOptions, ConfirmSelectOptions,
+        QueueDeclareOptions,
+    },
     types::{AMQPValue, FieldTable},
     BasicProperties, Channel, Connection, ConnectionProperties,
 };
 use social_sentiment_core::{
     config::Config,
-    messaging::{dead_letter_queue_name, ERROR_HEADER, ERROR_TYPE_HEADER, ORIGINAL_QUEUE_HEADER},
+    messaging::{
+        dead_letter_queue_name, publish_confirmed, truncate_error, ERROR_HEADER, ERROR_TYPE_HEADER,
+        ORIGINAL_QUEUE_HEADER,
+    },
+    observability::{increment_errors, increment_processed, start_metrics_server},
+    runtime::shutdown_signal,
     schemas::ScoredPost,
 };
 use std::sync::Arc;
-use tokio::time::sleep;
+use std::time::Duration as StdDuration;
 use tracing::{error, info, warn};
 
 const BATCH_SIZE: usize = 100;
-const BATCH_TIMEOUT_MS: u64 = 1000;
+const BATCH_TIMEOUT: StdDuration = StdDuration::from_secs(1);
+
+fn is_permanent_sqlstate(code: &str) -> bool {
+    code.starts_with("22") || code.starts_with("23")
+}
+
+fn is_permanent_post_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<sqlx::Error>()
+        .and_then(sqlx::Error::as_database_error)
+        .and_then(|database_error| database_error.code())
+        .is_some_and(|code| is_permanent_sqlstate(&code))
+}
 
 async fn dead_letter_message(
     channel: &Channel,
     input_queue: &str,
-    msg_bytes: &[u8],
+    payload: &[u8],
     delivery_tag: u64,
-    error_msg: &str,
+    error_message: &str,
 ) -> Result<()> {
-    let dlq_name = dead_letter_queue_name(input_queue);
     let mut headers = FieldTable::default();
-    headers.insert(ORIGINAL_QUEUE_HEADER.into(), AMQPValue::LongString(input_queue.into()));
-    headers.insert(ERROR_TYPE_HEADER.into(), AMQPValue::LongString("PermanentDatabaseError".into()));
-    headers.insert(ERROR_HEADER.into(), AMQPValue::LongString(error_msg.into()));
-
-    let props = BasicProperties::default()
-        .with_delivery_mode(2) // persistent
+    headers.insert(
+        ORIGINAL_QUEUE_HEADER.into(),
+        AMQPValue::LongString(input_queue.into()),
+    );
+    headers.insert(
+        ERROR_TYPE_HEADER.into(),
+        AMQPValue::LongString("PermanentDatabaseError".into()),
+    );
+    headers.insert(
+        ERROR_HEADER.into(),
+        AMQPValue::LongString(truncate_error(error_message, 500).into()),
+    );
+    let properties = BasicProperties::default()
+        .with_delivery_mode(2)
+        .with_content_type("application/json".into())
         .with_headers(headers);
-
+    publish_confirmed(
+        channel,
+        &dead_letter_queue_name(input_queue),
+        payload,
+        properties,
+    )
+    .await?;
     channel
-        .basic_publish("", &dlq_name, BasicPublishOptions::default(), msg_bytes, props)
+        .basic_ack(delivery_tag, BasicAckOptions::default())
         .await?;
-    channel.basic_ack(delivery_tag, BasicAckOptions::default()).await?;
+    increment_errors(1);
     Ok(())
 }
 
 async fn persist_scored_individually(
     posts: &[ScoredPost],
     deliveries: &[(lapin::message::Delivery, Vec<u8>)],
-    db: &DatabaseService,
+    database: &DatabaseService,
     channel: &Channel,
     input_queue: &str,
-) -> (u64, u64) {
-    let mut stored = 0u64;
-    let mut dead_lettered = 0u64;
+) -> Result<(u64, u64)> {
+    let mut stored = 0_u64;
+    let mut dead_lettered = 0_u64;
 
-    for (post, (delivery, body)) in posts.iter().zip(deliveries) {
-        match db.insert_scored_batch(&[post.clone()]).await {
+    for (post, (delivery, payload)) in posts.iter().zip(deliveries) {
+        match database
+            .insert_scored_batch(std::slice::from_ref(post))
+            .await
+        {
             Ok(count) => {
-                let _ = channel.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).await;
+                channel
+                    .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
+                    .await?;
                 stored += count;
+                increment_processed(1);
             }
-            Err(e) => {
-                error!(
-                    "Post {} caused a permanent database error; moving to DLQ: {}",
-                    post.clean.id, e
-                );
-                let _ = dead_letter_message(channel, input_queue, body, delivery.delivery_tag, &e.to_string()).await;
+            Err(error) if is_permanent_post_error(&error) => {
+                dead_letter_message(
+                    channel,
+                    input_queue,
+                    payload,
+                    delivery.delivery_tag,
+                    &error.to_string(),
+                )
+                .await?;
                 dead_lettered += 1;
             }
+            Err(error) => return Err(error),
         }
     }
-    (stored, dead_lettered)
+    Ok((stored, dead_lettered))
 }
 
 async fn persist_scored_batch(
     posts: &[ScoredPost],
     deliveries: &[(lapin::message::Delivery, Vec<u8>)],
-    db: &DatabaseService,
+    database: &DatabaseService,
     channel: &Channel,
     input_queue: &str,
 ) -> Result<(u64, u64)> {
-    match db.insert_scored_batch(posts).await {
+    match database.insert_scored_batch(posts).await {
         Ok(count) => {
             for (delivery, _) in deliveries {
-                let _ = channel.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).await;
+                channel
+                    .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
+                    .await?;
             }
+            increment_processed(deliveries.len() as u64);
             Ok((count, 0))
         }
-        Err(e) => {
-            warn!(
-                "Batch insert hit database error; isolating {} posts individually: {}",
-                posts.len(),
-                e
-            );
-            let (stored, dead_lettered) = persist_scored_individually(posts, deliveries, db, channel, input_queue).await;
-            Ok((stored, dead_lettered))
+        Err(error) if is_permanent_post_error(&error) => {
+            warn!(posts = posts.len(), %error, "isolating permanently invalid database input");
+            persist_scored_individually(posts, deliveries, database, channel, input_queue).await
         }
+        Err(error) => Err(error),
     }
 }
 
-async fn run_rollup_scheduler(db: Arc<DatabaseService>, post_retention_days: i64, quote_retention_days: i64) {
-    // Wait 60 seconds after startup before running retention
-    sleep(std::time::Duration::from_secs(60)).await;
-
-    let archive_platforms = vec!["bluesky".to_string(), "reddit".to_string(), "stocktwits".to_string()];
+async fn run_rollup_scheduler(database: Arc<DatabaseService>, config: Config) {
+    tokio::time::sleep(StdDuration::from_secs(60)).await;
 
     loop {
-        info!("Starting scheduled database rollup and prune...");
         let now = Utc::now();
-
-        let post_cutoff = (now - Duration::days(post_retention_days))
+        let post_cutoff = (now - Duration::days(i64::from(config.post_retention_days)))
             .date_naive()
             .and_hms_opt(now.time().hour(), 0, 0)
-            .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
-            .unwrap_or(now - Duration::days(post_retention_days));
+            .map(|value| DateTime::<Utc>::from_naive_utc_and_offset(value, Utc))
+            .unwrap_or(now - Duration::days(i64::from(config.post_retention_days)));
+        let quote_cutoff = now - Duration::days(i64::from(config.quote_retention_days));
 
-        let quote_cutoff = now - Duration::days(quote_retention_days);
-
-        match db
-            .rollup_and_prune_posts(post_cutoff, &archive_platforms, 0.01, 100, 0.8)
+        if let Err(error) = database
+            .rollup_and_prune_posts(
+                post_cutoff,
+                &config.raw_archive_platforms,
+                config.raw_archive_sample_rate,
+                config.raw_archive_challenge_engagement,
+                config.raw_archive_challenge_abs_signal,
+            )
             .await
         {
-            Ok((rolled_up, pruned_posts)) => {
-                info!(
-                    "Post retention completed: rolled up {} aggregation rows, pruned {} posts.",
-                    rolled_up, pruned_posts
-                );
-            }
-            Err(e) => {
-                error!("Error in post retention rollup: {}", e);
-            }
+            error!(%error, "post retention rollup failed");
+        }
+        if let Err(error) = database.rollup_and_prune_quotes(quote_cutoff).await {
+            error!(%error, "quote retention rollup failed");
+        }
+        if let Err(error) = database
+            .prune_global_context(
+                now - Duration::days(180),
+                now - Duration::days(365 * 5),
+                now - Duration::days(365),
+            )
+            .await
+        {
+            error!(%error, "global-context retention failed");
         }
 
-        match db.rollup_and_prune_quotes(quote_cutoff).await {
-            Ok((hourly_facts, daily_facts, pruned_quotes)) => {
-                info!(
-                    "Quote retention completed: preserved {} hourly & {} daily facts, pruned {} quotes.",
-                    hourly_facts, daily_facts, pruned_quotes
-                );
-            }
-            Err(e) => {
-                error!("Error in quote retention rollup: {}", e);
-            }
-        }
-
-        let hourly_cutoff = now - Duration::days(180);
-        let daily_cutoff = now - Duration::days(365 * 5);
-        let event_cutoff = now - Duration::days(365);
-
-        match db.prune_global_context(hourly_cutoff, daily_cutoff, event_cutoff).await {
-            Ok((h, d, e)) => {
-                info!(
-                    "Global context prune completed: {} hourly bars, {} daily bars, {} events pruned.",
-                    h, d, e
-                );
-            }
-            Err(err) => {
-                error!("Error in global context prune: {}", err);
-            }
-        }
-
-        sleep(std::time::Duration::from_secs(24 * 3600)).await;
+        tokio::time::sleep(StdDuration::from_secs(24 * 60 * 60)).await;
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-    info!("Starting Rust storage-service...");
-
-    let config = Config::from_env();
-
-    info!("Connecting to PostgreSQL database...");
-    let db = Arc::new(DatabaseService::connect(&config.database_dsn).await?);
-    info!("Database connection established.");
-
-    let post_retention_days: i64 = std::env::var("POST_RETENTION_DAYS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(14);
-    let quote_retention_days: i64 = std::env::var("QUOTE_RETENTION_DAYS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(90);
-
-    // Spawn 24h retention rollup scheduler
-    let db_rollup_ref = Arc::clone(&db);
-    tokio::spawn(async move {
-        run_rollup_scheduler(db_rollup_ref, post_retention_days, quote_retention_days).await;
-    });
-
-    let rabbit_url = config.rabbit_url();
-    info!("Connecting to RabbitMQ at {}...", rabbit_url);
-
-    let conn = Connection::connect(&rabbit_url, ConnectionProperties::default()).await?;
-    let channel = conn.create_channel().await?;
-
-    channel.basic_qos((BATCH_SIZE * 2) as u16, BasicQosOptions::default()).await?;
+async fn run_consumer_session(config: &Config, database: &DatabaseService) -> Result<()> {
+    info!(
+        host = %config.rabbit_host,
+        port = config.rabbit_port,
+        "connecting to RabbitMQ"
+    );
+    let connection =
+        Connection::connect(&config.rabbit_url(), ConnectionProperties::default()).await?;
+    let channel = connection.create_channel().await?;
+    channel
+        .confirm_select(ConfirmSelectOptions::default())
+        .await?;
+    channel
+        .basic_qos((BATCH_SIZE * 2) as u16, BasicQosOptions::default())
+        .await?;
 
     let input_queue = &config.queue_scored_posts;
-    let dlq = dead_letter_queue_name(input_queue);
-
-    channel
-        .queue_declare(
-            input_queue,
-            QueueDeclareOptions { durable: true, ..Default::default() },
-            FieldTable::default(),
-        )
-        .await?;
-
-    channel
-        .queue_declare(
-            &dlq,
-            QueueDeclareOptions { durable: true, ..Default::default() },
-            FieldTable::default(),
-        )
-        .await?;
-
-    info!("Listening on '{}'. Ready to store scored posts...", input_queue);
+    let dead_letter_queue = dead_letter_queue_name(input_queue);
+    for queue_name in [input_queue.as_str(), dead_letter_queue.as_str()] {
+        channel
+            .queue_declare(
+                queue_name,
+                QueueDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await?;
+    }
 
     let mut consumer = channel
         .basic_consume(
@@ -228,68 +224,95 @@ async fn main() -> Result<()> {
             FieldTable::default(),
         )
         .await?;
-
-    let mut pending_deliveries = Vec::with_capacity(BATCH_SIZE);
-    let mut pending_posts = Vec::with_capacity(BATCH_SIZE);
+    let mut deliveries = Vec::with_capacity(BATCH_SIZE);
+    let mut posts = Vec::with_capacity(BATCH_SIZE);
 
     loop {
-        let timeout = tokio::time::sleep(std::time::Duration::from_millis(BATCH_TIMEOUT_MS));
+        let timeout = tokio::time::sleep(BATCH_TIMEOUT);
         tokio::pin!(timeout);
-
         tokio::select! {
-            delivery_opt = consumer.next() => {
-                match delivery_opt {
-                    Some(Ok(delivery)) => {
-                        let body = delivery.data.clone();
-                        let scored_post: ScoredPost = match serde_json::from_slice(&body) {
-                            Ok(post) => post,
-                            Err(e) => {
-                                error!("Malformed scored post message: {}", e);
-                                let _ = dead_letter_message(&channel, input_queue, &body, delivery.delivery_tag, &e.to_string()).await;
-                                continue;
-                            }
-                        };
-
-                        pending_deliveries.push((delivery, body));
-                        pending_posts.push(scored_post);
-
-                        if pending_posts.len() < BATCH_SIZE {
+            delivery_result = consumer.next() => {
+                let delivery = delivery_result.ok_or_else(|| anyhow!("RabbitMQ consumer stream ended"))??;
+                let payload = delivery.data.clone();
+                match serde_json::from_slice::<ScoredPost>(&payload) {
+                    Ok(post) => {
+                        if let Err(validation_error) = post.validate() {
+                            dead_letter_message(
+                                &channel,
+                                input_queue,
+                                &payload,
+                                delivery.delivery_tag,
+                                &validation_error,
+                            ).await?;
+                            continue;
+                        }
+                        deliveries.push((delivery, payload));
+                        posts.push(post);
+                        if posts.len() < BATCH_SIZE {
                             continue;
                         }
                     }
-                    Some(Err(e)) => {
-                        warn!("Error receiving delivery from RabbitMQ: {}", e);
-                        sleep(std::time::Duration::from_secs(1)).await;
+                    Err(error) => {
+                        dead_letter_message(
+                            &channel,
+                            input_queue,
+                            &payload,
+                            delivery.delivery_tag,
+                            &error.to_string(),
+                        ).await?;
                         continue;
-                    }
-                    None => {
-                        info!("Consumer stream ended.");
-                        break;
                     }
                 }
             }
-            _ = &mut timeout => {
-                // Timeout fired, process current batch
-            }
+            () = &mut timeout => {}
         }
 
-        if pending_posts.is_empty() {
-            continue;
-        }
-
-        let batch_posts = std::mem::take(&mut pending_posts);
-        let batch_deliveries = std::mem::take(&mut pending_deliveries);
-
-        info!("Inserting batch of {} posts...", batch_posts.len());
-        match persist_scored_batch(&batch_posts, &batch_deliveries, &db, &channel, input_queue).await {
-            Ok((stored, dead_lettered)) => {
-                info!("Batch handled: {} posts stored, {} dead-lettered.", stored, dead_lettered);
-            }
-            Err(e) => {
-                error!("Storage batch fatal error: {}", e);
-            }
+        if !posts.is_empty() {
+            persist_scored_batch(
+                &std::mem::take(&mut posts),
+                &std::mem::take(&mut deliveries),
+                database,
+                &channel,
+                input_queue,
+            )
+            .await?;
         }
     }
+}
 
-    Ok(())
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    start_metrics_server(8008, "storage");
+
+    let config = Config::from_env();
+    let database = Arc::new(DatabaseService::connect(&config.database_dsn).await?);
+    let scheduler = tokio::spawn(run_rollup_scheduler(Arc::clone(&database), config.clone()));
+
+    loop {
+        tokio::select! {
+            result = run_consumer_session(&config, &database) => {
+                warn!(error = ?result.err(), "consumer session ended; reconnecting");
+            }
+            () = shutdown_signal() => {
+                info!("shutdown requested; unacknowledged messages will be requeued");
+                scheduler.abort();
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(StdDuration::from_secs(5)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_permanent_sqlstate;
+
+    #[test]
+    fn sqlstate_data_and_integrity_errors_are_permanent() {
+        assert!(is_permanent_sqlstate("22001"));
+        assert!(is_permanent_sqlstate("23505"));
+        assert!(!is_permanent_sqlstate("08006"));
+        assert!(!is_permanent_sqlstate("40001"));
+    }
 }
