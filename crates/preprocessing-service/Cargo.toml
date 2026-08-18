@@ -1,0 +1,19 @@
+[package]
+name = "service-preprocessing"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+social-sentiment-core = { path = "../social-sentiment-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+lapin = { workspace = true }
+ort = { workspace = true }
+tokenizers = { workspace = true }
+futures-util = "0.3"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+metrics = { workspace = true }
