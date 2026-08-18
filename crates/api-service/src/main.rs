@@ -575,27 +575,137 @@ async fn correlation_handler(
 ) -> Result<Json<CorrelationResponse>, (StatusCode, String)> {
     let symbol = params.symbol.unwrap_or_else(|| "SMH".to_string());
     let hours = params.hours.unwrap_or(24);
+    let now = Utc::now();
+    let cutoff = now - chrono::Duration::hours(hours);
 
-    let market_rows = sqlx::query(
+    // Query hourly aggregated sentiment
+    let agg_rows = sqlx::query(
         r#"
-        SELECT price FROM stock_quotes WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1
+        SELECT 
+            date_trunc('hour', timestamp) AS bucket_hour,
+            SUM(CASE WHEN sentiment = 'positive' THEN 1 ELSE 0 END) AS pos_cnt,
+            SUM(CASE WHEN sentiment = 'neutral' THEN 1 ELSE 0 END) AS neu_cnt,
+            SUM(CASE WHEN sentiment = 'negative' THEN 1 ELSE 0 END) AS neg_cnt
+        FROM posts
+        WHERE symbol = $1 AND timestamp >= $2
+        GROUP BY date_trunc('hour', timestamp)
+        ORDER BY bucket_hour ASC
         "#,
     )
     .bind(&symbol)
-    .fetch_optional(&state.pool)
+    .bind(cutoff)
+    .fetch_all(&state.pool)
     .await
-    .unwrap_or(None);
+    .unwrap_or_default();
 
-    let price: f64 = market_rows.map(|r| r.get("price")).unwrap_or(100.0);
+    let mut agg_map: std::collections::HashMap<DateTime<Utc>, (i64, i64, i64)> =
+        std::collections::HashMap::new();
+    for r in agg_rows {
+        let h: DateTime<Utc> = r.get("bucket_hour");
+        let pos: i64 = r.get("pos_cnt");
+        let neu: i64 = r.get("neu_cnt");
+        let neg: i64 = r.get("neg_cnt");
+        agg_map.insert(h, (pos, neu, neg));
+    }
+
+    // Query market quotes per hour
+    let price_rows = sqlx::query(
+        r#"
+        SELECT 
+            date_trunc('hour', timestamp) AS bucket_hour,
+            (array_agg(price ORDER BY timestamp DESC))[1] AS close_price,
+            bool_or(market_session = 'regular') AS is_open
+        FROM stock_quotes
+        WHERE symbol = $1 AND timestamp >= $2
+        GROUP BY date_trunc('hour', timestamp)
+        ORDER BY bucket_hour ASC
+        "#,
+    )
+    .bind(&symbol)
+    .bind(cutoff)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut price_map: std::collections::HashMap<DateTime<Utc>, (f64, bool)> =
+        std::collections::HashMap::new();
+    let mut latest_price = 100.0;
+    for r in price_rows {
+        let h: DateTime<Utc> = r.get("bucket_hour");
+        let p: f64 = r.get("close_price");
+        let is_open: bool = r.get("is_open");
+        price_map.insert(h, (p, is_open));
+        latest_price = p;
+    }
+
+    let mut buckets: Vec<CorrelationBucket> = Vec::new();
+    for i in (0..=hours).rev() {
+        let raw_time = now - chrono::Duration::hours(i);
+        let bucket_time = raw_time
+            .date_naive()
+            .and_hms_opt(chrono::Timelike::hour(&raw_time), 0, 0)
+            .unwrap()
+            .and_utc();
+
+        let ts_str = bucket_time.to_rfc3339().replace("+00:00", "Z");
+
+        let (pos, neu, neg) = agg_map.get(&bucket_time).copied().unwrap_or((0, 0, 0));
+        let total = pos + neu + neg;
+        let sentiment_index = if total > 0 {
+            (pos as f64 - neg as f64) / (total as f64)
+        } else {
+            0.0
+        };
+
+        let (raw_price, is_market_open) = price_map
+            .get(&bucket_time)
+            .copied()
+            .map(|(p, open)| (Some(p), open))
+            .unwrap_or((None, true));
+
+        buckets.push(CorrelationBucket {
+            timestamp: ts_str,
+            positive: pos,
+            neutral: neu,
+            negative: neg,
+            price_change: Some(0.0),
+            price_pct: Some(0.0),
+            future_change: None,
+            future_pct: None,
+            is_market_open,
+            sentiment_index,
+            sentiment_sma: sentiment_index,
+            raw_price: raw_price.or(Some(latest_price)),
+            buy_signal: None,
+            signal_quality: None,
+            buy_score: None,
+            support_price: Some(latest_price * 0.95),
+            support_pct: Some(5.0),
+            resistance_price: Some(latest_price * 1.05),
+            resistance_pct: Some(5.0),
+            sentiment_macd: Some(0.0),
+            sentiment_signal: Some(0.0),
+            sentiment_hist: Some(0.0),
+        });
+    }
+
+    // Compute simple moving average for sentiment_sma
+    let sma_window = 5;
+    for idx in 0..buckets.len() {
+        let start_idx = if idx >= sma_window { idx + 1 - sma_window } else { 0 };
+        let slice = &buckets[start_idx..=idx];
+        let sum_index: f64 = slice.iter().map(|b| b.sentiment_index).sum();
+        buckets[idx].sentiment_sma = sum_index / (slice.len() as f64);
+    }
 
     let now_str = Utc::now().to_rfc3339();
 
     Ok(Json(CorrelationResponse {
-        data: vec![],
+        data: buckets,
         closed_regions: vec![],
-        support_price: price * 0.95,
+        support_price: latest_price * 0.95,
         support_pct: 5.0,
-        resistance_price: price * 1.05,
+        resistance_price: latest_price * 1.05,
         resistance_pct: 5.0,
         max_r: 0.85,
         best_lag: 1,
