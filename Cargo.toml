@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "crates/social-sentiment-core",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+lapin = "2.3"
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json"] }
+ort = "2.0.0-rc.4"
+tokenizers = "0.19"
+ndarray = "0.15"
+sha2 = "0.10"
+regex = "1.10"
+html-escape = "0.2"
+once_cell = "1.19"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+tempfile = "3.10"
