@@ -4,10 +4,8 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev ca-certificates c
 ENV CARGO_BUILD_JOBS=1
 
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/src/app/target \
-    cargo build --release --bin service-storage && \
-    cp target/release/service-storage /usr/src/app/service-storage-bin
+RUN cargo build --release --bin service-storage
+RUN cp target/release/service-storage /usr/src/app/service-storage-bin
 
 FROM debian:bookworm-slim
 WORKDIR /app
