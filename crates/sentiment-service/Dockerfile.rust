@@ -1,13 +1,34 @@
 FROM rust:latest as builder
 WORKDIR /usr/src/app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates/social-sentiment-core/Cargo.toml crates/social-sentiment-core/
+COPY crates/preprocessing-service/Cargo.toml crates/preprocessing-service/
+COPY crates/sentiment-service/Cargo.toml crates/sentiment-service/
+COPY crates/storage-service/Cargo.toml crates/storage-service/
+COPY crates/api-service/Cargo.toml crates/api-service/
+
+RUN mkdir -p crates/social-sentiment-core/src && echo "pub fn dummy() {}" > crates/social-sentiment-core/src/lib.rs && \
+    mkdir -p crates/preprocessing-service/src && echo "fn main() {}" > crates/preprocessing-service/src/main.rs && \
+    mkdir -p crates/sentiment-service/src && echo "fn main() {}" > crates/sentiment-service/src/main.rs && \
+    mkdir -p crates/storage-service/src && echo "fn main() {}" > crates/storage-service/src/main.rs && \
+    mkdir -p crates/api-service/src && echo "fn main() {}" > crates/api-service/src/main.rs
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/src/app/target \
+    cargo build --release --bin service-sentiment
+
 COPY . .
-RUN cargo build --release --bin service-sentiment
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/src/app/target \
+    cargo build --release --bin service-sentiment && \
+    cp target/release/service-sentiment /usr/src/app/service-sentiment-bin
 
 FROM debian:bookworm-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /usr/src/app/target/release/service-sentiment /app/service-sentiment
+COPY --from=builder /usr/src/app/service-sentiment-bin /app/service-sentiment
 COPY sentiment-service/model_quant /app/sentiment-service/model_quant
 ENV MODEL_DIR=/app/sentiment-service/model_quant
 CMD ["/app/service-sentiment"]
