@@ -171,6 +171,10 @@ async def test_python_is_one_command_runtime_rollback(
                 lambda: len(qualification_stack.post_snapshot()) == 1,
                 description="Rust storage did not persist rollback probe",
             )
+        qualification_stack.wait_for_queue_state(
+            queues.input_for(worker),
+            lambda state: state == (0, 0),
+        )
 
     payload["id"] = "qualification-post-after-rollback"
     async with running_worker(
@@ -189,5 +193,9 @@ async def test_python_is_one_command_runtime_rollback(
                 lambda: len(qualification_stack.post_snapshot()) == 2,
                 description="Python storage rollback did not persist probe",
             )
+        qualification_stack.wait_for_queue_state(
+            queues.input_for(worker),
+            lambda state: state == (0, 0),
+        )
 
     assert qualification_stack.queue_state(queues.input_for(worker)) == (0, 0)

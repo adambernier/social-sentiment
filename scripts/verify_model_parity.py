@@ -75,7 +75,7 @@ def main():
             "cargo",
             "run",
             "--quiet",
-            "--offline",
+            "--locked",
             "-p",
             package,
             "--bin",
