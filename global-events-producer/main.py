@@ -40,6 +40,7 @@ from shared.metrics import (
     GLOBAL_PROVIDER_REQUESTS_TOTAL,
     GLOBAL_RULE_MATCHES_TOTAL,
     RATE_LIMITS_HIT_TOTAL,
+    initialize_rate_limit_metrics,
     start_metrics_server,
 )
 from shared.pacing import AsyncRateLimiter
@@ -288,6 +289,7 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    initialize_rate_limit_metrics("global-events")
     start_metrics_server(8010)
     if not GLOBAL_CONTEXT_ENABLED:
         logger.info("Global context is disabled; event ingestion is idle")

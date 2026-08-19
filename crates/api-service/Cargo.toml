@@ -1,0 +1,18 @@
+[package]
+name = "service-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+social-sentiment-core = { path = "../social-sentiment-core" }
+tokio = { workspace = true }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+metrics = { workspace = true }

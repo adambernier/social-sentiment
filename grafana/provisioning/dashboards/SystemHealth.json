@@ -29,11 +29,25 @@
     },
     {
       "type": "timeseries",
-      "title": "Rate Limits Hit",
+      "title": "Rate-Limit Events",
+      "description": "Rate limits encountered during each dashboard interval, grouped by provider.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 45,
+            "lineWidth": 1,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
       "targets": [
         {
-          "expr": "increase(rate_limits_hit_total[5m])",
+          "expr": "sum by (platform) (increase(rate_limits_hit_total[$__rate_interval]))",
           "legendFormat": "{{platform}}",
           "refId": "A"
         }
@@ -50,7 +64,129 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "type": "stat",
+      "title": "Rate-Limit Totals by Provider",
+      "description": "Cumulative rate-limit count since each producer last started.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum by (platform) (rate_limits_hit_total)",
+          "legendFormat": "{{platform}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Producer Scrape Health",
+      "description": "UP means Prometheus can reach the producer metrics endpoint; DOWN is distinct from a healthy zero rate-limit count.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "NO TARGET",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "color": "red", "index": 0, "text": "DOWN" },
+                "1": { "color": "green", "index": 1, "text": "UP" }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "up{job=~\".*-producer\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Active Producer Warnings",
+      "description": "Warns when a producer is unreachable for five minutes or records at least five rate limits in 15 minutes for five minutes.",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 23 },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "color": "green", "index": 0, "text": "NONE" }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(ALERTS{alertstate=\"firing\",alertname=~\"ProducerMetricsTargetDown|ProducerRateLimitBurst\"}) OR vector(0)",
+          "legendFormat": "warnings",
+          "refId": "A"
+        }
+      ]
     }
   ],
-  "schemaVersion": 38
+  "schemaVersion": 38,
+  "version": 2
 }

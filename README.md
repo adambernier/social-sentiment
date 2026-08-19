@@ -32,7 +32,8 @@ real-time market data to drive a stock-performance dashboard.
 | `bluesky-producer`      | Polls public Bluesky search API for keywords, publishes raw posts        |
 | `reddit-producer`       | Polls Reddit API for symbol mentions, publishes raw posts                |
 | `stocktwits-producer`   | Polls Stocktwits streaming/search API, publishes raw posts               |
-| `news-producer`         | Polls Yahoo Finance RSS feeds per symbol, publishes raw posts            |
+| `finnhub-producer`      | Polls Finnhub company news per symbol, publishes raw posts               |
+| `alpaca-producer`       | Polls Alpaca market news per symbol, publishes raw posts                 |
 | `market-producer`       | Fetches live quotes plus separately paced global factor/reference bars   |
 | `global-events-producer`| Polls explicit geopolitical rules through the provider-neutral event API |
 | `preprocessing-service` | Cleans text, runs a quantized ONNX zero-shot topic model, drops short posts |
@@ -58,6 +59,11 @@ model download on first boot.
   container stops.
 - **Real-time updates.** A Postgres `LISTEN/NOTIFY` trigger on new posts is
   relayed to the UI over the `/stats/stream` WebSocket.
+- **[Phased Rust migration](docs/rust-backend-migration.md).** Python remains the default implementation. The
+  Rust worker overlay is opt-in and uses confirmed RabbitMQ publishing,
+  reconnect loops, graceful shutdown, and Prometheus endpoints. The Rust API
+  is still experimental and runs only as a side-by-side profile while its
+  contract, load, and soak gates are completed.
 
 ## Features
 
@@ -130,6 +136,29 @@ docker compose up -d --build
 docker compose ps
 ```
 
+To evaluate the Rust preprocessing, sentiment, and storage workers while
+keeping the production-parity Python API, apply the explicit overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.rust.yml up -d --build
+```
+
+Model promotion is gated by a cross-runtime fixture check:
+
+```bash
+python scripts/verify_model_parity.py
+```
+
+Run the Rust API beside the Python oracle and compare their contracts:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.rust.yml \
+  --profile rust-api up -d --build api-service rust-api-service
+python scripts/verify_api_contract.py \
+  --python-url http://127.0.0.1:8000 \
+  --rust-url http://127.0.0.1:8001
+```
+
 Compose runs `schema-migrate` once after PostgreSQL is healthy. Database-using
 services start only after that migration exits successfully; ordinary service
 startup never executes DDL.
@@ -140,18 +169,18 @@ The quantized ONNX models ship in the images, so first boot is fast; the
 Useful endpoints once the stack is up:
 - UI dashboard: http://localhost:3000
 - API docs: http://localhost:8000/docs
-- Consolidated dashboard stats: http://localhost:8000/stats/dashboard?symbol=INTC&hours=24
-- Price–sentiment correlation: http://localhost:8000/stats/correlation?symbol=INTC&hours=24
-- Latest posts: http://localhost:8000/posts
-- 24h sentiment stats: http://localhost:8000/stats/sentiment
-- 24h topic stats: http://localhost:8000/stats/topics
-- Financial metrics: http://localhost:8000/stats/metrics?symbol=INTC
-- Live updates (WebSocket): ws://localhost:8000/stats/stream
+- Consolidated dashboard stats: http://localhost:8000/api/stats/dashboard?symbol=INTC&hours=24
+- Price–sentiment correlation: http://localhost:8000/api/stats/correlation?symbol=INTC&hours=24
+- Latest posts: http://localhost:8000/api/posts
+- 24h sentiment stats: http://localhost:8000/api/stats/sentiment
+- 24h topic stats: http://localhost:8000/api/stats/topics
+- Financial metrics: http://localhost:8000/api/stats/metrics?symbol=INTC
+- Live updates (WebSocket): ws://localhost:8000/api/stats/stream
 - RabbitMQ management UI: http://localhost:15672 (default development user/password: `guest` / `guest`)
 - Postgres: `localhost:5432` (default development db: `sentiment`, user: `postgres`, password: `sentiment`)
 
 > [!WARNING]
-> The default credentials specified in `docker-compose.yml` are strictly for convenient local development and testing. When deploying to staging or production environments, you **must** override these values. Copy the [.env.example](file:///home/acbernier/social-sentiment/.env.example) template to `.env` in the root directory and supply secure password values. Docker Compose and the Python service config parser will automatically detect and apply the values from your `.env` file.
+> The default credentials specified in `docker-compose.yml` are strictly for convenient local development and testing. When deploying to staging or production environments, you **must** override these values. Copy the [.env.example](.env.example) template to `.env` in the root directory and supply secure password values. Docker Compose and the service config parsers will automatically detect and apply the values from your `.env` file.
 
 Tear down:
 ```bash
@@ -345,8 +374,8 @@ docker compose exec postgres psql -U postgres -d sentiment \
 
 Or via the API:
 ```bash
-curl -s http://localhost:8000/posts?limit=5 | jq
-curl -s http://localhost:8000/stats/sentiment?hours=24 | jq
+curl -s http://localhost:8000/api/posts?limit=5 | jq
+curl -s http://localhost:8000/api/stats/sentiment?hours=24 | jq
 ```
 ## Running Tests
 

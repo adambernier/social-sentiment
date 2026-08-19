@@ -1,30 +1,35 @@
 import asyncio
 import logging
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
 import aio_pika
+import httpx
 
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.config import (
+    ALPACA_API_KEY,
+    ALPACA_API_SECRET,
+    ALPACA_URL,
+    QUEUE_RAW_POSTS,
     RABBIT_HOST,
     RABBIT_PASS,
     RABBIT_PORT,
     RABBIT_USER,
-    QUEUE_RAW_POSTS,
-    ALPACA_API_KEY,
-    ALPACA_API_SECRET,
-    ALPACA_URL,
     get_env_int,
 )
+from shared.metrics import (
+    POSTS_INGESTED_TOTAL,
+    RATE_LIMITS_HIT_TOTAL,
+    initialize_rate_limit_metrics,
+    start_metrics_server,
+)
+from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
 from shared.schemas import RawPost
 from shared.symbols import match_symbol, run_with_symbol_registry, tickers
-from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
-from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -129,6 +134,7 @@ async def main():
         sys.exit(1)
 
     # Start metrics
+    initialize_rate_limit_metrics("alpaca")
     start_metrics_server(8003)
 
     connection = await aio_pika.connect_robust(

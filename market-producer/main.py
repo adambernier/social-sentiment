@@ -22,6 +22,7 @@ from shared.futures import all_polled_futures, get_futures_session
 from shared.metrics import (
     POSTS_INGESTED_TOTAL,
     RATE_LIMITS_HIT_TOTAL,
+    initialize_rate_limit_metrics,
     start_metrics_server,
 )
 from shared.pacing import AsyncRateLimiter, PerSymbolBackoff, paced_gather
@@ -386,6 +387,7 @@ def run_metrics_in_background():
     t.start()
 
 async def main():
+    initialize_rate_limit_metrics("market", "global-market")
     try:
         db = DB()
         print("Connected to database.")
