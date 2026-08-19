@@ -174,6 +174,7 @@ async def test_python_is_one_command_runtime_rollback(
         qualification_stack.wait_for_queue_state(
             queues.input_for(worker),
             lambda state: state == (0, 0),
+            stable_for=1.0,
         )
 
     payload["id"] = "qualification-post-after-rollback"
@@ -196,6 +197,7 @@ async def test_python_is_one_command_runtime_rollback(
         qualification_stack.wait_for_queue_state(
             queues.input_for(worker),
             lambda state: state == (0, 0),
+            stable_for=1.0,
         )
 
     assert qualification_stack.queue_state(queues.input_for(worker)) == (0, 0)

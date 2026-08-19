@@ -2,7 +2,9 @@ from copy import deepcopy
 
 import pytest
 
+from tests.worker_qualification import harness
 from tests.worker_qualification.harness import (
+    QualificationStack,
     QueueNames,
     assert_compatible_dlq_headers,
     assert_worker_payload_parity,
@@ -74,3 +76,27 @@ def test_dlq_header_contract_includes_retry_history():
         input_queue="test.raw",
         expected_attempt=1,
     )
+
+
+def test_queue_state_wait_requires_continuous_stability(monkeypatch):
+    stack = QualificationStack(project_name="stability-test")
+    states = iter([(0, 0), (1, 0), (0, 0), (0, 0), (0, 0), (0, 0)])
+    now = 0.0
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(duration: float) -> None:
+        nonlocal now
+        now += duration
+
+    monkeypatch.setattr(stack, "queue_state", lambda _queue: next(states))
+    monkeypatch.setattr(harness.time, "monotonic", monotonic)
+    monkeypatch.setattr(harness.time, "sleep", sleep)
+
+    assert stack.wait_for_queue_state(
+        "qualification.input",
+        lambda state: state == (0, 0),
+        stable_for=0.1,
+    ) == (0, 0)
+    assert now >= 0.2

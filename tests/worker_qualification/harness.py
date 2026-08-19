@@ -350,17 +350,26 @@ class QualificationStack:
         predicate: Any,
         *,
         timeout: float = 45.0,
+        stable_for: float = 0.0,
     ) -> tuple[int, int]:
         deadline = time.monotonic() + timeout
         last_state: tuple[int, int] | None = None
+        stable_since: float | None = None
         while time.monotonic() < deadline:
             try:
                 last_state = self.queue_state(queue_name)
             except (KeyError, json.JSONDecodeError, HTTPError, URLError):
+                stable_since = None
                 time.sleep(0.05)
                 continue
             if predicate(last_state):
-                return last_state
+                now = time.monotonic()
+                if stable_since is None:
+                    stable_since = now
+                if now - stable_since >= stable_for:
+                    return last_state
+            else:
+                stable_since = None
             time.sleep(0.05)
         raise TimeoutError(
             f"queue {queue_name!r} did not reach expected state; last={last_state}"
