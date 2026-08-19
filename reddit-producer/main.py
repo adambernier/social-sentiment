@@ -1,31 +1,36 @@
 import asyncio
 import logging
-import sys
 import os
 import random
-from datetime import datetime, timezone
+import sys
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
 import aio_pika
+import httpx
 
 # Setup path for shared imports
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.config import (
+    QUEUE_RAW_POSTS,
     RABBIT_HOST,
     RABBIT_PASS,
     RABBIT_PORT,
     RABBIT_USER,
-    QUEUE_RAW_POSTS,
     REDDIT_USER_AGENT,
     get_env_int,
 )
+from shared.metrics import (
+    POSTS_INGESTED_TOTAL,
+    RATE_LIMITS_HIT_TOTAL,
+    initialize_rate_limit_metrics,
+    start_metrics_server,
+)
+from shared.polling import PollOutcome, PollStatus
 from shared.schemas import RawPost
 from shared.symbols import keywords_map, match_symbol, run_with_symbol_registry
-from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
-from shared.polling import PollOutcome, PollStatus
 
 logging.basicConfig(
     level=logging.INFO,
@@ -223,6 +228,7 @@ async def fetch_and_process(
 
 async def main():
     logger.info("Starting Reddit RSS Producer...")
+    initialize_rate_limit_metrics("reddit")
     start_metrics_server(8005)
     
     # Initialize seen_ids with a "drain" fetch to avoid re-publishing old posts on startup

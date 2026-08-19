@@ -16,6 +16,12 @@ RATE_LIMITS_HIT_TOTAL = Counter(
     ['platform']
 )
 
+
+def initialize_rate_limit_metrics(*platforms: str) -> None:
+    """Expose an explicit zero before a provider encounters its first limit."""
+    for platform in platforms:
+        RATE_LIMITS_HIT_TOTAL.labels(platform=platform).inc(0)
+
 MESSAGES_PROCESSED_TOTAL = Counter(
     'messages_processed_total',
     'Total messages processed by internal services',
@@ -56,5 +62,5 @@ def start_metrics_server(port: int):
     try:
         start_http_server(port)
         logger.info(f"Prometheus metrics server started on port {port}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - metrics failure must not stop a service
         logger.error(f"Failed to start Prometheus metrics server on port {port}: {e}")

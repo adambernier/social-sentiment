@@ -13,16 +13,21 @@ from pydantic import ValidationError
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from shared.config import (
+    QUEUE_RAW_POSTS,
     RABBIT_HOST,
     RABBIT_PASS,
     RABBIT_PORT,
     RABBIT_USER,
-    QUEUE_RAW_POSTS,
     get_env_int,
+)
+from shared.metrics import (
+    POSTS_INGESTED_TOTAL,
+    RATE_LIMITS_HIT_TOTAL,
+    initialize_rate_limit_metrics,
+    start_metrics_server,
 )
 from shared.schemas import RawPost
 from shared.symbols import keywords_map, match_symbol, run_with_symbol_registry
-from shared.metrics import start_metrics_server, POSTS_INGESTED_TOTAL, RATE_LIMITS_HIT_TOTAL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -153,6 +158,7 @@ async def poll_search_terms(
 
 async def main():
     logger.info("Starting Bluesky Polling Producer...")
+    initialize_rate_limit_metrics("bluesky")
     start_metrics_server(8001)
     rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"
     client = AsyncClient(base_url='https://api.bsky.app')

@@ -1,0 +1,20 @@
+groups:
+  - name: producer-monitoring
+    rules:
+      - alert: ProducerMetricsTargetDown
+        expr: up{job=~".*-producer"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Producer metrics target is unreachable"
+          description: "Prometheus has been unable to scrape {{ $labels.job }} for five minutes."
+
+      - alert: ProducerRateLimitBurst
+        expr: sum by (platform) (increase(rate_limits_hit_total[15m])) >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained producer rate limiting"
+          description: "{{ $labels.platform }} recorded at least five rate limits in 15 minutes."

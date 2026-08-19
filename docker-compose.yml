@@ -320,6 +320,7 @@ services:
     - 127.0.0.1:9090:9090
     volumes:
     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    - ./prometheus-alerts.yml:/etc/prometheus/alerts.yml:ro
   grafana:
     image: grafana/grafana:10.0.3
     environment:
