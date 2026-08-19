@@ -20,7 +20,14 @@ psycopg-pool==3.3.1
 
 # HTTP / feeds (producers)
 httpx==0.28.1
+idna==3.19
 feedparser==6.0.12
+
+# Shared transitive dependencies (combined CI environment)
+packaging==26.3
+pygments==2.21.0
+tqdm==4.70.0
+typing-inspection==0.4.4
 
 # ML inference (sentiment, preprocessing)
 onnxruntime==1.28.0
