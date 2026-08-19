@@ -1,8 +1,8 @@
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
-from tests.worker_qualification import harness
 from tests.worker_qualification.harness import (
     QualificationStack,
     QueueNames,
@@ -78,25 +78,16 @@ def test_dlq_header_contract_includes_retry_history():
     )
 
 
-def test_queue_state_wait_requires_continuous_stability(monkeypatch):
+def test_direct_queue_state_uses_exact_broker_counts(monkeypatch):
     stack = QualificationStack(project_name="stability-test")
-    states = iter([(0, 0), (1, 0), (0, 0), (0, 0), (0, 0), (0, 0)])
-    now = 0.0
+    output = """[
+      {"name":"qualification.input","messages_ready":0,
+       "messages_unacknowledged":1}
+    ]"""
+    monkeypatch.setattr(
+        stack,
+        "_compose",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout=output),
+    )
 
-    def monotonic() -> float:
-        return now
-
-    def sleep(duration: float) -> None:
-        nonlocal now
-        now += duration
-
-    monkeypatch.setattr(stack, "queue_state", lambda _queue: next(states))
-    monkeypatch.setattr(harness.time, "monotonic", monotonic)
-    monkeypatch.setattr(harness.time, "sleep", sleep)
-
-    assert stack.wait_for_queue_state(
-        "qualification.input",
-        lambda state: state == (0, 0),
-        stable_for=0.1,
-    ) == (0, 0)
-    assert now >= 0.2
+    assert stack.direct_queue_state("qualification.input") == (0, 1)

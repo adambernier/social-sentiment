@@ -350,29 +350,66 @@ class QualificationStack:
         predicate: Any,
         *,
         timeout: float = 45.0,
-        stable_for: float = 0.0,
     ) -> tuple[int, int]:
         deadline = time.monotonic() + timeout
         last_state: tuple[int, int] | None = None
-        stable_since: float | None = None
         while time.monotonic() < deadline:
             try:
                 last_state = self.queue_state(queue_name)
             except (KeyError, json.JSONDecodeError, HTTPError, URLError):
-                stable_since = None
                 time.sleep(0.05)
                 continue
             if predicate(last_state):
-                now = time.monotonic()
-                if stable_since is None:
-                    stable_since = now
-                if now - stable_since >= stable_for:
-                    return last_state
-            else:
-                stable_since = None
+                return last_state
             time.sleep(0.05)
         raise TimeoutError(
             f"queue {queue_name!r} did not reach expected state; last={last_state}"
+        )
+
+    def direct_queue_state(self, queue_name: str) -> tuple[int, int]:
+        """Read exact broker counts without management-plugin sampling lag."""
+        output = self._compose(
+            "exec",
+            "-T",
+            "rabbitmq",
+            "rabbitmqctl",
+            "list_queues",
+            "--formatter",
+            "json",
+            "name",
+            "messages_ready",
+            "messages_unacknowledged",
+        ).stdout
+        rows = json.loads(output)
+        for row in rows:
+            if row["name"] == queue_name:
+                return (
+                    int(row["messages_ready"]),
+                    int(row["messages_unacknowledged"]),
+                )
+        raise KeyError(f"RabbitMQ queue does not exist: {queue_name}")
+
+    def wait_for_direct_queue_state(
+        self,
+        queue_name: str,
+        predicate: Any,
+        *,
+        timeout: float = 45.0,
+    ) -> tuple[int, int]:
+        deadline = time.monotonic() + timeout
+        last_state: tuple[int, int] | None = None
+        while time.monotonic() < deadline:
+            try:
+                last_state = self.direct_queue_state(queue_name)
+            except (KeyError, json.JSONDecodeError):
+                time.sleep(0.05)
+                continue
+            if predicate(last_state):
+                return last_state
+            time.sleep(0.05)
+        raise TimeoutError(
+            f"queue {queue_name!r} did not reach exact expected state; "
+            f"last={last_state}"
         )
 
     def reject_publishes(self, queue_name: str) -> None:

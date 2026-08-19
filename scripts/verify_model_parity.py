@@ -23,7 +23,7 @@ SAMPLE_TEXTS = [
     "SpaceX rocket launch deploys 60 new Starlink satellite internet communications payloads into low Earth orbit.",
     "The CEO and executive management board announced insider stock purchases today.",
     "Microsoft and OpenAI announce strategic enterprise business partnership and corporate merger agreement.",
-    "Traders bought high volume call options betting on high market volatility ahead of the earnings report.",
+    "Put and call options contracts traded at elevated implied volatility as traders focused on the volatility skew.",
     "$AAPL $NVDA http://example.com RT @user",  # Spam test
     "The market is moving sideways today with low volume across major sectors.",  # General / Outlier
 ]
