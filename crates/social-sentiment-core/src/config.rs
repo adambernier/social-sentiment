@@ -51,7 +51,7 @@ impl Config {
 
     pub fn rabbit_url(&self) -> String {
         format!(
-            "amqp://{}:{}@{}:{}/",
+            "amqp://{}:{}@{}:{}/%2f",
             self.rabbit_user, self.rabbit_pass, self.rabbit_host, self.rabbit_port
         )
     }
@@ -114,6 +114,6 @@ mod tests {
         assert_eq!(config.rabbit_port, 5672);
         assert_eq!(config.queue_raw_posts, "raw-posts");
         assert_eq!(config.post_retention_days, 14);
-        assert_eq!(config.rabbit_url(), "amqp://guest:guest@localhost:5672/");
+        assert_eq!(config.rabbit_url(), "amqp://guest:guest@localhost:5672/%2f");
     }
 }

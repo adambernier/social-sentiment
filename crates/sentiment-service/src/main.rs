@@ -14,7 +14,8 @@ use social_sentiment_core::{
     config::Config,
     messaging::{
         dead_letter_queue_name, publish_confirmed, truncate_error, ERROR_HEADER, ERROR_TYPE_HEADER,
-        ORIGINAL_QUEUE_HEADER, PROCESSING_ATTEMPT_HEADER,
+        LAST_ERROR_HEADER, LAST_ERROR_TYPE_HEADER, ORIGINAL_QUEUE_HEADER,
+        PROCESSING_ATTEMPT_HEADER,
     },
     observability::{increment_errors, increment_processed, start_metrics_server},
     runtime::shutdown_signal,
@@ -47,10 +48,10 @@ async fn dead_letter_message(
     channel: &Channel,
     input_queue: &str,
     payload: &[u8],
-    delivery_tag: u64,
+    delivery: &lapin::message::Delivery,
     error_message: &str,
 ) -> Result<()> {
-    let mut headers = FieldTable::default();
+    let mut headers = delivery_headers(delivery);
     headers.insert(
         ORIGINAL_QUEUE_HEADER.into(),
         AMQPValue::LongString(input_queue.into()),
@@ -75,7 +76,7 @@ async fn dead_letter_message(
     )
     .await?;
     channel
-        .basic_ack(delivery_tag, BasicAckOptions::default())
+        .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
         .await?;
     increment_errors(1);
     Ok(())
@@ -85,19 +86,26 @@ async fn retry_or_dead_letter(
     channel: &Channel,
     input_queue: &str,
     payload: &[u8],
-    delivery_tag: u64,
+    delivery: &lapin::message::Delivery,
     attempt: i32,
     error_message: &str,
 ) -> Result<()> {
     if attempt >= 1 {
-        return dead_letter_message(channel, input_queue, payload, delivery_tag, error_message)
-            .await;
+        return dead_letter_message(channel, input_queue, payload, delivery, error_message).await;
     }
 
-    let mut headers = FieldTable::default();
+    let mut headers = delivery_headers(delivery);
     headers.insert(
         PROCESSING_ATTEMPT_HEADER.into(),
         AMQPValue::LongInt(attempt + 1),
+    );
+    headers.insert(
+        LAST_ERROR_TYPE_HEADER.into(),
+        AMQPValue::LongString("ProcessingError".into()),
+    );
+    headers.insert(
+        LAST_ERROR_HEADER.into(),
+        AMQPValue::LongString(truncate_error(error_message, 500).into()),
     );
     let properties = BasicProperties::default()
         .with_delivery_mode(2)
@@ -105,10 +113,19 @@ async fn retry_or_dead_letter(
         .with_headers(headers);
     publish_confirmed(channel, input_queue, payload, properties).await?;
     channel
-        .basic_ack(delivery_tag, BasicAckOptions::default())
+        .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
         .await?;
     increment_errors(1);
     Ok(())
+}
+
+fn delivery_headers(delivery: &lapin::message::Delivery) -> FieldTable {
+    delivery
+        .properties
+        .headers()
+        .as_ref()
+        .cloned()
+        .unwrap_or_default()
 }
 
 async fn process_batch(
@@ -135,7 +152,7 @@ async fn process_batch(
                         channel,
                         input_queue,
                         &payload,
-                        delivery.delivery_tag,
+                        &delivery,
                         get_attempt_header(&delivery),
                         &error_message,
                     )
@@ -149,7 +166,7 @@ async fn process_batch(
                         channel,
                         input_queue,
                         &payload,
-                        delivery.delivery_tag,
+                        &delivery,
                         get_attempt_header(&delivery),
                         &err.to_string(),
                     )
@@ -163,7 +180,7 @@ async fn process_batch(
                         channel,
                         input_queue,
                         &payload,
-                        delivery.delivery_tag,
+                        &delivery,
                         get_attempt_header(&delivery),
                         &err.to_string(),
                     )
@@ -189,7 +206,7 @@ async fn process_batch(
                 channel,
                 input_queue,
                 &input_payload,
-                delivery.delivery_tag,
+                &delivery,
                 &validation_error,
             )
             .await?;
@@ -207,7 +224,7 @@ async fn process_batch(
                 channel,
                 input_queue,
                 &input_payload,
-                delivery.delivery_tag,
+                &delivery,
                 get_attempt_header(&delivery),
                 &err.to_string(),
             )
@@ -289,7 +306,7 @@ async fn run_consumer_session(config: &Config, model: Arc<SentimentModel>) -> Re
                             &channel,
                             input_queue,
                             &payload,
-                            delivery.delivery_tag,
+                            &delivery,
                             &err.to_string(),
                         ).await?;
                         continue;

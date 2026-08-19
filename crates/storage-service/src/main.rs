@@ -45,10 +45,15 @@ async fn dead_letter_message(
     channel: &Channel,
     input_queue: &str,
     payload: &[u8],
-    delivery_tag: u64,
+    delivery: &lapin::message::Delivery,
     error_message: &str,
 ) -> Result<()> {
-    let mut headers = FieldTable::default();
+    let mut headers = delivery
+        .properties
+        .headers()
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
     headers.insert(
         ORIGINAL_QUEUE_HEADER.into(),
         AMQPValue::LongString(input_queue.into()),
@@ -73,7 +78,7 @@ async fn dead_letter_message(
     )
     .await?;
     channel
-        .basic_ack(delivery_tag, BasicAckOptions::default())
+        .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
         .await?;
     increment_errors(1);
     Ok(())
@@ -102,14 +107,8 @@ async fn persist_scored_individually(
                 increment_processed(1);
             }
             Err(error) if is_permanent_post_error(&error) => {
-                dead_letter_message(
-                    channel,
-                    input_queue,
-                    payload,
-                    delivery.delivery_tag,
-                    &error.to_string(),
-                )
-                .await?;
+                dead_letter_message(channel, input_queue, payload, delivery, &error.to_string())
+                    .await?;
                 dead_lettered += 1;
             }
             Err(error) => return Err(error),
@@ -241,7 +240,7 @@ async fn run_consumer_session(config: &Config, database: &DatabaseService) -> Re
                                 &channel,
                                 input_queue,
                                 &payload,
-                                delivery.delivery_tag,
+                                &delivery,
                                 &validation_error,
                             ).await?;
                             continue;
@@ -257,7 +256,7 @@ async fn run_consumer_session(config: &Config, database: &DatabaseService) -> Re
                             &channel,
                             input_queue,
                             &payload,
-                            delivery.delivery_tag,
+                            &delivery,
                             &error.to_string(),
                         ).await?;
                         continue;

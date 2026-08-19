@@ -36,7 +36,8 @@ the `rust-api` profile and never replaces the Python API implicitly.
   beta, strength, event reactions, and freshness.
 - [x] Side-by-side API contract harness with timestamp normalization and
   `1e-6` absolute numeric tolerance.
-- [ ] Live RabbitMQ/PostgreSQL fault and replay qualification for each worker.
+- [x] Isolated live RabbitMQ/PostgreSQL fault and replay qualification harness.
+- [ ] Execute and sign off the replay/observation promotion gates for each worker.
 - [ ] Provider adapters and fixture suites for all seven Rust producers.
 - [ ] Per-service 1,000-message shadow comparison and 24-hour observation.
 - [ ] Rust API browser smoke, load, and 48-hour observation gates.
@@ -69,6 +70,53 @@ route/method inventory. Admin mutation, rollback, database-outage, and
 WebSocket cases belong in the PostgreSQL/RabbitMQ integration suite because
 they intentionally change state.
 
+## Worker qualification harness
+
+`docker-compose.worker-qualification.yml` is an opt-in, isolated topology. The
+pytest driver assigns every case unique queue names, random host ports, and a
+unique Compose project, then removes its containers and volumes. It never uses
+the production queue names or database volume. The default Compose file is not
+modified and continues to select Python.
+
+Run the deterministic CI subset for the current promotion stage:
+
+```bash
+python scripts/qualify_worker.py preprocessing --mode smoke --build
+```
+
+Run destructive RabbitMQ restart, unroutable output, publisher rejection,
+PostgreSQL outage, and in-flight `SIGTERM` cases separately:
+
+```bash
+python scripts/qualify_worker.py preprocessing --mode faults
+```
+
+The recorded replay and observation gates are deliberately manual. The replay
+defaults to the required 1,000 messages; observation defaults to 24 hours:
+
+```bash
+python scripts/qualify_worker.py preprocessing --mode replay
+python scripts/qualify_worker.py preprocessing --mode observe
+```
+
+For a complete promotion candidate run, including smoke, faults, 1,000-message
+Python/Rust comparison, and 24-hour observation:
+
+```bash
+python scripts/qualify_worker.py preprocessing --mode promotion
+```
+
+Repeat in order for `sentiment`, then `storage`. Storage promotion additionally
+runs duplicate-state, transient PostgreSQL outage, and atomic retention tests.
+Use `--observe-hours` or `--replay-count` only for development; release evidence
+must use at least 24 hours and 1,000 messages.
+
+The harness checks input/output/DLQ counts, persistent restart recovery,
+acknowledgement through zero-ready/zero-unacknowledged convergence, compatible
+DLQ headers, normalized payloads, exact labels, probability delta `<= 0.04`,
+idempotent database rows, duplicate accounting, and Rust-to-Python replacement.
+Failed assertions include the candidate worker's recent container logs.
+
 ## Promotion and rollback gates
 
 Workers are promoted one at a time in this order: preprocessing, sentiment,
@@ -89,3 +137,13 @@ contract mismatch, or failed rollback blocks the release. Python runtime
 implementations remain for one release after final cutover; schema migration
 and archive-export Python utilities are retained operationally.
 
+The tested rollback command for the active stage is:
+
+```bash
+docker compose -f docker-compose.yml up -d --build preprocessing-service
+```
+
+Substitute `sentiment-service` or `storage-service` for later stages. Roll back
+immediately when message counts diverge, DLQs grow unexpectedly, freshness
+declines, or error rates regress; do not advance the next worker until the
+current worker has completed its observation window.

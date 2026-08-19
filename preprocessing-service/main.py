@@ -116,7 +116,7 @@ async def main():
             connection = await aio_pika.connect_robust(rabbit_url)
             
             async with connection:
-                channel = await connection.channel()
+                channel = await connection.channel(on_return_raises=True)
                 # Prefetch count of 10 to balance backpressure
                 await channel.set_qos(prefetch_count=10)
 

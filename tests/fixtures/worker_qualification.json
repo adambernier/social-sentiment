@@ -1,0 +1,68 @@
+{
+  "preprocessing": {
+    "valid": {
+      "id": "qualification-post-1",
+      "symbol": "NVDA",
+      "platform": "qualification",
+      "text": "NVDA reported strong quarterly earnings and raised forward guidance",
+      "timestamp": "2026-08-18T12:00:00Z",
+      "engagement": 7,
+      "ingested_at": "2026-08-18T12:00:01Z",
+      "engagement_observed_at": "2026-08-18T12:00:02Z",
+      "source_schema_version": 1,
+      "pipeline_git_commit": "worker-qualification"
+    },
+    "malformed": "{not-json"
+  },
+  "sentiment": {
+    "valid": {
+      "id": "qualification-post-1",
+      "symbol": "NVDA",
+      "platform": "qualification",
+      "text": "NVDA reported strong quarterly earnings and raised forward guidance",
+      "timestamp": "2026-08-18T12:00:00Z",
+      "topic_id": 1,
+      "topic_label": "Earnings & Guidance",
+      "engagement": 7,
+      "ingested_at": "2026-08-18T12:00:01Z",
+      "engagement_observed_at": "2026-08-18T12:00:02Z",
+      "source_schema_version": 1,
+      "pipeline_git_commit": "worker-qualification",
+      "cleaned_at": "2026-08-18T12:00:03Z",
+      "topic_scored_at": "2026-08-18T12:00:04Z",
+      "topic_model_version": "qualification-topic-v1",
+      "topic_model_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "malformed": "{not-json"
+  },
+  "storage": {
+    "valid": {
+      "id": "qualification-post-1",
+      "symbol": "NVDA",
+      "platform": "qualification",
+      "text": "NVDA reported strong quarterly earnings and raised forward guidance",
+      "timestamp": "2026-08-18T12:00:00Z",
+      "topic_id": 1,
+      "topic_label": "Earnings & Guidance",
+      "engagement": 7,
+      "ingested_at": "2026-08-18T12:00:01Z",
+      "engagement_observed_at": "2026-08-18T12:00:02Z",
+      "source_schema_version": 1,
+      "pipeline_git_commit": "worker-qualification",
+      "cleaned_at": "2026-08-18T12:00:03Z",
+      "topic_scored_at": "2026-08-18T12:00:04Z",
+      "topic_model_version": "qualification-topic-v1",
+      "topic_model_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sentiment": "positive",
+      "scores": {
+        "positive": 0.8,
+        "neutral": 0.15,
+        "negative": 0.05
+      },
+      "sentiment_scored_at": "2026-08-18T12:00:05Z",
+      "sentiment_model_version": "qualification-sentiment-v1",
+      "sentiment_model_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "malformed": "{not-json"
+  }
+}

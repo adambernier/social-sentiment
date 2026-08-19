@@ -1,0 +1,105 @@
+# Isolated, opt-in topology for black-box Python/Rust worker qualification.
+# The production Compose files and their Python defaults remain unchanged.
+x-worker-environment: &worker-environment
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_USER: qualification
+  RABBITMQ_PASS: qualification
+  DATABASE_DSN: postgresql://qualification:qualification@postgres:5432/qualification
+  QUEUE_RAW_POSTS: ${QUAL_QUEUE_RAW:-qualification.raw-posts}
+  QUEUE_CLEAN_POSTS: ${QUAL_QUEUE_CLEAN:-qualification.clean-posts}
+  QUEUE_SCORED_POSTS: ${QUAL_QUEUE_SCORED:-qualification.scored-posts}
+  PIPELINE_GIT_COMMIT: worker-qualification
+  POST_RETENTION_DAYS: "1"
+  QUOTE_RETENTION_DAYS: "1"
+
+x-python-worker: &python-worker
+  profiles: ["qualification"]
+  restart: "no"
+  environment: *worker-environment
+
+x-rust-worker: &rust-worker
+  profiles: ["qualification"]
+  restart: "no"
+  environment: *worker-environment
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: qualification
+      RABBITMQ_DEFAULT_PASS: qualification
+    ports:
+      - "127.0.0.1::5672"
+      - "127.0.0.1::15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: qualification
+      POSTGRES_USER: qualification
+      POSTGRES_PASSWORD: qualification
+    ports:
+      - "127.0.0.1::5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qualification -d qualification"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  schema-migrate:
+    profiles: ["qualification"]
+    build:
+      context: .
+      dockerfile: storage-service/Dockerfile
+    command: ["python", "storage-service/migrate.py"]
+    environment:
+      DATABASE_DSN: postgresql://qualification:qualification@postgres:5432/qualification
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  python-preprocessing:
+    <<: *python-worker
+    build:
+      context: .
+      dockerfile: preprocessing-service/Dockerfile
+
+  rust-preprocessing:
+    <<: *rust-worker
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      target: rust-preprocessing
+
+  python-sentiment:
+    <<: *python-worker
+    build:
+      context: .
+      dockerfile: sentiment-service/Dockerfile
+
+  rust-sentiment:
+    <<: *rust-worker
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      target: rust-sentiment
+
+  python-storage:
+    <<: *python-worker
+    build:
+      context: .
+      dockerfile: storage-service/Dockerfile
+
+  rust-storage:
+    <<: *rust-worker
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      target: rust-storage

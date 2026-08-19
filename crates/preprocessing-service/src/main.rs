@@ -15,7 +15,8 @@ use social_sentiment_core::{
     config::Config,
     messaging::{
         dead_letter_queue_name, publish_confirmed, truncate_error, ERROR_HEADER, ERROR_TYPE_HEADER,
-        ORIGINAL_QUEUE_HEADER, PROCESSING_ATTEMPT_HEADER,
+        LAST_ERROR_HEADER, LAST_ERROR_TYPE_HEADER, ORIGINAL_QUEUE_HEADER,
+        PROCESSING_ATTEMPT_HEADER,
     },
     observability::{increment_errors, increment_processed, start_metrics_server},
     runtime::shutdown_signal,
@@ -45,10 +46,10 @@ async fn dead_letter_message(
     channel: &Channel,
     input_queue: &str,
     payload: &[u8],
-    delivery_tag: u64,
+    delivery: &lapin::message::Delivery,
     error_message: &str,
 ) -> Result<()> {
-    let mut headers = FieldTable::default();
+    let mut headers = delivery_headers(delivery);
     headers.insert(
         ORIGINAL_QUEUE_HEADER.into(),
         AMQPValue::LongString(input_queue.into()),
@@ -74,7 +75,7 @@ async fn dead_letter_message(
     )
     .await?;
     channel
-        .basic_ack(delivery_tag, BasicAckOptions::default())
+        .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
         .await?;
     increment_errors(1);
     Ok(())
@@ -84,19 +85,26 @@ async fn retry_or_dead_letter(
     channel: &Channel,
     input_queue: &str,
     payload: &[u8],
-    delivery_tag: u64,
+    delivery: &lapin::message::Delivery,
     attempt: i32,
     error_message: &str,
 ) -> Result<()> {
     if attempt >= 1 {
-        return dead_letter_message(channel, input_queue, payload, delivery_tag, error_message)
-            .await;
+        return dead_letter_message(channel, input_queue, payload, delivery, error_message).await;
     }
 
-    let mut headers = FieldTable::default();
+    let mut headers = delivery_headers(delivery);
     headers.insert(
         PROCESSING_ATTEMPT_HEADER.into(),
         AMQPValue::LongInt(attempt + 1),
+    );
+    headers.insert(
+        LAST_ERROR_TYPE_HEADER.into(),
+        AMQPValue::LongString("ProcessingError".into()),
+    );
+    headers.insert(
+        LAST_ERROR_HEADER.into(),
+        AMQPValue::LongString(truncate_error(error_message, 500).into()),
     );
     let properties = BasicProperties::default()
         .with_delivery_mode(2)
@@ -104,10 +112,19 @@ async fn retry_or_dead_letter(
         .with_headers(headers);
     publish_confirmed(channel, input_queue, payload, properties).await?;
     channel
-        .basic_ack(delivery_tag, BasicAckOptions::default())
+        .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
         .await?;
     increment_errors(1);
     Ok(())
+}
+
+fn delivery_headers(delivery: &lapin::message::Delivery) -> FieldTable {
+    delivery
+        .properties
+        .headers()
+        .as_ref()
+        .cloned()
+        .unwrap_or_default()
 }
 
 async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> Result<()> {
@@ -157,21 +174,14 @@ async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> 
     while let Some(delivery_result) = consumer.next().await {
         let delivery = delivery_result?;
         let payload = delivery.data.as_slice();
-        let delivery_tag = delivery.delivery_tag;
         let attempt = get_attempt_header(&delivery);
 
         let raw: RawPost = match serde_json::from_slice(payload) {
             Ok(post) => post,
             Err(err) => {
                 error!(%err, "malformed raw post message");
-                dead_letter_message(
-                    &channel,
-                    input_queue,
-                    payload,
-                    delivery_tag,
-                    &err.to_string(),
-                )
-                .await?;
+                dead_letter_message(&channel, input_queue, payload, &delivery, &err.to_string())
+                    .await?;
                 continue;
             }
         };
@@ -179,7 +189,7 @@ async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> 
         let cleaned = clean_text(&raw.text);
         if !is_valid(&cleaned) {
             channel
-                .basic_ack(delivery_tag, BasicAckOptions::default())
+                .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
                 .await?;
             increment_processed(1);
             continue;
@@ -195,7 +205,7 @@ async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> 
                     &channel,
                     input_queue,
                     payload,
-                    delivery_tag,
+                    &delivery,
                     attempt,
                     &err.to_string(),
                 )
@@ -207,7 +217,7 @@ async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> 
                     &channel,
                     input_queue,
                     payload,
-                    delivery_tag,
+                    &delivery,
                     attempt,
                     &err.to_string(),
                 )
@@ -247,7 +257,7 @@ async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> 
                 &channel,
                 input_queue,
                 payload,
-                delivery_tag,
+                &delivery,
                 attempt,
                 &err.to_string(),
             )
@@ -255,7 +265,7 @@ async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> 
             continue;
         }
         channel
-            .basic_ack(delivery_tag, BasicAckOptions::default())
+            .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
             .await?;
         increment_processed(1);
         info!(post_id = %raw.id, symbol = %raw.symbol, "preprocessed post");
