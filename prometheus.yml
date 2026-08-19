@@ -18,9 +18,9 @@ scrape_configs:
     static_configs:
       - targets: ['market-producer:8003']
 
-  - job_name: 'news-producer'
+  - job_name: 'alpaca-producer'
     static_configs:
-      - targets: ['news-producer:8004']
+      - targets: ['alpaca-producer:8003']
 
   - job_name: 'reddit-producer'
     static_configs:
