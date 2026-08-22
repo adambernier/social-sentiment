@@ -16,6 +16,7 @@ lapin = { workspace = true }
 sqlx = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -1,6 +1,9 @@
 [workspace]
 members = [
     "crates/social-sentiment-core",
+    "crates/social-news-producer",
+    "crates/market-producer",
+    "crates/global-events-producer",
     "crates/preprocessing-service",
     "crates/sentiment-service",
     "crates/storage-service",
@@ -28,3 +31,7 @@ anyhow = "1.0"
 metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 tempfile = "3.10"
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2.5"
+chrono-tz = "0.10"

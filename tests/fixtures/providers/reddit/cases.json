@@ -1,0 +1,11 @@
+{
+  "request": {"method":"GET","url":"https://www.reddit.com/r/.../comments.json","query":{"limit":100},"headers":{"User-Agent":"sanitized-test-agent"}},
+  "responses": {
+    "success": {"status":200,"body":{"data":{"children":[{"data":{"id":"abc123","body":"  Apple and $AAPL are moving  ","created_utc":1787393040,"score":9}},{"data":{"id":"empty","body":"","created_utc":1787393040}}]}}},
+    "empty": {"status":200,"body":{"data":{"children":[]}}},
+    "malformed": {"status":200,"body":{"data":{"children":{}}}},
+    "rate_limit": {"status":429,"headers":{"Retry-After":"90"},"body":{}},
+    "error": {"status":403,"body":{"message":"blocked"}}
+  },
+  "expected": [{"id":"rd_abc123","symbol":"AAPL","platform":"reddit","text":"Apple and $AAPL are moving","timestamp":"2026-08-22T10:04:00Z","engagement":9}]
+}

@@ -1,5 +1,7 @@
-# Opt-in Rust worker overlay. The Python API remains authoritative until the
-# experimental Rust API passes the full route and response parity suite.
+# Opt-in Rust worker/producer overlay. The base Compose file remains the
+# one-command Python rollback. Apply this overlay and name only the service
+# being promoted; service names, dependencies, environments and queues remain
+# inherited from docker-compose.yml.
 services:
   preprocessing-service:
     build:
@@ -18,6 +20,48 @@ services:
       context: .
       dockerfile: Dockerfile.rust
       target: rust-storage
+
+  bluesky-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      target: rust-bluesky-producer
+
+  stocktwits-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      target: rust-stocktwits-producer
+
+  reddit-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      target: rust-reddit-producer
+
+  finnhub-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      target: rust-finnhub-producer
+
+  alpaca-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      target: rust-alpaca-producer
+
+  market-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      target: rust-market-producer
+
+  global-events-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      target: rust-global-events-producer
 
   # Side-by-side API candidate for contract, browser, and load gates. It does
   # not replace the Python api-service or change the frontend's API_URL.

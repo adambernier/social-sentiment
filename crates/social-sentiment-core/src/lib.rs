@@ -5,6 +5,7 @@ pub mod messaging;
 pub mod model_identity;
 pub mod observability;
 pub mod polling;
+pub mod producer;
 pub mod repository;
 pub mod runtime;
 pub mod schemas;

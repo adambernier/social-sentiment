@@ -1,0 +1,11 @@
+{
+  "request": {"method":"GET","url":"https://data.alpaca.markets/v1beta1/news","query":{"symbols":"AAPL","limit":50},"headers":{"APCA-API-KEY-ID":"<redacted>","APCA-API-SECRET-KEY":"<redacted>"}},
+  "responses": {
+    "success": {"status":200,"body":{"news":[{"id":801,"headline":"Apple product update","summary":"AAPL outlook","created_at":"2026-08-22T10:08:00Z"},{"id":802,"headline":"Generic market story","summary":"No company","created_at":"bad"}]}},
+    "empty": {"status":200,"body":{"news":[]}},
+    "malformed": {"status":200,"body":{"news":{}}},
+    "rate_limit": {"status":429,"headers":{"Retry-After":"30"},"body":{}},
+    "error": {"status":502,"body":{"error":"unavailable"}}
+  },
+  "expected": [{"id":"alpaca_801","symbol":"AAPL","platform":"alpaca","text":"Apple product update. AAPL outlook","timestamp":"2026-08-22T10:08:00Z","engagement":1}]
+}

@@ -1,0 +1,11 @@
+{
+  "request": {"method":"GET","url":"https://api.bsky.app/xrpc/app.bsky.feed.searchPosts","query":{"q":"Apple","limit":25,"sort":"latest"},"headers":{}},
+  "responses": {
+    "success": {"status":200,"body":{"posts":[{"cid":"bafy-post-1","record":{"text":"Apple AAPL earnings beat","createdAt":"2026-08-22T10:00:00Z"},"likeCount":2,"repostCount":3,"replyCount":4}]}},
+    "empty": {"status":200,"body":{"posts":[]}},
+    "malformed": {"status":200,"body":{"posts":"not-an-array"}},
+    "rate_limit": {"status":429,"headers":{"Retry-After":"120"},"body":{"error":"RateLimitExceeded"}},
+    "error": {"status":503,"body":{"error":"upstream unavailable"}}
+  },
+  "expected": [{"id":"bafy-post-1","symbol":"AAPL","platform":"bluesky","text":"Apple AAPL earnings beat","timestamp":"2026-08-22T10:00:00Z","engagement":20}]
+}

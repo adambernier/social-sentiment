@@ -33,6 +33,25 @@ RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/carg
     && mkdir -p /usr/src/app/out \
     && cp target/release/service-api /usr/src/app/out/
 
+# Producer dependencies intentionally contain no Python runtime or embedded
+# interpreter. All seven candidates share one build cache and are copied into
+# separate, independently promotable runtime targets below.
+FROM rust-source AS producer-builder
+ENV CARGO_BUILD_JOBS=1
+RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=social-sentiment-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=social-sentiment-cargo-target,target=/usr/src/app/target \
+    cargo build --locked --release \
+        --bin producer-bluesky \
+        --bin producer-stocktwits \
+        --bin producer-reddit \
+        --bin producer-finnhub \
+        --bin producer-alpaca \
+        --bin producer-market \
+        --bin producer-global-events \
+    && mkdir -p /usr/src/app/out \
+    && cp target/release/producer-* /usr/src/app/out/
+
 FROM debian:trixie-slim AS runtime-base
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 \
@@ -62,3 +81,38 @@ COPY --from=api-builder /usr/src/app/out/service-api /app/service-api
 ENV PORT=8000
 EXPOSE 8000
 CMD ["/app/service-api"]
+
+FROM runtime-base AS rust-bluesky-producer
+COPY --from=producer-builder /usr/src/app/out/producer-bluesky /app/producer-bluesky
+EXPOSE 8001
+CMD ["/app/producer-bluesky"]
+
+FROM runtime-base AS rust-stocktwits-producer
+COPY --from=producer-builder /usr/src/app/out/producer-stocktwits /app/producer-stocktwits
+EXPOSE 8006
+CMD ["/app/producer-stocktwits"]
+
+FROM runtime-base AS rust-reddit-producer
+COPY --from=producer-builder /usr/src/app/out/producer-reddit /app/producer-reddit
+EXPOSE 8005
+CMD ["/app/producer-reddit"]
+
+FROM runtime-base AS rust-finnhub-producer
+COPY --from=producer-builder /usr/src/app/out/producer-finnhub /app/producer-finnhub
+EXPOSE 8002
+CMD ["/app/producer-finnhub"]
+
+FROM runtime-base AS rust-alpaca-producer
+COPY --from=producer-builder /usr/src/app/out/producer-alpaca /app/producer-alpaca
+EXPOSE 8003
+CMD ["/app/producer-alpaca"]
+
+FROM runtime-base AS rust-market-producer
+COPY --from=producer-builder /usr/src/app/out/producer-market /app/producer-market
+EXPOSE 8003
+CMD ["/app/producer-market"]
+
+FROM runtime-base AS rust-global-events-producer
+COPY --from=producer-builder /usr/src/app/out/producer-global-events /app/producer-global-events
+EXPOSE 8010
+CMD ["/app/producer-global-events"]

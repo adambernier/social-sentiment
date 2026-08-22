@@ -123,17 +123,28 @@ impl PerSymbolBackoff {
     }
 
     pub fn record(&mut self, symbol: &str, rate_limited: bool, now: Instant) {
+        self.record_with_retry_after(symbol, rate_limited, None, now);
+    }
+
+    pub fn record_with_retry_after(
+        &mut self,
+        symbol: &str,
+        rate_limited: bool,
+        retry_after: Option<Duration>,
+        now: Instant,
+    ) {
         if !rate_limited {
             self.penalties.remove(symbol);
             self.next_allowed.remove(symbol);
             return;
         }
-        let next_penalty = self
-            .penalties
-            .get(symbol)
-            .and_then(|current| current.checked_mul(2))
-            .unwrap_or(self.base)
-            .min(self.maximum);
+        let next_penalty = retry_after.unwrap_or_else(|| {
+            self.penalties
+                .get(symbol)
+                .and_then(|current| current.checked_mul(2))
+                .unwrap_or(self.base)
+        });
+        let next_penalty = next_penalty.max(Duration::from_nanos(1)).min(self.maximum);
         self.penalties.insert(symbol.to_string(), next_penalty);
         self.next_allowed
             .insert(symbol.to_string(), now + next_penalty);
@@ -182,5 +193,15 @@ mod tests {
         assert!(backoff.is_due("AAPL", now));
         backoff.record("NVDA", false, now);
         assert!(backoff.is_due("NVDA", now));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_after_applies_only_to_the_affected_key() {
+        let now = Instant::now();
+        let mut backoff = PerSymbolBackoff::new(Duration::from_secs(10), Duration::from_secs(60));
+        backoff.record_with_retry_after("NVDA", true, Some(Duration::from_secs(45)), now);
+        assert!(!backoff.is_due("NVDA", now + Duration::from_secs(44)));
+        assert!(backoff.is_due("NVDA", now + Duration::from_secs(45)));
+        assert!(backoff.is_due("AAPL", now));
     }
 }

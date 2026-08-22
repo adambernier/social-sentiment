@@ -37,8 +37,15 @@ the `rust-api` profile and never replaces the Python API implicitly.
 - [x] Side-by-side API contract harness with timestamp normalization and
   `1e-6` absolute numeric tolerance.
 - [x] Isolated live RabbitMQ/PostgreSQL fault and replay qualification harness.
+- [x] Native Rust candidates for Bluesky, StockTwits, Reddit, Finnhub, Alpaca,
+  market data, and global events, without Python subprocesses or an embedded
+  interpreter.
+- [x] Recorded provider fixtures shared by the Python oracle and Rust adapter
+  suites, including success, empty, malformed, 403/429, and 5xx cases.
+- [x] Independently selectable non-root producer targets in the Rust Compose
+  overlay; base Compose remains the Python default and rollback.
+- [x] Isolated producer capture comparison and timed observation tooling.
 - [ ] Execute and sign off the replay/observation promotion gates for each worker.
-- [ ] Provider adapters and fixture suites for all seven Rust producers.
 - [ ] Per-service 1,000-message shadow comparison and 24-hour observation.
 - [ ] Rust API browser smoke, load, and 48-hour observation gates.
 - [ ] Final full-stack 48-hour soak and default-runtime switch.
@@ -147,3 +154,63 @@ Substitute `sentiment-service` or `storage-service` for later stages. Roll back
 immediately when message counts diverge, DLQs grow unexpectedly, freshness
 declines, or error rates regress; do not advance the next worker until the
 current worker has completed its observation window.
+
+## Producer candidate gates
+
+Recorded provider fixtures are under `tests/fixtures/providers`. Request
+metadata is sanitized and every provider records success, empty, malformed,
+rate-limit, and error responses beside the expected normalized output. Both
+runtimes consume this tree:
+
+```bash
+python scripts/verify_producer_parity.py --fixtures-only
+pytest -q tests/test_producer_fixture_oracles.py
+cargo test --locked -p social-news-producer -p market-producer \
+  -p global-events-producer
+```
+
+Capture Python and Rust candidates only from isolated shadow queues/tables,
+then require identical normalized identity keys, values, and row counts. The
+harness strips generated ingestion timestamps but no provider or event time:
+
+```bash
+python scripts/qualify_producer.py bluesky --mode shadow \
+  --python-jsonl artifacts/bluesky-python.jsonl \
+  --rust-jsonl artifacts/bluesky-rust.jsonl \
+  --replay-count 1000
+```
+
+Market/global-event table captures use their actual primary-key columns via
+`--key-fields`, for example
+`instrument_key,interval,starts_at` or `event_id,symbol,rule_id`.
+
+The timed gate is intentionally separate and defaults to 24 hours. It samples
+both metrics endpoints into a reviewable JSON artifact; pair it with isolated
+RabbitMQ DLQ snapshots and the JSONL row/payload comparison above:
+
+```bash
+python scripts/qualify_producer.py bluesky --mode observe \
+  --python-metrics-url http://127.0.0.1:18001/metrics \
+  --rust-metrics-url http://127.0.0.1:28001/metrics \
+  --output artifacts/bluesky-observation.json
+```
+
+Promote producers one at a time in this exact order: Bluesky → StockTwits →
+Reddit → Finnhub → Alpaca → market → global events. Apply the Rust overlay and
+name only the current service:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.rust.yml \
+  up -d --build bluesky-producer
+```
+
+Rollback remains one command from base Compose:
+
+```bash
+docker compose -f docker-compose.yml up -d --build bluesky-producer
+```
+
+Substitute the current producer service name. A publisher-confirm failure,
+unroutable mandatory publish, reconnect failure, non-clean SIGTERM, provider or
+database recovery failure, metric regression, duplicate/cursor divergence,
+unexpected DLQ growth, or any capture mismatch blocks promotion.

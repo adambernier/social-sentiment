@@ -1,0 +1,11 @@
+{
+  "request": {"method":"GET","url":"https://backend.taiwanindex.com.tw/api/indexes/TW50/records","query":{"start":"2026-08-20","end":"2026-08-22"},"headers":{"User-Agent":"social-sentiment/1.0"}},
+  "responses": {
+    "success": {"status":200,"body":{"empty":false,"data":{"labels":["2026/08/21"],"datasets":[{"value_type":"price","data":[12345.67]}]}}},
+    "empty": {"status":200,"body":{"empty":true}},
+    "malformed": {"status":200,"body":{"data":{"labels":[],"datasets":[]}}},
+    "rate_limit": {"status":429,"headers":{"Retry-After":"60"},"body":{}},
+    "error": {"status":500,"body":{}}
+  },
+  "expected": [{"session_date":"2026-08-21","open":12345.67,"high":12345.67,"low":12345.67,"close":12345.67,"volume":null}]
+}

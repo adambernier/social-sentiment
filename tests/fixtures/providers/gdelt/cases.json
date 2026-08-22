@@ -1,0 +1,11 @@
+{
+  "request": {"method":"GET","url":"https://api.gdeltproject.org/api/v2/doc/doc","query":{"query":"(\"Nvidia chips\") AND (\"Taiwan\")","mode":"artlist","format":"json","sort":"datedesc","maxrecords":20},"headers":{"User-Agent":"social-sentiment-global-context/1.0"}},
+  "responses": {
+    "success": {"status":200,"body":{"articles":[{"url":"https://Example.com/story?b=2&a=1#fragment","title":"Supply chain update","domain":"Example.com","seendate":"20260822T101200Z"}]}},
+    "empty": {"status":200,"body":{"articles":[]}},
+    "malformed": {"status":200,"body":{"articles":{}}},
+    "rate_limit": {"status":429,"headers":{"Retry-After":"120"},"body":{}},
+    "error": {"status":503,"body":{}}
+  },
+  "expected": [{"canonical_url":"https://example.com/story?a=1&b=2","title":"Supply chain update","source_name":"Example.com","occurred_at":"2026-08-22T10:12:00Z"}]
+}

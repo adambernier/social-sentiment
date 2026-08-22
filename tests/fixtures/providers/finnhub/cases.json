@@ -1,0 +1,11 @@
+{
+  "request": {"method":"GET","url":"https://finnhub.io/api/v1/company-news","query":{"symbol":"AAPL","from":"2026-08-19","to":"2026-08-22","token":"<redacted>"},"headers":{}},
+  "responses": {
+    "success": {"status":200,"body":[{"id":701,"headline":"Apple launches product","summary":"AAPL demand rises","datetime":1787393160},{"id":702,"headline":"Generic market story","summary":"No named company","datetime":1787393160}]},
+    "empty": {"status":200,"body":[]},
+    "malformed": {"status":200,"body":{"error":"not-list"}},
+    "rate_limit": {"status":429,"headers":{"Retry-After":"60"},"body":{}},
+    "error": {"status":500,"body":{"error":"unavailable"}}
+  },
+  "expected": [{"id":"finnhub_701","symbol":"AAPL","platform":"finnhub","text":"Apple launches product. AAPL demand rises","timestamp":"2026-08-22T10:06:00Z","engagement":15}]
+}

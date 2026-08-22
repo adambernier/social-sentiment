@@ -1,0 +1,41 @@
+[package]
+name = "social-news-producer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "social_news_producer"
+
+[[bin]]
+name = "producer-bluesky"
+path = "src/bin/bluesky.rs"
+
+[[bin]]
+name = "producer-stocktwits"
+path = "src/bin/stocktwits.rs"
+
+[[bin]]
+name = "producer-reddit"
+path = "src/bin/reddit.rs"
+
+[[bin]]
+name = "producer-finnhub"
+path = "src/bin/finnhub.rs"
+
+[[bin]]
+name = "producer-alpaca"
+path = "src/bin/alpaca.rs"
+
+[dependencies]
+social-sentiment-core = { path = "../social-sentiment-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+lapin = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
