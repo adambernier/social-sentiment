@@ -60,10 +60,11 @@ model download on first boot.
 - **Real-time updates.** A Postgres `LISTEN/NOTIFY` trigger on new posts is
   relayed to the UI over the `/stats/stream` WebSocket.
 - **[Phased Rust migration](docs/rust-backend-migration.md).** Python remains the default implementation. The
-  Rust worker overlay is opt-in and uses confirmed RabbitMQ publishing,
-  reconnect loops, graceful shutdown, and Prometheus endpoints. The Rust API
-  is still experimental and runs only as a side-by-side profile while its
-  contract, load, and soak gates are completed.
+  Rust backend candidates are organized in the `crates/` workspace (`social-sentiment-core`,
+  `preprocessing-service`, `sentiment-service`, `storage-service`, `social-news-producer`,
+  `market-producer`, `global-events-producer`, and `api-service`). The Rust worker overlay is opt-in,
+  using confirmed RabbitMQ publishing, reconnect loops, graceful shutdown, and Prometheus endpoints.
+  The Rust API runs as a side-by-side candidate while contract, load, and soak gates are completed.
 
 ## Features
 
@@ -118,12 +119,12 @@ Inspired by hockey stat cards, the dashboard features a **Divergent Bar Chart** 
    ```
 
 2. **(Optional) Local Python Environment:**
-   If you plan to run scripts or services locally outside of Docker, set up a virtual environment:
+   If you plan to run scripts or services locally outside of Docker, set up a virtual environment (Python 3.11+ required):
    ```bash
    python3 -m venv .venv
    source .venv/bin/activate
-   # Install requirements for whichever service you are working on, e.g.:
-   pip install -r preprocessing-service/requirements.txt
+   # Or run commands directly using the venv executable:
+   ./.venv/bin/python scripts/run_tests.sh
    ```
 
 ## Quick start (Docker Compose)
@@ -409,6 +410,26 @@ This uses `watchdog` (pre-installed in the `.venv`) to listen to file modificati
 
 A GitHub Actions workflow is configured in `.github/workflows/tests.yml` to automatically execute the full test suite on every code push and pull request targeting the `main` branch. The tests run in an isolated environment using mocks, meaning they complete quickly without needing any Docker containers or database services running in CI.
 
+### Worker & Producer Qualification Harnesses
+
+For black-box qualification of the Rust pipeline workers (`preprocessing`, `sentiment`, `storage`) and ingestion producers against isolated Docker containers (`docker-compose.worker-qualification.yml`), use `scripts/qualify_worker.py` and `scripts/qualify_producer.py`:
+
+```bash
+# 1,000-message recorded replay parity gate
+python scripts/qualify_worker.py preprocessing --mode replay --replay-count 1000 --build
+
+# 24-hour observation stability gate
+python scripts/qualify_worker.py preprocessing --mode observe --observe-hours 24
+
+# Full worker promotion gate (smoke, faults, replay, observation)
+python scripts/qualify_worker.py preprocessing --mode promotion
+
+# Producer fixture parity gate
+python scripts/qualify_producer.py bluesky --mode fixtures
+```
+
+See [docs/rust-backend-migration.md](docs/rust-backend-migration.md) for full worker promotion and release gate documentation.
+
 ## Dashboard
 
 The `ui-service` is a real-time **Next.js** dashboard. With the stack running
@@ -436,17 +457,12 @@ environment variable (defaults to the in-network `http://api-service:8000`).
 
 ## Recent changes
 
-- Migrated the ingest consumers to **async `aio-pika`** with batched
-  processing and explicit ack/re-queue.
-- Added **async Postgres connection pooling** (`psycopg_pool`) in the API and
-  storage services.
-- Moved sentiment analytics and correlation into the API; added an
-  **engagement-weighted sentiment trend** and **Pearson price–sentiment
-  correlation** with lag sweep (`/stats/correlation`).
-- Added **hourly sentiment rollup + retention pruning** (`storage-service/rollup.py`)
-  with a two-tier hot/cold read path in the API.
-- Added **graceful `SIGTERM`/`SIGINT` shutdown** across all services via
-  `shared/runtime.py`.
-- Correctness/perf fixes: UTC-consistent API time windows, bounded `hours`/`offset`
-  query params, dead-WebSocket cleanup, numerically stable softmax, composite
-  `stock_quotes` indexes, and a two-row layout for the dashboard stat cards.
+- Created **phased Rust backend migration workspace** (`crates/`) covering core libraries (`social-sentiment-core`), processing workers (`preprocessing`, `sentiment`, `storage`), ingestion producers (`social-news`, `market`, `global-events`), and side-by-side Axum API candidate.
+- Added **live Docker-backed worker qualification harness** (`scripts/qualify_worker.py`) with RabbitMQ/PostgreSQL fault injection, 1,000-message recorded replay parity gates, and 24-hour observation windows.
+- Implemented **producer fixture parity and shadow capture verification harness** (`scripts/qualify_producer.py` and `scripts/verify_producer_parity.py`).
+- Added **cross-runtime model parity gate** (`scripts/verify_model_parity.py`) and side-by-side **API contract validation harness** (`scripts/verify_api_contract.py`).
+- Integrated **opt-in global context factor & event model** with Asian indices, FX pairs, geopolitical rules, and 30/90-session lag statistics (`GLOBAL_CONTEXT_ENABLED`).
+- Migrated ingest consumers to **async `aio-pika`** with batched processing and explicit ack/re-queue.
+- Added **async Postgres connection pooling** (`psycopg_pool`) in the API and storage services.
+- Added **hourly sentiment rollup + retention pruning** (`storage-service/rollup.py`) with a two-tier hot/cold read path in the API.
+- Added **graceful `SIGTERM`/`SIGINT` shutdown** across all services via `shared/runtime.py`.
