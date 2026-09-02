@@ -137,6 +137,27 @@ docker compose up -d --build
 docker compose ps
 ```
 
+### Shared proxy for the DaySmart exporter
+
+The same Caddy container also proxies the sibling `daysmart_schedule` app on a
+dedicated Basic-Auth hostname. Create the cross-project network once, add
+`DAYSMART_SITE_ADDRESS` and `DAYSMART_BASIC_AUTH_PASSWORD_HASH` from
+`.env.example` to the root-only deployment `.env`, and start the exporter before
+recreating Caddy:
+
+```bash
+docker network inspect shared-proxy >/dev/null 2>&1 || \
+  docker network create shared-proxy
+docker compose run --rm --no-deps caddy caddy hash-password
+docker compose -f ../daysmart_schedule/compose.yaml up -d --build app
+docker compose up -d --force-recreate caddy
+```
+
+The fixed Basic Auth username is `schedule`. The exporter has no published host
+port; Caddy reaches the `daysmart-app` network alias over `shared-proxy`. Do not
+put DaySmart account credentials in either project's environment file—users
+submit them only in the export form.
+
 To evaluate the Rust preprocessing, sentiment, and storage workers while
 keeping the production-parity Python API, apply the explicit overlay:
 

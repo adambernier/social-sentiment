@@ -158,11 +158,9 @@ class Broker:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 raise TimeoutError(f"no message arrived on {queue_name!r}")
-            message = await queue.get(
-                fail=False,
-                timeout=min(remaining, 1.0),
-            )
+            message = await queue.get(fail=False)
             if message is None:
+                await asyncio.sleep(0.1)
                 continue
             received = ReceivedMessage(
                 body=message.body,

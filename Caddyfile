@@ -3,24 +3,33 @@
 # through by the caddy service in docker-compose.yml). With a real hostname in
 # SITE_ADDRESS, Caddy provisions a trusted Let's Encrypt cert and redirects
 # 80 -> 443 automatically.
-
 {
-    email {$ACME_EMAIL}
+	email {$ACME_EMAIL}
 }
 
 {$SITE_ADDRESS} {
-    # API traffic -> FastAPI backend
-    @api {
-        path /api/*
-    }
-    reverse_proxy @api api-service:8000
+	# API traffic -> FastAPI backend
+	@api {
+		path /api/*
+	}
+	reverse_proxy @api api-service:8000
 
-    # Grafana (embedded read-only in the admin dashboard)
-    @grafana {
-        path /grafana/*
-    }
-    reverse_proxy @grafana grafana:3000
+	# Grafana (embedded read-only in the admin dashboard)
+	@grafana {
+		path /grafana/*
+	}
+	reverse_proxy @grafana grafana:3000
 
-    # Everything else -> Next.js frontend
-    reverse_proxy ui-service:3000
+	# Everything else -> Next.js frontend
+	reverse_proxy ui-service:3000
+}
+
+# Private DaySmart schedule exporter. The app is reachable only over the shared
+# Docker proxy network and has no published host port.
+{$DAYSMART_SITE_ADDRESS} {
+	basic_auth {
+		schedule {$DAYSMART_BASIC_AUTH_PASSWORD_HASH}
+	}
+
+	reverse_proxy daysmart-app:8000
 }
