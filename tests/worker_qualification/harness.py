@@ -7,8 +7,10 @@ import json
 import os
 import re
 import subprocess  # nosec B404 - fixed docker/compose command vectors only
+import sys
 import time
 import uuid
+import warnings
 from base64 import b64encode
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -26,6 +28,12 @@ ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = ROOT / "docker-compose.worker-qualification.yml"
 Worker = Literal["preprocessing", "sentiment", "storage"]
 Runtime = Literal["python", "rust"]
+
+# Infrastructure bootstrap is retried once: a container that fails to boot on a
+# loaded host reports only its exit code, and re-creating it verifies whether the
+# cause was transient before failing the gate.
+INFRA_ATTEMPTS = 2
+DIAGNOSTIC_LOG_TAIL = "100"
 
 INPUT_QUEUE = {
     "preprocessing": "raw",
@@ -176,6 +184,67 @@ class QualificationStack:
         self.project_name = project_name or f"worker-qualification-{uuid.uuid4().hex[:10]}"
         self._started = False
 
+    def _compose_command(self, *args: str) -> list[str]:
+        return [
+            "docker",
+            "compose",
+            "-f",
+            str(COMPOSE_FILE),
+            "--project-name",
+            self.project_name,
+            *args,
+        ]
+
+    def _capture(self, *args: str, timeout: float = 60) -> str:
+        """Run a best-effort Compose command, returning "" instead of raising."""
+        try:
+            completed = subprocess.run(  # nosec B603
+                self._compose_command(*args),
+                cwd=ROOT,
+                env=os.environ.copy(),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            return f"unavailable: {error}"
+        return (completed.stdout or completed.stderr).strip()
+
+    @staticmethod
+    def _stopped_services(state: str) -> tuple[str, ...]:
+        """Services that are not running, matched from `compose ps --format json`."""
+        services: set[str] = set()
+        for line in state.splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                return ()
+            if row.get("Service") and row.get("State") != "running":
+                services.add(str(row["Service"]))
+        return tuple(sorted(services))
+
+    def _diagnostics(self) -> str:
+        """Best-effort container state and logs for a failed Compose command.
+
+        Compose reports only the exit code of a container that failed to boot;
+        the container's own logs carry the cause and are otherwise discarded.
+        Logs are limited to containers that are not running so that a healthy
+        dependency's output cannot bury the failure. Never raises: diagnostics
+        must not mask the original failure.
+        """
+        sections: list[str] = []
+        state = self._capture("ps", "--all")
+        if state:
+            sections.append(f"--- compose containers ---\n{state}")
+        stopped = self._stopped_services(
+            self._capture("ps", "--all", "--format", "json")
+        )
+        logs = self._capture("logs", "--no-color", "--tail", DIAGNOSTIC_LOG_TAIL, *stopped)
+        if logs:
+            sections.append(f"--- compose logs ---\n{logs}")
+        return "\n" + "\n".join(sections) if sections else ""
+
     def _compose(
         self,
         *args: str,
@@ -186,15 +255,7 @@ class QualificationStack:
         environment = os.environ.copy()
         if queue_names is not None:
             environment.update(queue_names.environment())
-        command = [
-            "docker",
-            "compose",
-            "-f",
-            str(COMPOSE_FILE),
-            "--project-name",
-            self.project_name,
-            *args,
-        ]
+        command = self._compose_command(*args)
         completed = subprocess.run(  # nosec B603
             command,
             cwd=ROOT,
@@ -208,19 +269,48 @@ class QualificationStack:
             details = completed.stderr.strip() or completed.stdout.strip()
             raise RuntimeError(
                 f"Docker Compose command failed ({completed.returncode}): "
-                f"{' '.join(command)}\n{details}"
+                f"{' '.join(command)}\n{details}{self._diagnostics()}"
             )
         return completed
 
     def start(self, *, build: bool = False) -> None:
         build_args = ("--build",) if build else ()
-        self._compose("up", "-d", "--wait", *build_args, "rabbitmq", "postgres")
+        # Marked before any container exists so a failed bootstrap still tears
+        # down the infrastructure it managed to create.
         self._started = True
         try:
+            self._start_infrastructure(build_args)
             self._compose("run", "--rm", *build_args, "schema-migrate")
         except Exception:
             self.close()
             raise
+
+    def _start_infrastructure(self, build_args: tuple[str, ...]) -> None:
+        for attempt in range(1, INFRA_ATTEMPTS + 1):
+            try:
+                self._compose("up", "-d", "--wait", *build_args, "rabbitmq", "postgres")
+                return
+            except RuntimeError as error:
+                if attempt == INFRA_ATTEMPTS:
+                    raise
+                print(
+                    f"infrastructure bootstrap attempt {attempt} of "
+                    f"{INFRA_ATTEMPTS} failed; recreating:\n{error}",
+                    file=sys.stderr,
+                )
+                warnings.warn(
+                    f"worker qualification infrastructure bootstrap attempt "
+                    f"{attempt} failed; retrying once: {str(error).splitlines()[0]}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                self._compose(
+                    "down",
+                    "--volumes",
+                    "--remove-orphans",
+                    check=False,
+                    timeout=180,
+                )
 
     def close(self) -> None:
         if not self._started:
