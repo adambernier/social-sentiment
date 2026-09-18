@@ -121,6 +121,13 @@ jobs:
         toolchain: 1.94.0
         components: rustfmt, clippy
 
+    # The fixture-contract step below runs a Python script. ubuntu-latest ships
+    # only `python3`, so without this the step fails with "command not found".
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+
     - name: Check formatting
       run: cargo fmt --all -- --check
 
