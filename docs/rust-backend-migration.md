@@ -45,8 +45,14 @@ the `rust-api` profile and never replaces the Python API implicitly.
 - [x] Independently selectable non-root producer targets in the Rust Compose
   overlay; base Compose remains the Python default and rollback.
 - [x] Isolated producer capture comparison and timed observation tooling.
-- [ ] Execute and sign off the replay/observation promotion gates for each worker.
-- [ ] Per-service 1,000-message shadow comparison and 24-hour observation.
+- [ ] Worker replay parity gate: 1,000-message Python/Rust comparison for
+  preprocessing, sentiment, and storage.
+- [ ] Worker observation gate: 24-hour stability run for preprocessing,
+  sentiment, and storage.
+- [ ] Producer shadow parity gate: 1,000-record Python/Rust comparison for each
+  of the seven producers.
+- [ ] Producer observation gate: 24-hour stability run for each of the seven
+  producers.
 - [ ] Rust API browser smoke, load, and 48-hour observation gates.
 - [ ] Final full-stack 48-hour soak and default-runtime switch.
 
