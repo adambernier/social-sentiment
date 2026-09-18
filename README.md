@@ -124,7 +124,7 @@ Inspired by hockey stat cards, the dashboard features a **Divergent Bar Chart** 
    python3 -m venv .venv
    source .venv/bin/activate
    # Or run commands directly using the venv executable:
-   ./.venv/bin/python scripts/run_tests.sh
+   ./.venv/bin/pytest
    ```
 
 ## Quick start (Docker Compose)
