@@ -343,8 +343,6 @@ services:
     environment:
     - SITE_ADDRESS=${SITE_ADDRESS}
     - ACME_EMAIL=${ACME_EMAIL}
-    - DAYSMART_SITE_ADDRESS=${DAYSMART_SITE_ADDRESS}
-    - DAYSMART_BASIC_AUTH_PASSWORD_HASH=${DAYSMART_BASIC_AUTH_PASSWORD_HASH}
     ports:
     - "80:80"
     - "443:443"
@@ -357,9 +355,6 @@ services:
     - ui-service
     - api-service
     - grafana
-    networks:
-    - default
-    - shared_proxy
     healthcheck:
       test:
       - CMD
@@ -380,7 +375,3 @@ volumes:
   postgres_data: null
   caddy_data: null
   caddy_config: null
-networks:
-  shared_proxy:
-    external: true
-    name: shared-proxy

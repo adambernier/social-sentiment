@@ -130,6 +130,28 @@ DLQ headers, normalized payloads, exact labels, probability delta `<= 0.04`,
 idempotent database rows, duplicate accounting, and Rust-to-Python replacement.
 Failed assertions include the candidate worker's recent container logs.
 
+The 24-hour observation gate is not a liveness-only check. Throughout the
+window it asserts the candidate container is running and that both the input
+queue and its `.dead-letter` queue hold zero ready and zero unacknowledged
+messages, and it publishes a uniquely identified probe on a separate cadence
+and requires that record to reach the output queue or the `posts` table. The
+window closes on a final verified probe rather than on a clock check, so a
+worker that stops consuming mid-window fails the gate instead of passing it as
+an idle container behind an empty queue. Storage probes carry the current
+timestamp rather than the recorded fixture time, because the storage worker
+rolls up and prunes posts older than `POST_RETENTION_DAYS` (one day in the
+qualification topology) 60 seconds after startup and every 24 hours after that,
+and would otherwise archive the probes out of `posts` mid-window. Storage also
+asserts exact row count and zero duplicate accounting across all probes. Each
+run writes a JSON evidence artifact to
+`artifacts/worker-observation-<worker>.json`; retain it with the promotion
+record.
+
+Probe cadence and timeout are overridable for development with
+`QUALIFICATION_OBSERVE_PROBE_INTERVAL` (seconds, default 300),
+`QUALIFICATION_OBSERVE_PROBE_TIMEOUT` (seconds, default 120), and
+`QUALIFICATION_OBSERVE_ARTIFACT` (output path).
+
 ## Promotion and rollback gates
 
 Workers are promoted one at a time in this order: preprocessing, sentiment,

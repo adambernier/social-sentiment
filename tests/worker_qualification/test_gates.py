@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import os
+import time
 from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -208,6 +212,13 @@ async def test_storage_retention_transaction_gate(
     assert rust_result == python_result == (0, 1, 1)
 
 
+def _observation_artifact_path(worker: Worker) -> Path:
+    override = os.getenv("QUALIFICATION_OBSERVE_ARTIFACT")
+    if override:
+        return Path(override)
+    return Path("artifacts") / f"worker-observation-{worker}.json"
+
+
 async def test_rust_observation_gate(
     qualification_stack: QualificationStack,
     qualification_fixtures: dict[str, dict[str, Any]],
@@ -219,36 +230,133 @@ async def test_rust_observation_gate(
         60.0,
         max(1.0, float(os.getenv("QUALIFICATION_OBSERVE_INTERVAL", "30"))),
     )
+    # A running container with a quiet queue does not prove the worker still
+    # consumes, so the window is bounded by verified probes at their own
+    # cadence. The cadence shortens for development runs shorter than four of
+    # the configured intervals.
+    probe_interval = max(
+        1.0,
+        min(
+            float(os.getenv("QUALIFICATION_OBSERVE_PROBE_INTERVAL", "300")),
+            duration / 4,
+        ),
+    )
+    probe_timeout = max(
+        1.0,
+        float(os.getenv("QUALIFICATION_OBSERVE_PROBE_TIMEOUT", "120")),
+    )
     worker = _selected_worker()
     queues = QueueNames.unique(f"{worker}-observation")
     if worker == "storage":
         qualification_stack.truncate_worker_state()
 
     service = f"rust-{worker}"
+    input_queue = queues.input_for(worker)
+    output_queue = queues.output_for(worker)
+    dead_letter_queue = f"{input_queue}.dead-letter"
+    loop = asyncio.get_running_loop()
+    samples = 0
+    probes = 0
+    # Written only when the window completes, so a stale artifact from an
+    # earlier run is removed rather than left to be mistaken for this run's
+    # evidence.
+    artifact = _observation_artifact_path(worker)
+    artifact.unlink(missing_ok=True)
+
     async with running_worker(
         qualification_stack,
         worker,
         "rust",
         queues,
     ) as broker:
-        await broker.publish(
-            queues.input_for(worker),
-            qualification_fixtures[worker]["valid"],
-        )
-        output = queues.output_for(worker)
-        if output is not None:
-            await broker.receive(output)
-        else:
-            await _wait_for(
-                lambda: len(qualification_stack.post_snapshot()) == 1,
-                timeout=60,
-                description="storage observation probe was not persisted",
+
+        async def probe() -> None:
+            """Publish one uniquely identified record and prove it was consumed."""
+            nonlocal probes
+            payload = copy.deepcopy(qualification_fixtures[worker]["valid"])
+            payload["id"] = f"{payload['id']}-observation-{probes:06d}"
+            probe_id = payload["id"]
+            if worker == "storage":
+                # The storage worker rolls up and prunes posts older than
+                # POST_RETENTION_DAYS (one day in the qualification topology)
+                # 60 seconds after startup and every 24 hours after that. A
+                # probe stamped with the recorded fixture time would be
+                # archived out of `posts` mid-window, so storage probes carry
+                # the current time and survive the whole window.
+                payload["timestamp"] = (
+                    datetime.now(timezone.utc)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z")
+                )
+            await broker.publish(input_queue, payload)
+            probes += 1
+            if output_queue is None:
+                await _wait_for(
+                    lambda: any(
+                        row["id"] == probe_id
+                        for row in qualification_stack.post_snapshot()
+                    ),
+                    timeout=probe_timeout,
+                    description=(
+                        f"observation probe {probe_id!r} was not persisted; "
+                        f"{service} is not consuming"
+                    ),
+                )
+                return
+            output = (await broker.receive(output_queue, timeout=probe_timeout)).json()
+            assert output["id"] == probe_id, (
+                f"observation probe {probe_id!r} came back as {output['id']!r}"
             )
 
-        deadline = asyncio.get_running_loop().time() + duration
-        while asyncio.get_running_loop().time() < deadline:
-            assert qualification_stack.service_is_running(service)
-            assert qualification_stack.queue_state(queues.input_for(worker)) == (0, 0)
+        started_at = time.time()
+        await probe()
+        deadline = loop.time() + duration
+        next_sample = loop.time()
+        next_probe = loop.time() + probe_interval
+        while loop.time() < deadline:
+            now = loop.time()
+            if now >= next_sample:
+                assert qualification_stack.service_is_running(service)
+                assert qualification_stack.queue_state(input_queue) == (0, 0)
+                assert qualification_stack.queue_state(dead_letter_queue) == (0, 0), (
+                    "the observation window dead-lettered messages"
+                )
+                samples += 1
+                next_sample = now + interval
+            if now >= next_probe:
+                await probe()
+                next_probe = loop.time() + probe_interval
             await asyncio.sleep(
-                min(interval, max(0.0, deadline - asyncio.get_running_loop().time()))
+                max(0.0, min(next_sample, next_probe, deadline) - loop.time())
             )
+
+        # The window closes on a verified probe rather than on a clock check: a
+        # worker that stopped consuming mid-window keeps its container running
+        # and its input queue empty, and would otherwise satisfy every
+        # assertion above.
+        await probe()
+        if worker == "storage":
+            assert len(qualification_stack.post_snapshot()) == probes
+            assert qualification_stack.duplicate_count() == 0
+
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(
+        json.dumps(
+            {
+                "worker": worker,
+                "runtime": "rust",
+                "service": service,
+                "started_at": started_at,
+                "finished_at": time.time(),
+                "duration_hours": duration / 3600,
+                "sample_interval_seconds": interval,
+                "probe_interval_seconds": probe_interval,
+                "liveness_samples": samples,
+                "verified_probes": probes,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )

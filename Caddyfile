@@ -23,13 +23,3 @@
 	# Everything else -> Next.js frontend
 	reverse_proxy ui-service:3000
 }
-
-# Private DaySmart schedule exporter. The app is reachable only over the shared
-# Docker proxy network and has no published host port.
-{$DAYSMART_SITE_ADDRESS} {
-	basic_auth {
-		schedule {$DAYSMART_BASIC_AUTH_PASSWORD_HASH}
-	}
-
-	reverse_proxy daysmart-app:8000
-}
