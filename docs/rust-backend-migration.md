@@ -45,6 +45,10 @@ the `rust-api` profile and never replaces the Python API implicitly.
 - [x] Independently selectable non-root producer targets in the Rust Compose
   overlay; base Compose remains the Python default and rollback.
 - [x] Isolated producer capture comparison and timed observation tooling.
+- [x] Gate evidence records naming the source revision, container images, and
+  host that each qualification run exercised.
+- [x] Sustained-load worker gate comparing Python and Rust p95 latency and
+  storage drain time under the same publish rate.
 - [ ] Worker replay parity gate: 1,000-message Python/Rust comparison for
   preprocessing, sentiment, and storage.
 - [ ] Worker observation gate: 24-hour stability run for preprocessing,
@@ -104,16 +108,19 @@ PostgreSQL outage, and in-flight `SIGTERM` cases separately:
 python scripts/qualify_worker.py preprocessing --mode faults
 ```
 
-The recorded replay and observation gates are deliberately manual. The replay
-defaults to the required 1,000 messages; observation defaults to 24 hours:
+The recorded replay, sustained-load, and observation gates are deliberately
+manual. The replay defaults to the required 1,000 messages; the load gate
+defaults to 2,000 messages per runtime at 50 messages per second; observation
+defaults to 24 hours:
 
 ```bash
 python scripts/qualify_worker.py preprocessing --mode replay
+python scripts/qualify_worker.py preprocessing --mode load
 python scripts/qualify_worker.py preprocessing --mode observe
 ```
 
 For a complete promotion candidate run, including smoke, faults, 1,000-message
-Python/Rust comparison, and 24-hour observation:
+Python/Rust comparison, sustained load, and 24-hour observation:
 
 ```bash
 python scripts/qualify_worker.py preprocessing --mode promotion
@@ -121,14 +128,34 @@ python scripts/qualify_worker.py preprocessing --mode promotion
 
 Repeat in order for `sentiment`, then `storage`. Storage promotion additionally
 runs duplicate-state, transient PostgreSQL outage, and atomic retention tests.
-Use `--observe-hours` or `--replay-count` only for development; release evidence
-must use at least 24 hours and 1,000 messages.
+Use `--observe-hours`, `--replay-count`, `--load-count`, or `--load-rate` only
+for development; release evidence must use at least 24 hours and 1,000 messages.
 
 The harness checks input/output/DLQ counts, persistent restart recovery,
 acknowledgement through zero-ready/zero-unacknowledged convergence, compatible
 DLQ headers, normalized payloads, exact labels, probability delta `<= 0.04`,
 idempotent database rows, duplicate accounting, and Rust-to-Python replacement.
 Failed assertions include the candidate worker's recent container logs.
+
+The 1,000-message replay gate is the payload-parity gate: it drives identical
+messages through both runtimes and requires identical output keys and normalized
+payloads, exact sentiment labels, and a probability delta `<= 0.04`. Storage has
+no output queue, so its replay compares persisted rows and duplicate accounting
+between the runtimes instead.
+
+The sustained-load gate is the throughput gate. It publishes the same paced load
+at the same rate through each runtime and compares end-to-end p95 latency for
+preprocessing and sentiment, and total drain time for storage, which has no
+output queue to time against. Rust may not regress past `--load-tolerance`
+(10% by default), and separately may not exceed an absolute floor
+(`QUALIFICATION_LOAD_LATENCY_FLOOR_MS`, 5 ms by default;
+`QUALIFICATION_LOAD_DURATION_FLOOR_SECONDS`, 2 s for storage), so a comparison
+of sub-millisecond numbers cannot fail on noise. Each runtime run also asserts
+every message was handled, the input queue drained to zero ready and zero
+unacknowledged, the dead-letter queue stayed empty, and, for storage, exact row
+count and zero duplicate accounting. Choose a `--load-rate` at or below the
+production rate: a worker that keeps up with a rate it can sustain passes, and
+one that cannot grows a backlog and fails on latency or drain time.
 
 The 24-hour observation gate is not a liveness-only check. Throughout the
 window it asserts the candidate container is running and that both the input
@@ -142,15 +169,34 @@ timestamp rather than the recorded fixture time, because the storage worker
 rolls up and prunes posts older than `POST_RETENTION_DAYS` (one day in the
 qualification topology) 60 seconds after startup and every 24 hours after that,
 and would otherwise archive the probes out of `posts` mid-window. Storage also
-asserts exact row count and zero duplicate accounting across all probes. Each
-run writes a JSON evidence artifact to
-`artifacts/worker-observation-<worker>.json`; retain it with the promotion
-record.
+asserts exact row count and zero duplicate accounting across all probes.
 
-Probe cadence and timeout are overridable for development with
+Every gate writes a JSON evidence record to `artifacts/` naming the candidate it
+exercised: `worker-replay-<worker>.json`, `worker-load-<worker>.json`, and
+`worker-observation-<worker>.json`. Each record carries the source commit and
+whether the working tree was dirty, the image reference and image ID of the
+runtime containers that actually ran, the host and platform, the measured
+result, and a `status` of `passed` or `failed`. A gate removes its record when it
+starts and writes one when it finishes either way, so a missing artifact means
+the run never completed rather than that it failed quietly, and a retained
+record with `status: failed` carries the error. Retain the records with the
+promotion record; a record with a missing revision or an unexpected image ID is
+not evidence that the current candidate passed.
+
+Cadence, thresholds, and output paths are overridable for development with
 `QUALIFICATION_OBSERVE_PROBE_INTERVAL` (seconds, default 300),
-`QUALIFICATION_OBSERVE_PROBE_TIMEOUT` (seconds, default 120), and
-`QUALIFICATION_OBSERVE_ARTIFACT` (output path).
+`QUALIFICATION_OBSERVE_PROBE_TIMEOUT` (seconds, default 120),
+`QUALIFICATION_LOAD_RATE` (messages per second, default 50),
+`QUALIFICATION_LOAD_P95_TOLERANCE` (default 0.10),
+`QUALIFICATION_OBSERVE_ARTIFACT`, `QUALIFICATION_REPLAY_ARTIFACT`, and
+`QUALIFICATION_LOAD_ARTIFACT` (output paths).
+
+`QUALIFICATION_PROJECT_NAME` runs a gate against an existing Compose project
+instead of a fresh one, so a host that already holds that project's images does
+not rebuild them. Reuse is only sound while the service source and
+`Dockerfile.rust` are unchanged since those images were built — confirm with
+`git log --since=<image date> -- crates/ preprocessing-service/ sentiment-service/
+storage-service/ Dockerfile.rust` before citing a reused image as evidence.
 
 ## Promotion and rollback gates
 
@@ -158,13 +204,14 @@ Workers are promoted one at a time in this order: preprocessing, sentiment,
 storage, social/news producers, market producer, global-events producer. Each
 worker must pass malformed, duplicate, retry, dead-letter, reconnect,
 publisher-confirm, unroutable-message, transient dependency, and shutdown
-requeue tests before a 1,000-message shadow and 24-hour observation.
+requeue tests before a 1,000-message shadow, a sustained load at or below the
+production rate, and a 24-hour observation.
 
 The API is promoted only after route parity, admin authorization and rollback,
 global-context calculations, browser smoke tests, and representative load
-tests pass. A p95 latency regression above 10% blocks promotion. After a
-48-hour API observation and a final 48-hour full-stack soak, Compose may be
-changed to make Rust the default.
+tests pass. A p95 latency regression above 10% blocks promotion, as it does for
+the worker load gate. After a 48-hour API observation and a final 48-hour
+full-stack soak, Compose may be changed to make Rust the default.
 
 At every stage the default Compose file is the one-command Python rollback.
 Message loss, unexplained DLQ growth, row-count divergence, stale sources,

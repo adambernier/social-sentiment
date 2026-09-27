@@ -418,15 +418,22 @@ For black-box qualification of the Rust pipeline workers (`preprocessing`, `sent
 # 1,000-message recorded replay parity gate
 python scripts/qualify_worker.py preprocessing --mode replay --replay-count 1000 --build
 
+# Sustained-load gate (Python/Rust p95 latency and throughput under load)
+python scripts/qualify_worker.py preprocessing --mode load
+
 # 24-hour observation stability gate
 python scripts/qualify_worker.py preprocessing --mode observe --observe-hours 24
 
-# Full worker promotion gate (smoke, faults, replay, observation)
+# Full worker promotion gate (smoke, faults, replay, load, observation)
 python scripts/qualify_worker.py preprocessing --mode promotion
 
 # Producer fixture parity gate
 python scripts/qualify_producer.py bluesky --mode fixtures
 ```
+
+Each gate writes a JSON evidence record to `artifacts/` naming the source commit,
+the container images, and the host it exercised, alongside the measured result
+and a `passed`/`failed` status.
 
 See [docs/rust-backend-migration.md](docs/rust-backend-migration.md) for full worker promotion and release gate documentation.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import subprocess  # nosec B404 - fixed docker/compose command vectors only
@@ -12,7 +13,7 @@ import time
 import uuid
 import warnings
 from base64 import b64encode
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -178,10 +179,34 @@ class Broker:
             await message.ack()
             return received
 
+    async def consume(self, queue_name: str) -> AsyncIterator[ReceivedMessage]:
+        """Stream messages as they arrive, acking after the caller handles each.
+
+        Latency gates cannot use `receive`, whose empty-queue poll adds up to
+        0.1s per message; a push consumer timestamps arrival instead.
+        """
+        queue = await self._channel().declare_queue(queue_name, passive=True)
+        async with queue.iterator() as messages:
+            async for message in messages:
+                yield ReceivedMessage(
+                    body=message.body,
+                    headers=dict(message.headers or {}),
+                    redelivered=bool(message.redelivered),
+                )
+                await message.ack()
+
 
 class QualificationStack:
     def __init__(self, *, project_name: str | None = None):
-        self.project_name = project_name or f"worker-qualification-{uuid.uuid4().hex[:10]}"
+        # A run normally owns a fresh project so its containers, volumes, and
+        # queue names cannot collide with anything else. Naming one explicitly,
+        # or through QUALIFICATION_PROJECT_NAME, reuses that project's already
+        # built images instead of rebuilding them.
+        self.project_name = (
+            project_name
+            or os.getenv("QUALIFICATION_PROJECT_NAME")
+            or f"worker-qualification-{uuid.uuid4().hex[:10]}"
+        )
         self._started = False
 
     def _compose_command(self, *args: str) -> list[str]:
@@ -413,6 +438,36 @@ class QualificationStack:
             check=False,
         ).stdout
 
+    def container_image_provenance(
+        self,
+        services: Sequence[str],
+    ) -> dict[str, dict[str, str]]:
+        """Image reference and immutable image ID for each named service.
+
+        Captured from the project's own containers, so the record names the
+        image that actually ran rather than the one a rebuild would produce.
+        """
+        completed = self._compose("ps", "--all", "--format", "json", check=False)
+        provenance: dict[str, dict[str, str]] = {}
+        for line in completed.stdout.splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            service = str(row.get("Service") or "")
+            if service not in services:
+                continue
+            match = re.search(
+                r"com\.docker\.compose\.image=([^,]*)",
+                str(row.get("Labels") or ""),
+            )
+            provenance[service] = {
+                "image": str(row.get("Image") or ""),
+                "image_id": match.group(1) if match else "",
+                "state": str(row.get("State") or ""),
+            }
+        return provenance
+
     def queue_state(self, queue_name: str) -> tuple[int, int]:
         authorization = b64encode(b"qualification:qualification").decode()
         request = Request(
@@ -557,6 +612,12 @@ class QualificationStack:
             rows = cursor.fetchall()
         return [_json_normalize(dict(row)) for row in rows]
 
+    def post_count(self) -> int:
+        """Cheap row count for gates that poll storage progress under load."""
+        with psycopg.connect(self.database_dsn) as connection:
+            row = connection.execute("SELECT COUNT(*) FROM posts").fetchone()
+        return int(row[0]) if row is not None else 0
+
     def duplicate_count(self) -> int:
         with psycopg.connect(self.database_dsn) as connection:
             value = connection.execute(
@@ -667,6 +728,49 @@ def assert_compatible_dlq_headers(
         assert int(headers["x-processing-attempt"]) == expected_attempt
         assert headers["x-last-error-type"]
         assert headers["x-last-error"]
+
+
+def latency_summary(samples: Sequence[float]) -> dict[str, Any]:
+    """Millisecond end-to-end latency percentiles for one runtime's messages."""
+    ordered = sorted(samples)
+    if not ordered:
+        raise ValueError("no latency samples were recorded")
+    return {
+        "count": len(ordered),
+        "min_ms": ordered[0] * 1000,
+        "mean_ms": sum(ordered) / len(ordered) * 1000,
+        "p50_ms": _percentile(ordered, 50) * 1000,
+        "p95_ms": _percentile(ordered, 95) * 1000,
+        "p99_ms": _percentile(ordered, 99) * 1000,
+        "max_ms": ordered[-1] * 1000,
+    }
+
+
+def _percentile(ordered: Sequence[float], percentile: float) -> float:
+    """Nearest-rank percentile over an already sorted sample."""
+    rank = math.ceil(percentile / 100 * len(ordered))
+    return ordered[min(max(rank, 1), len(ordered)) - 1]
+
+
+def assert_regression_within_tolerance(
+    reference: float,
+    candidate: float,
+    *,
+    tolerance: float,
+    floor: float,
+    label: str,
+) -> None:
+    """Fail when the candidate regresses past the tolerance and the floor.
+
+    The absolute floor keeps a gate that compares sub-millisecond numbers from
+    failing on noise, where a large relative delta is still a trivial one.
+    """
+    allowed = reference * (1 + tolerance)
+    assert candidate <= allowed or candidate <= floor, (
+        f"{label} regressed: candidate {candidate:.3f} exceeds reference "
+        f"{reference:.3f} by more than {tolerance:.0%} (allowed {allowed:.3f}, "
+        f"floor {floor:.3f})"
+    )
 
 
 def _json_normalize(value: Any) -> Any:

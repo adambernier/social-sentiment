@@ -1,13 +1,23 @@
+import json
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from tests.worker_qualification import evidence
+from tests.worker_qualification.evidence import (
+    artifact_path,
+    evidence_artifact,
+    git_revision,
+)
 from tests.worker_qualification.harness import (
     QualificationStack,
     QueueNames,
     assert_compatible_dlq_headers,
+    assert_regression_within_tolerance,
     assert_worker_payload_parity,
+    latency_summary,
     normalize_worker_payload,
 )
 
@@ -91,3 +101,143 @@ def test_direct_queue_state_uses_exact_broker_counts(monkeypatch):
     )
 
     assert stack.direct_queue_state("qualification.input") == (0, 1)
+
+
+def test_latency_summary_reports_nearest_rank_percentiles():
+    summary = latency_summary([0.040, 0.010, 0.030, 0.020])
+
+    assert summary["count"] == 4
+    assert summary["min_ms"] == pytest.approx(10.0)
+    assert summary["mean_ms"] == pytest.approx(25.0)
+    assert summary["p50_ms"] == pytest.approx(20.0)
+    assert summary["p95_ms"] == pytest.approx(40.0)
+    assert summary["p99_ms"] == pytest.approx(40.0)
+    assert summary["max_ms"] == pytest.approx(40.0)
+
+
+def test_latency_summary_rejects_an_empty_sample():
+    with pytest.raises(ValueError, match="no latency samples"):
+        latency_summary([])
+
+
+def test_regression_tolerance_blocks_only_material_regressions():
+    assert_regression_within_tolerance(
+        100.0, 109.0, tolerance=0.10, floor=5.0, label="p95"
+    )
+
+    with pytest.raises(AssertionError, match="p95 regressed"):
+        assert_regression_within_tolerance(
+            100.0, 111.0, tolerance=0.10, floor=5.0, label="p95"
+        )
+
+    # Below the floor a large relative delta is still a trivial absolute one.
+    assert_regression_within_tolerance(
+        1.0, 3.0, tolerance=0.10, floor=5.0, label="p95"
+    )
+
+
+def test_container_image_provenance_names_the_image_that_ran(monkeypatch):
+    stack = QualificationStack(project_name="provenance-test")
+    rows = "\n".join(
+        json.dumps(row)
+        for row in (
+            {
+                "Service": "rust-preprocessing",
+                "Image": "qualification-abc-rust-preprocessing:latest",
+                "State": "exited",
+                "Labels": (
+                    "com.docker.compose.project=qualification-abc,"
+                    "com.docker.compose.image=sha256:cafe,"
+                    "com.docker.compose.service=rust-preprocessing"
+                ),
+            },
+            {
+                "Service": "postgres",
+                "Image": "postgres:15",
+                "State": "running",
+                "Labels": "com.docker.compose.image=sha256:beef",
+            },
+        )
+    )
+    monkeypatch.setattr(
+        stack,
+        "_compose",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout=rows),
+    )
+
+    assert stack.container_image_provenance(["rust-preprocessing"]) == {
+        "rust-preprocessing": {
+            "image": "qualification-abc-rust-preprocessing:latest",
+            "image_id": "sha256:cafe",
+            "state": "exited",
+        }
+    }
+
+
+def test_artifact_path_defaults_per_gate_and_honours_overrides(monkeypatch):
+    monkeypatch.delenv("QUALIFICATION_LOAD_ARTIFACT", raising=False)
+
+    assert artifact_path("load", "sentiment") == Path(
+        "artifacts/worker-load-sentiment.json"
+    )
+    assert artifact_path("replay", "storage") == Path(
+        "artifacts/worker-replay-storage.json"
+    )
+
+    monkeypatch.setenv("QUALIFICATION_LOAD_ARTIFACT", "/tmp/load.json")
+    assert artifact_path("load", "sentiment") == Path("/tmp/load.json")
+
+    with pytest.raises(ValueError, match="unknown evidence artifact kind"):
+        artifact_path("promotion", "sentiment")
+
+
+def test_evidence_artifact_records_a_pass_and_drops_stale_evidence(tmp_path):
+    path = tmp_path / "worker-load-preprocessing.json"
+    path.write_text(json.dumps({"status": "passed", "messages": 1}))
+
+    with evidence_artifact(path, {"gate": "load", "worker": "preprocessing"}) as record:
+        record["messages"] = 2000
+
+    written = json.loads(path.read_text())
+    assert written["status"] == "passed"
+    assert written["messages"] == 2000
+    assert written["finished_at"] >= written["started_at"]
+
+
+def test_evidence_artifact_retains_a_failed_gate(tmp_path):
+    path = tmp_path / "worker-load-sentiment.json"
+
+    with pytest.raises(RuntimeError, match="p95 regressed"):
+        with evidence_artifact(path, {"gate": "load"}) as record:
+            record["candidate"] = {"latency": {"p95_ms": 90.0}}
+            raise RuntimeError("p95 regressed")
+
+    written = json.loads(path.read_text())
+    assert written["status"] == "failed"
+    assert "p95 regressed" in written["error"]
+    assert written["candidate"] == {"latency": {"p95_ms": 90.0}}
+
+
+def test_stack_project_name_precedence(monkeypatch):
+    monkeypatch.delenv("QUALIFICATION_PROJECT_NAME", raising=False)
+    generated = QualificationStack().project_name
+    assert generated.startswith("worker-qualification-")
+    assert QualificationStack().project_name != generated
+
+    monkeypatch.setenv("QUALIFICATION_PROJECT_NAME", "worker-qualification-reused")
+    assert (
+        QualificationStack().project_name == "worker-qualification-reused"
+    )
+    assert (
+        QualificationStack(project_name="worker-qualification-explicit").project_name
+        == "worker-qualification-explicit"
+    )
+
+
+def test_git_revision_reports_an_unavailable_checkout(monkeypatch):
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise OSError("git is not installed")
+
+    monkeypatch.setattr(evidence.subprocess, "run", explode)
+
+    assert git_revision() == {"commit": None, "dirty": None}
