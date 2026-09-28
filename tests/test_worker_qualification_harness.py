@@ -12,12 +12,14 @@ from tests.worker_qualification.evidence import (
     git_revision,
 )
 from tests.worker_qualification.harness import (
+    PROBABILITY_TOLERANCE,
     QualificationStack,
     QueueNames,
     assert_compatible_dlq_headers,
     assert_regression_within_tolerance,
     assert_worker_payload_parity,
     latency_summary,
+    margin_record,
     normalize_worker_payload,
 )
 
@@ -66,11 +68,27 @@ def test_sentiment_parity_enforces_labels_and_probability_tolerance():
     candidate["scores"]["positive"] = 0.77
     candidate["scores"]["neutral"] = 0.18
 
-    assert_worker_payload_parity("sentiment", reference, candidate)
+    # The largest delta across labels, which the replay gate records as its
+    # margin, not the first one it happened to compare.
+    assert assert_worker_payload_parity("sentiment", reference, candidate) == (
+        pytest.approx(0.03)
+    )
 
     candidate["scores"]["positive"] = 0.70
     with pytest.raises(AssertionError, match="above 0.040000"):
         assert_worker_payload_parity("sentiment", reference, candidate)
+
+
+def test_exact_payload_parity_reports_no_delta():
+    reference = {"id": "post-1", "topic_model_hash": "same-hash"}
+    candidate = deepcopy(reference)
+    candidate["cleaned_at"] = "rust-time"
+
+    assert assert_worker_payload_parity("preprocessing", reference, candidate) == 0.0
+
+    candidate["topic_model_hash"] = "other-hash"
+    with pytest.raises(AssertionError):
+        assert_worker_payload_parity("preprocessing", reference, candidate)
 
 
 def test_dlq_header_contract_includes_retry_history():
@@ -121,19 +139,51 @@ def test_latency_summary_rejects_an_empty_sample():
 
 
 def test_regression_tolerance_blocks_only_material_regressions():
-    assert_regression_within_tolerance(
-        100.0, 109.0, tolerance=0.10, floor=5.0, label="p95"
+    within = assert_regression_within_tolerance(
+        100.0, 109.0, metric="p95_ms", tolerance=0.10, floor=5.0, label="p95"
     )
+
+    assert within == {
+        "metric": "p95_ms",
+        "observed": 109.0,
+        "limit": 110.0,
+        "headroom": 1.0,
+        "reference": 100.0,
+        "tolerance": 0.10,
+        "allowed": 110.0,
+        "floor": 5.0,
+        "bound_by": "tolerance",
+    }
 
     with pytest.raises(AssertionError, match="p95 regressed"):
         assert_regression_within_tolerance(
-            100.0, 111.0, tolerance=0.10, floor=5.0, label="p95"
+            100.0, 111.0, metric="p95_ms", tolerance=0.10, floor=5.0, label="p95"
         )
 
-    # Below the floor a large relative delta is still a trivial absolute one.
-    assert_regression_within_tolerance(
-        1.0, 3.0, tolerance=0.10, floor=5.0, label="p95"
+    # Below the floor a large relative delta is still a trivial absolute one, so
+    # the margin reports the floor as the binding limit rather than a headroom
+    # that would read as negative in a passing record.
+    trivial = assert_regression_within_tolerance(
+        1.0, 3.0, metric="p95_ms", tolerance=0.10, floor=5.0, label="p95"
     )
+
+    assert trivial["bound_by"] == "floor"
+    assert trivial["limit"] == 5.0
+    assert trivial["headroom"] == 2.0
+
+
+def test_margin_record_states_the_headroom_a_gate_passed_by():
+    exact = margin_record("max_normalized_payload_delta", 0.0, 0.0)
+
+    assert exact == {
+        "metric": "max_normalized_payload_delta",
+        "observed": 0.0,
+        "limit": 0.0,
+        "headroom": 0.0,
+    }
+    assert margin_record(
+        "max_probability_delta", 0.014, PROBABILITY_TOLERANCE
+    )["headroom"] == pytest.approx(PROBABILITY_TOLERANCE - 0.014)
 
 
 def test_container_image_provenance_names_the_image_that_ran(monkeypatch):

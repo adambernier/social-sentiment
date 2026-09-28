@@ -432,8 +432,8 @@ python scripts/qualify_producer.py bluesky --mode fixtures
 ```
 
 Each gate writes a JSON evidence record to `artifacts/` naming the source commit,
-the container images, and the host it exercised, alongside the measured result
-and a `passed`/`failed` status.
+the container images, and the host it exercised, alongside the measured result,
+the margin it passed by, and a `passed`/`failed` status.
 
 See [docs/rust-backend-migration.md](docs/rust-backend-migration.md) for full worker promotion and release gate documentation.
 

@@ -36,6 +36,11 @@ Runtime = Literal["python", "rust"]
 INFRA_ATTEMPTS = 2
 DIAGNOSTIC_LOG_TAIL = "100"
 
+# The sentiment parity tolerance: a candidate may differ from the reference by at
+# most this probability delta. The gate records it alongside the largest delta it
+# observed, so a passed record states its margin rather than only its verdict.
+PROBABILITY_TOLERANCE = 0.04
+
 INPUT_QUEUE = {
     "preprocessing": "raw",
     "sentiment": "clean",
@@ -692,25 +697,34 @@ def assert_worker_payload_parity(
     python_payload: Mapping[str, Any],
     rust_payload: Mapping[str, Any],
     *,
-    probability_tolerance: float = 0.04,
-) -> None:
+    probability_tolerance: float = PROBABILITY_TOLERANCE,
+) -> float:
+    """Fail unless the candidate payload matches the reference; return the margin.
+
+    The returned float is the largest probability delta observed, or 0.0 for a
+    worker whose comparison is exact normalized-payload equality, so a gate can
+    record how much room the candidate had rather than only that it passed.
+    """
     python_normalized = normalize_worker_payload(worker, python_payload)
     rust_normalized = normalize_worker_payload(worker, rust_payload)
     if worker != "sentiment":
         assert rust_normalized == python_normalized
-        return
+        return 0.0
 
     python_scores = python_normalized.pop("scores")
     rust_scores = rust_normalized.pop("scores")
     assert rust_normalized == python_normalized
     assert rust_payload["sentiment"] == python_payload["sentiment"]
     assert set(rust_scores) == set(python_scores)
+    largest = 0.0
     for label, python_probability in python_scores.items():
         difference = abs(float(rust_scores[label]) - float(python_probability))
         assert difference <= probability_tolerance, (
             f"{label} probability differs by {difference:.6f}, "
             f"above {probability_tolerance:.6f}"
         )
+        largest = max(largest, difference)
+    return largest
 
 
 def assert_compatible_dlq_headers(
@@ -752,24 +766,60 @@ def _percentile(ordered: Sequence[float], percentile: float) -> float:
     return ordered[min(max(rank, 1), len(ordered)) - 1]
 
 
+def margin_record(
+    metric: str,
+    observed: float,
+    limit: float,
+    **extra: Any,
+) -> dict[str, Any]:
+    """How much room one gate's measured value had under the limit it must hold.
+
+    `observed` is the candidate's measured value or deviation, `limit` the
+    largest one that still passes, and `headroom` the difference. A gate records
+    this so a passed artifact states the margin it passed by; a limit of 0.0 with
+    a headroom of 0.0 means the criterion is exact equality, which admits none.
+    """
+    return {
+        "metric": metric,
+        "observed": round(observed, 6),
+        "limit": round(limit, 6),
+        "headroom": round(limit - observed, 6),
+        **extra,
+    }
+
+
 def assert_regression_within_tolerance(
     reference: float,
     candidate: float,
     *,
+    metric: str,
     tolerance: float,
     floor: float,
     label: str,
-) -> None:
+) -> dict[str, Any]:
     """Fail when the candidate regresses past the tolerance and the floor.
 
     The absolute floor keeps a gate that compares sub-millisecond numbers from
-    failing on noise, where a large relative delta is still a trivial one.
+    failing on noise, where a large relative delta is still a trivial one. Both
+    limits pass the gate, so the returned margin reports whichever one bound the
+    result instead of a headroom that could be negative in a passing record.
     """
     allowed = reference * (1 + tolerance)
-    assert candidate <= allowed or candidate <= floor, (
+    limit = max(allowed, floor)
+    assert candidate <= limit, (
         f"{label} regressed: candidate {candidate:.3f} exceeds reference "
         f"{reference:.3f} by more than {tolerance:.0%} (allowed {allowed:.3f}, "
         f"floor {floor:.3f})"
+    )
+    return margin_record(
+        metric,
+        candidate,
+        limit,
+        reference=round(reference, 6),
+        tolerance=tolerance,
+        allowed=round(allowed, 6),
+        floor=floor,
+        bound_by="floor" if floor > allowed else "tolerance",
     )
 
 

@@ -174,14 +174,30 @@ asserts exact row count and zero duplicate accounting across all probes.
 Every gate writes a JSON evidence record to `artifacts/` naming the candidate it
 exercised: `worker-replay-<worker>.json`, `worker-load-<worker>.json`, and
 `worker-observation-<worker>.json`. Each record carries the source commit and
-whether the working tree was dirty, the image reference and image ID of the
-runtime containers that actually ran, the host and platform, the measured
-result, and a `status` of `passed` or `failed`. A gate removes its record when it
-starts and writes one when it finishes either way, so a missing artifact means
-the run never completed rather than that it failed quietly, and a retained
-record with `status: failed` carries the error. Retain the records with the
-promotion record; a record with a missing revision or an unexpected image ID is
-not evidence that the current candidate passed.
+whether the working tree was dirty, the Compose project that ran the gate, the
+image reference and image ID of the runtime containers that actually ran, the
+host and platform, the measured result, and a `status` of `passed` or `failed`.
+A gate removes its record when it starts and writes one when it finishes either
+way, so a missing artifact means the run never completed rather than that it
+failed quietly, and a retained record with `status: failed` carries the error.
+Retain the records with the promotion record; a record with a missing revision
+or an unexpected image ID is not evidence that the current candidate passed.
+
+The project name belongs in that evidence because it is what separates a fresh
+build from a reused one: a run given `QUALIFICATION_PROJECT_NAME` reports that
+name instead of a random one, and its images are evidence only while the service
+source is unchanged since they were built.
+
+The replay and load records also carry a `margin`, the room the candidate had
+under the limit it had to hold: the metric, the value observed, the limit, and
+the headroom between them. Replay reports the largest probability delta it
+measured against the `0.04` tolerance, or, for the workers compared by exact
+payload equality, a delta of zero against a limit that admits no deviation at
+all. Load reports the candidate's p95 latency, or storage drain time, against
+whichever of the tolerance and the absolute floor was binding, since either one
+passes the gate. A zero headroom therefore means the candidate passed exactly,
+not that it passed comfortably. The observation gate has no margin: it passes on
+liveness and probe evidence rather than against a threshold.
 
 Cadence, thresholds, and output paths are overridable for development with
 `QUALIFICATION_OBSERVE_PROBE_INTERVAL` (seconds, default 300),

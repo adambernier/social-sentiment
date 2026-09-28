@@ -14,6 +14,7 @@ import pytest
 
 from .evidence import artifact_path, evidence_artifact, git_revision, host_platform
 from .harness import (
+    PROBABILITY_TOLERANCE,
     Broker,
     QualificationStack,
     QueueNames,
@@ -22,6 +23,7 @@ from .harness import (
     assert_regression_within_tolerance,
     assert_worker_payload_parity,
     latency_summary,
+    margin_record,
     running_worker,
 )
 
@@ -76,13 +78,26 @@ def _current_timestamp() -> str:
     )
 
 
-def _evidence_record(worker: Worker, gate: str, service: str) -> dict[str, Any]:
-    """Seed every gate record with the candidate it is about to exercise."""
+def _evidence_record(
+    worker: Worker,
+    gate: str,
+    service: str,
+    project_name: str,
+) -> dict[str, Any]:
+    """Seed every gate record with the candidate it is about to exercise.
+
+    The Compose project name is recorded because it is the only thing that
+    distinguishes images built from this revision from images a reused project
+    left behind: a run that names one reuses its images instead of rebuilding
+    (`QUALIFICATION_PROJECT_NAME`), and that reuse is only sound while the
+    service source is unchanged since they were built.
+    """
     return {
         "gate": gate,
         "worker": worker,
         "runtime": "rust",
         "service": service,
+        "project_name": project_name,
         "revision": git_revision(),
         "host": host_platform(),
     }
@@ -152,7 +167,12 @@ async def test_recorded_replay_gate(
         qualification_fixtures[worker]["valid"],
         count,
     )
-    record = _evidence_record(worker, "replay", f"rust-{worker}")
+    record = _evidence_record(
+        worker,
+        "replay",
+        f"rust-{worker}",
+        qualification_stack.project_name,
+    )
     record["message_count"] = count
     record["comparison"] = "python_vs_rust"
     with evidence_artifact(artifact_path("replay", worker), record) as evidence:
@@ -176,6 +196,12 @@ async def test_recorded_replay_gate(
                 "rows": len(rust_state),
                 "duplicate_rows": rust_duplicates,
             }
+            evidence["margin"] = margin_record(
+                "persisted_row_difference",
+                0.0,
+                0.0,
+                criterion="candidate rows and duplicate accounting equal the reference",
+            )
         else:
             python_outputs = await _output_replay(
                 qualification_stack,
@@ -190,16 +216,36 @@ async def test_recorded_replay_gate(
                 payloads,
             )
             assert python_outputs.keys() == rust_outputs.keys()
+            largest_delta = 0.0
             for post_id, python_payload in python_outputs.items():
-                assert_worker_payload_parity(
-                    worker,
-                    python_payload,
-                    rust_outputs[post_id],
+                largest_delta = max(
+                    largest_delta,
+                    assert_worker_payload_parity(
+                        worker,
+                        python_payload,
+                        rust_outputs[post_id],
+                    ),
                 )
             evidence["reference"] = {"messages": len(python_outputs)}
             evidence["candidate"] = {"messages": len(rust_outputs)}
             evidence["payloads_compared"] = len(python_outputs)
             evidence["mismatches"] = 0
+            if worker == "sentiment":
+                evidence["margin"] = margin_record(
+                    "max_probability_delta",
+                    largest_delta,
+                    PROBABILITY_TOLERANCE,
+                    criterion="every label within the probability tolerance",
+                )
+            else:
+                # The comparison is exact equality, so the delta is zero by
+                # construction and the limit admits no deviation at all.
+                evidence["margin"] = margin_record(
+                    "max_normalized_payload_delta",
+                    largest_delta,
+                    0.0,
+                    criterion="every normalized payload equal to the reference",
+                )
         evidence["images"] = qualification_stack.container_image_provenance(
             [f"python-{worker}", f"rust-{worker}"]
         )
@@ -388,7 +434,12 @@ async def test_sustained_load_gate(
         for payload in payloads:
             payload["timestamp"] = _current_timestamp()
 
-    record = _evidence_record(worker, "load", f"rust-{worker}")
+    record = _evidence_record(
+        worker,
+        "load",
+        f"rust-{worker}",
+        qualification_stack.project_name,
+    )
     record["message_count"] = count
     record["publish_rate_per_second"] = rate
     record["thresholds"] = {
@@ -419,17 +470,19 @@ async def test_sustained_load_gate(
             [f"python-{worker}", f"rust-{worker}"]
         )
         if worker == "storage":
-            assert_regression_within_tolerance(
+            evidence["margin"] = assert_regression_within_tolerance(
                 reference["drain_seconds"],
                 candidate["drain_seconds"],
+                metric="drain_seconds",
                 tolerance=tolerance,
                 floor=duration_floor_seconds,
                 label=f"{worker} drain time",
             )
         else:
-            assert_regression_within_tolerance(
+            evidence["margin"] = assert_regression_within_tolerance(
                 reference["latency"]["p95_ms"],
                 candidate["latency"]["p95_ms"],
+                metric="p95_ms",
                 tolerance=tolerance,
                 floor=latency_floor_ms,
                 label=f"{worker} p95 latency",
@@ -608,7 +661,12 @@ async def test_rust_observation_gate(
         qualification_stack.truncate_worker_state()
     service = f"rust-{worker}"
 
-    record = _evidence_record(worker, "observation", service)
+    record = _evidence_record(
+        worker,
+        "observation",
+        service,
+        qualification_stack.project_name,
+    )
     record["duration_hours"] = duration / 3600
     with evidence_artifact(
         artifact_path("observation", worker),
