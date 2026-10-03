@@ -49,10 +49,11 @@ the `rust-api` profile and never replaces the Python API implicitly.
   host that each qualification run exercised.
 - [x] Sustained-load worker gate comparing Python and Rust p95 latency and
   storage drain time under the same publish rate.
-- [ ] Worker replay parity gate: 1,000-message Python/Rust comparison for
+- [x] Worker replay parity gate: 1,000-message Python/Rust comparison for
   preprocessing, sentiment, and storage.
-- [ ] Worker observation gate: 24-hour stability run for preprocessing,
-  sentiment, and storage.
+- [x] Worker observation gate: 24-hour stability runs for preprocessing and
+  sentiment.
+- [ ] Worker observation gate: 24-hour stability run for storage.
 - [ ] Producer shadow parity gate: 1,000-record Python/Rust comparison for each
   of the seven producers.
 - [ ] Producer observation gate: 24-hour stability run for each of the seven
