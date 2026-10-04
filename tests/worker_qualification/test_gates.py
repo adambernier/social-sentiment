@@ -603,8 +603,12 @@ async def _observation_window(
         now = loop.time()
         if now >= next_sample:
             assert stack.service_is_running(service)
-            assert stack.queue_state(input_queue) == (0, 0)
-            assert stack.queue_state(dead_letter_queue) == (0, 0), (
+            # Read exact broker counts: the management-plugin API lags the
+            # broker's actual state, so a sample taken just after the worker
+            # acks a probe can read a stale unacknowledged count and fail the
+            # window on a message that is already gone.
+            assert stack.direct_queue_state(input_queue) == (0, 0)
+            assert stack.direct_queue_state(dead_letter_queue) == (0, 0), (
                 "the observation window dead-lettered messages"
             )
             samples += 1
