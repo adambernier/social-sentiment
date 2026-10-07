@@ -16,6 +16,7 @@ from shared.config import (
     RABBIT_PASS,
     RABBIT_PORT,
     RABBIT_USER,
+    get_env,
     get_env_int,
 )
 from shared.metrics import (
@@ -36,6 +37,9 @@ logger = logging.getLogger("stocktwits-producer")
 
 POLL_INTERVAL = get_env_int("STOCKTWITS_POLL_INTERVAL", 900)
 MAX_BACKOFF = get_env_int("STOCKTWITS_MAX_BACKOFF", 3600)
+# Overridable for replay-based shadow captures (scripts/provider_replay.py);
+# the default is the production public API.
+STOCKTWITS_API_BASE = get_env("STOCKTWITS_API_BASE", "https://api.stocktwits.com")
 # Request shaping: cap in-flight requests and pace how fast new ones start so a
 # large symbol list doesn't fire one big burst per cycle. Defaults preserve
 # current behavior at small N (60/min easily covers ~dozens of symbols per 60s
@@ -45,7 +49,7 @@ RATE_PER_MIN = get_env_int("STOCKTWITS_RATE_PER_MIN", 60)
 
 async def fetch_symbol(symbol: str, client: httpx.AsyncClient, channel: aio_pika.Channel, last_seen_ids: dict) -> bool:
     try:
-        url = f"https://api.stocktwits.com/api/2/streams/symbol/{symbol}.json"
+        url = f"{STOCKTWITS_API_BASE.rstrip('/')}/api/2/streams/symbol/{symbol}.json"
         params_api = {}
         if last_seen_ids[symbol] > 0:
             params_api["since"] = last_seen_ids[symbol]

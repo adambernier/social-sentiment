@@ -45,6 +45,8 @@ the `rust-api` profile and never replaces the Python API implicitly.
 - [x] Independently selectable non-root producer targets in the Rust Compose
   overlay; base Compose remains the Python default and rollback.
 - [x] Isolated producer capture comparison and timed observation tooling.
+- [x] Provider session record/replay and shadow-queue capture tooling for the
+  search-feed producers.
 - [x] Gate evidence records naming the source revision, container images, and
   host that each qualification run exercised.
 - [x] Sustained-load worker gate comparing Python and Rust p95 latency and
@@ -275,6 +277,65 @@ python scripts/qualify_producer.py bluesky --mode shadow \
 Market/global-event table captures use their actual primary-key columns via
 `--key-fields`, for example
 `instrument_key,interval,starts_at` or `event_id,symbol,rule_id`.
+
+### Search-feed shadow captures
+
+The search-feed producers (Bluesky, StockTwits, Reddit) poll mutable,
+cursor-driven feeds: engagement counters drift between fetches and the two
+runtimes' poll windows race, so two independent live runs cannot produce the
+identical record set the shadow comparator requires. Record one provider
+session and replay it to each runtime, then drain each runtime's isolated
+output queue:
+
+1. Record a session, taking the Python reference capture in the same pass.
+   `provider_replay.py record` forwards every provider request to the live
+   upstream and appends the exchange to the session:
+
+   ```bash
+   python scripts/provider_replay.py record --provider bluesky \
+     --session artifacts/bluesky-session.jsonl --port 8611
+   BLUESKY_API_BASE=http://127.0.0.1:8611 \
+   QUEUE_RAW_POSTS=shadow.bluesky.python python bluesky-producer/main.py
+   python scripts/capture_shadow_queue.py --queue shadow.bluesky.python \
+     --count 1000 --output artifacts/bluesky-python.jsonl
+   ```
+
+2. Replay the session to the Rust candidate with a fresh replay server (each
+   server serves the session from the beginning):
+
+   ```bash
+   python scripts/provider_replay.py replay \
+     --session artifacts/bluesky-session.jsonl --port 8611
+   BLUESKY_API_BASE=http://127.0.0.1:8611 \
+   QUEUE_RAW_POSTS=shadow.bluesky.rust \
+     cargo run --locked --release -p social-news-producer --bin producer-bluesky
+   python scripts/capture_shadow_queue.py --queue shadow.bluesky.rust \
+     --count 1000 --output artifacts/bluesky-rust.jsonl
+   ```
+
+3. Compare as for any capture:
+
+   ```bash
+   python scripts/qualify_producer.py bluesky --mode shadow \
+     --python-jsonl artifacts/bluesky-python.jsonl \
+     --rust-jsonl artifacts/bluesky-rust.jsonl --replay-count 1000
+   ```
+
+`BLUESKY_API_BASE`, `STOCKTWITS_API_BASE`, and `REDDIT_FEED_URL` are the
+overrides for the three search-feed producers; they default to the production
+endpoints, so an unset environment behaves exactly as before. Once a session's
+recorded exchanges are exhausted the replay server answers with a
+provider-shaped empty payload; a request for a key that was never recorded
+fails loudly. Run the two runtimes for one provider sequentially or on
+separate hosts: they bind the same per-provider metrics port, and whichever
+loses the bind only logs the failure. Sessions and captures belong under
+`artifacts/` (gitignored) with the promotion record; add `--host 0.0.0.0` and
+a host-reachable address (for example `host.docker.internal`) when the
+runtimes run in containers.
+
+`tests/test_capture_shadow_queue_integration.py` exercises the capture tool
+end to end against an isolated broker when `SHADOW_CAPTURE_BROKER_URL` is
+set.
 
 The timed gate is intentionally separate and defaults to 24 hours. It samples
 both metrics endpoints into a reviewable JSON artifact; pair it with isolated

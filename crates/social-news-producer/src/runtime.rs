@@ -26,6 +26,12 @@ use crate::{adapters, publish_then_commit, PendingUnit};
 
 const REDDIT_FEED: &str = "https://www.reddit.com/r/wallstreetbets+stocks+investing+SecurityAnalysis+options+StockMarket+semiconductors+Spacestocks/comments.json?limit=100";
 
+/// Reddit feed URL, overridable for replay-based shadow captures
+/// (`scripts/provider_replay.py`); the default is the production feed.
+fn reddit_feed() -> String {
+    env::var("REDDIT_FEED_URL").unwrap_or_else(|_| REDDIT_FEED.to_owned())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     Bluesky,
@@ -242,12 +248,22 @@ async fn poll(
     let mut outcomes = Vec::new();
     match provider {
         Provider::Bluesky => {
+            // Overridable for replay-based shadow captures; default is the
+            // production public API.
+            let base =
+                env::var("BLUESKY_API_BASE").unwrap_or_else(|_| "https://api.bsky.app".to_owned());
+            let url = format!(
+                "{}/xrpc/app.bsky.feed.searchPosts",
+                base.trim_end_matches('/')
+            );
             for symbol in symbols {
                 for term in symbol.search_terms() {
                     state.limiter.acquire().await;
-                    let mut request = client
-                        .get("https://api.bsky.app/xrpc/app.bsky.feed.searchPosts")
-                        .query(&[("q", term.as_str()), ("limit", "25"), ("sort", "latest")]);
+                    let mut request = client.get(url.as_str()).query(&[
+                        ("q", term.as_str()),
+                        ("limit", "25"),
+                        ("sort", "latest"),
+                    ]);
                     if let Some(since) = state.cursor.get(&term) {
                         request = request.query(&[("since", since)]);
                     }
@@ -269,13 +285,18 @@ async fn poll(
             }
         }
         Provider::Stocktwits => {
+            // Overridable for replay-based shadow captures; default is the
+            // production public API.
+            let base = env::var("STOCKTWITS_API_BASE")
+                .unwrap_or_else(|_| "https://api.stocktwits.com".to_owned());
             for symbol in due_symbols(symbols, &state.backoff) {
                 state.limiter.acquire().await;
                 let url = format!(
-                    "https://api.stocktwits.com/api/2/streams/symbol/{}.json",
+                    "{}/api/2/streams/symbol/{}.json",
+                    base.trim_end_matches('/'),
                     symbol.symbol
                 );
-                let mut request = client.get(url);
+                let mut request = client.get(url.as_str());
                 if let Some(since) = state
                     .cursor
                     .get(&symbol.symbol)
@@ -299,7 +320,7 @@ async fn poll(
         }
         Provider::Reddit => {
             state.limiter.acquire().await;
-            let response = client.get(REDDIT_FEED).send().await?;
+            let response = client.get(reddit_feed()).send().await?;
             outcomes.push(
                 parse_response(response, |bytes| {
                     adapters::reddit::parse(
@@ -420,7 +441,7 @@ where
 
 async fn reddit_startup_drain(client: &Client, cursor: &mut BoundedCursor<String, String>) {
     let result = async {
-        let response = client.get(REDDIT_FEED).send().await?.error_for_status()?;
+        let response = client.get(reddit_feed()).send().await?.error_for_status()?;
         let value: serde_json::Value = response.json().await?;
         if let Some(children) = value
             .pointer("/data/children")

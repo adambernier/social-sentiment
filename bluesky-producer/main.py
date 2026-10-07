@@ -18,6 +18,7 @@ from shared.config import (
     RABBIT_PASS,
     RABBIT_PORT,
     RABBIT_USER,
+    get_env,
     get_env_int,
 )
 from shared.metrics import (
@@ -37,6 +38,9 @@ logger = logging.getLogger("bluesky-producer")
 
 POLL_INTERVAL = get_env_int("BLUESKY_POLL_INTERVAL", 900)
 MAX_BACKOFF = get_env_int("BLUESKY_MAX_BACKOFF", 3600)
+# Overridable for replay-based shadow captures (scripts/provider_replay.py);
+# the default is the production public API.
+BLUESKY_API_BASE = get_env("BLUESKY_API_BASE", "https://api.bsky.app")
 
 
 def is_rate_limit_error(error: Exception) -> bool:
@@ -161,7 +165,7 @@ async def main():
     initialize_rate_limit_metrics("bluesky")
     start_metrics_server(8001)
     rabbit_url = f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/"
-    client = AsyncClient(base_url='https://api.bsky.app')
+    client = AsyncClient(base_url=BLUESKY_API_BASE)
     
     # Track latest post timestamp per SEARCH TERM to avoid duplicates during polling
     last_seen = {}

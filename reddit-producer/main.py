@@ -38,12 +38,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("reddit-producer")
 
-# Reddit JSON multireddit comments feed
+# Reddit JSON multireddit comments feed. Overridable for replay-based shadow
+# captures (scripts/provider_replay.py); the default is the production feed.
 SUBREDDITS = (
     "wallstreetbets+stocks+investing+SecurityAnalysis"
     "+options+StockMarket+semiconductors+Spacestocks"
 )
-FEED_URL = f"https://www.reddit.com/r/{SUBREDDITS}/comments.json?limit=100"
+FEED_URL = os.environ.get("REDDIT_FEED_URL") or (
+    f"https://www.reddit.com/r/{SUBREDDITS}/comments.json?limit=100"
+)
 POLL_INTERVAL = get_env_int("REDDIT_POLL_INTERVAL", 900)
 MAX_BACKOFF = get_env_int("REDDIT_MAX_BACKOFF", 3600)
 TRANSIENT_RETRY_INTERVAL = get_env_int("REDDIT_TRANSIENT_RETRY_INTERVAL", 60)
