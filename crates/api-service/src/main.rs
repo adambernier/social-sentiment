@@ -2110,7 +2110,13 @@ async fn handle_socket(mut socket: WebSocket, mut receiver: broadcast::Receiver<
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+    eprintln!("Starting Rust Axum api-service...");
     info!("Starting Rust Axum api-service...");
 
     let config = Config::from_env();
@@ -2165,6 +2171,7 @@ async fn main() -> Result<()> {
         .unwrap_or(8000);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    eprintln!("Listening on http://{}", addr);
     info!("Listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
