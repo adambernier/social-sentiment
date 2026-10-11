@@ -63,6 +63,12 @@ services:
       dockerfile: Dockerfile.rust
       target: rust-global-events-producer
 
+  api-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      target: rust-api
+
   # Side-by-side API candidate for contract, browser, and load gates. It does
   # not replace the Python api-service or change the frontend's API_URL.
   rust-api-service:
