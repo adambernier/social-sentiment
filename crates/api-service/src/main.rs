@@ -338,6 +338,7 @@ fn validated_hours(hours: Option<i64>) -> Result<i64, (StatusCode, String)> {
     Ok(hours)
 }
 
+#[allow(dead_code)]
 fn market_delta(quotes: &[MarketQuote]) -> Option<MarketDelta> {
     let first = quotes.first()?;
     let last = quotes.last()?;
@@ -385,6 +386,106 @@ async fn fetch_market_series(
             market_session: row.get("market_session"),
         })
         .collect())
+}
+
+async fn fetch_market_snapshot(
+    pool: &PgPool,
+    symbol: &str,
+) -> Result<Option<(MarketQuote, MarketDelta)>, (StatusCode, String)> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            latest.symbol,
+            latest.timestamp,
+            latest.price,
+            latest.volume,
+            latest.market_session,
+            COALESCE(
+                previous_session.price,
+                latest_session.price,
+                oldest.price,
+                latest.price
+            ) AS reference_price
+        FROM (
+            SELECT symbol, timestamp, price, volume, market_session
+            FROM stock_quotes
+            WHERE symbol = $1
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ) AS latest
+        LEFT JOIN LATERAL (
+            SELECT timestamp, price
+            FROM stock_quotes
+            WHERE symbol = $1
+              AND market_session = CASE WHEN RIGHT($1, 2) = '=F' THEN 'futures_open' ELSE 'regular' END
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ) AS latest_session ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT price
+            FROM stock_quotes
+            WHERE symbol = $1
+              AND market_session = CASE WHEN RIGHT($1, 2) = '=F' THEN 'futures_open' ELSE 'regular' END
+              AND timestamp < latest_session.timestamp - INTERVAL '12 hours'
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ) AS previous_session ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT price
+            FROM stock_quotes
+            WHERE symbol = $1
+            ORDER BY timestamp ASC
+            LIMIT 1
+        ) AS oldest ON latest_session.timestamp IS NULL
+        "#,
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .map_err(internal_error)?;
+
+    let Some(r) = row else {
+        return Ok(None);
+    };
+
+    let sym: String = r.get("symbol");
+    let timestamp: DateTime<Utc> = r.get("timestamp");
+    let price: f64 = r.get("price");
+    let volume: i64 = r.get("volume");
+    let market_session: String = r.get("market_session");
+    let reference_price: Option<f64> = r.get("reference_price");
+
+    let quote = MarketQuote {
+        symbol: sym.clone(),
+        timestamp,
+        price,
+        volume,
+        market_session,
+    };
+
+    let delta = reference_price.map(|ref_price| {
+        let abs_change = price - ref_price;
+        let pct_change = if ref_price != 0.0 {
+            abs_change / ref_price * 100.0
+        } else {
+            0.0
+        };
+        MarketDelta {
+            symbol: sym,
+            reference_price: ref_price,
+            latest_price: price,
+            pct_change,
+            abs_change,
+        }
+    });
+
+    Ok(Some((quote, delta.unwrap_or(MarketDelta {
+        symbol: symbol.to_string(),
+        reference_price: price,
+        latest_price: price,
+        pct_change: 0.0,
+        abs_change: 0.0,
+    }))))
 }
 
 async fn tracked_symbols_handler(
@@ -496,7 +597,9 @@ async fn dashboard_handler(
 
     // 4. Fetch market quotes
     let market_data = fetch_market_series(&state.pool, &symbol, cutoff).await?;
-    let latest_quote = market_data.last().cloned();
+    let (latest_quote, primary_delta) = fetch_market_snapshot(&state.pool, &symbol)
+        .await?
+        .unzip();
 
     // 5. Fetch stock metrics
     let metrics_row = sqlx::query(
@@ -524,7 +627,6 @@ async fn dashboard_handler(
         updated_at: r.get("updated_at"),
     });
 
-    let primary_delta = market_delta(&market_data);
     let primary_future_symbol = sqlx::query_scalar::<_, Option<String>>(
         "SELECT future FROM tracked_symbols WHERE symbol = $1 AND is_active",
     )
@@ -533,16 +635,17 @@ async fn dashboard_handler(
     .await
     .map_err(internal_error)?
     .flatten();
-    let primary_future_market_data = if let Some(future_symbol) = primary_future_symbol.as_deref() {
-        fetch_market_series(&state.pool, future_symbol, cutoff).await?
-    } else {
-        Vec::new()
-    };
-    let primary_future_quote = primary_future_market_data.last().cloned();
-    let primary_future_delta = market_delta(&primary_future_market_data);
-    let vix_market_data = fetch_market_series(&state.pool, &state.vix_symbol, cutoff).await?;
-    let vix_quote = vix_market_data.last().cloned();
-    let vix_delta = market_delta(&vix_market_data);
+    let (primary_future_quote, primary_future_delta, primary_future_market_data) =
+        if let Some(future_symbol) = primary_future_symbol.as_deref() {
+            let data = fetch_market_series(&state.pool, future_symbol, cutoff).await?;
+            let (q, d) = fetch_market_snapshot(&state.pool, future_symbol).await?.unzip();
+            (q, d, data)
+        } else {
+            (None, None, Vec::new())
+        };
+    let (vix_quote, vix_delta) = fetch_market_snapshot(&state.pool, &state.vix_symbol)
+        .await?
+        .unzip();
 
     Ok(Json(DashboardResponse {
         sentiment_stats,
@@ -1029,40 +1132,224 @@ fn pearson(pairs: &[(f64, f64)]) -> Option<f64> {
     (denominator > f64::EPSILON).then_some(numerator / denominator)
 }
 
+struct MacdPoint {
+    macd: Option<f64>,
+    signal: Option<f64>,
+    hist: Option<f64>,
+}
+
+fn sma(seq: &[Option<f64>], i: usize, period: usize) -> Option<f64> {
+    if i + 1 < period {
+        return None;
+    }
+    let window = &seq[i + 1 - period..=i];
+    let mut sum = 0.0;
+    for &val in window {
+        match val {
+            Some(v) => sum += v,
+            None => return None,
+        }
+    }
+    Some(sum / period as f64)
+}
+
+fn compute_sentiment_macd(
+    indices: &[Option<f64>],
+    fast: usize,
+    slow: usize,
+    signal: usize,
+) -> Vec<MacdPoint> {
+    let n = indices.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut filled = Vec::with_capacity(n);
+    let mut last = None;
+    for &v in indices {
+        if v.is_some() {
+            last = v;
+        }
+        filled.push(last);
+    }
+
+    let mut macd_line = Vec::with_capacity(n);
+    for i in 0..n {
+        let f = sma(&filled, i, fast);
+        let s = sma(&filled, i, slow);
+        macd_line.push(match (f, s) {
+            (Some(f_val), Some(s_val)) => Some(f_val - s_val),
+            _ => None,
+        });
+    }
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let sig = sma(&macd_line, i, signal);
+        let m = macd_line[i];
+        let hist = match (m, sig) {
+            (Some(m_val), Some(sig_val)) => Some(m_val - sig_val),
+            _ => None,
+        };
+        out.push(MacdPoint {
+            macd: m,
+            signal: sig,
+            hist,
+        });
+    }
+    out
+}
+
+struct OpportunityResult {
+    score: f64,
+    classification: &'static str,
+    color: &'static str,
+    strategy: &'static str,
+    description: &'static str,
+    checklist: Vec<String>,
+}
+
+fn compute_opportunity(
+    price: Option<f64>,
+    support: f64,
+    _resistance: f64,
+    sentiment: f64,
+    sentiment_sma: f64,
+    vix_price: Option<f64>,
+    pe_relative: Option<f64>,
+    prev_prices: &[f64],
+    prev_sentiments: &[f64],
+) -> OpportunityResult {
+    let mut score: f64 = 0.0;
+    let mut checklist = Vec::new();
+
+    // 1. Price near support
+    if let Some(p) = price {
+        if support > 0.0 && p > 0.0 {
+            let dist_to_support = (p - support) / p;
+            if dist_to_support <= 0.025 {
+                score += 3.0;
+                checklist.push("Price near support level".to_string());
+            } else if dist_to_support <= 0.05 {
+                score += 1.5;
+                checklist.push("Price approaching support level".to_string());
+            }
+        }
+    }
+
+    // 2. Sentiment momentum (crossover)
+    if sentiment > sentiment_sma {
+        if sentiment_sma > 0.0 {
+            score += 3.0;
+            checklist.push("Bullish sentiment crossover (above positive SMA)".to_string());
+        } else {
+            score += 1.5;
+            checklist.push("Bullish sentiment crossover (above negative SMA)".to_string());
+        }
+    }
+
+    // 3. Sentiment-price divergence (price down, sentiment up in recent trailing window)
+    if prev_prices.len() >= 3 && prev_sentiments.len() >= 3 {
+        let price_trend = prev_prices.last().unwrap() - prev_prices.first().unwrap();
+        let sentiment_trend = prev_sentiments.last().unwrap() - prev_sentiments.first().unwrap();
+        if price_trend < 0.0 && sentiment_trend > 0.1 {
+            score += 2.0;
+            checklist.push("Bullish sentiment divergence (price down, sentiment rising)".to_string());
+        }
+    }
+
+    // 4. Valuation vs sector benchmark
+    if let Some(pe_rel) = pe_relative {
+        if pe_rel < 0.0 {
+            score += 2.0;
+            checklist.push("Undervalued relative to sector benchmarks".to_string());
+        } else if pe_rel == 0.0 {
+            score += 1.0;
+            checklist.push("Fairly valued relative to sector benchmarks".to_string());
+        }
+    }
+
+    let opportunity_pct = (score / 10.0 * 100.0).min(100.0);
+
+    // Classification
+    let (classification, color) = if opportunity_pct >= 75.0 {
+        ("STRONG BUY", "emerald")
+    } else if opportunity_pct >= 50.0 {
+        ("ACCUMULATE", "teal")
+    } else if opportunity_pct >= 30.0 {
+        ("HOLD / NEUTRAL", "slate")
+    } else {
+        ("CAUTION / OVERBOUGHT", "rose")
+    };
+
+    // Strategy Recommendation
+    let mut strategy = "Hold / Sell Covered Calls";
+    let mut strategy_desc = "Neutral market stance. Capitalize on range-bound behavior using covered call writing.";
+
+    let vix = vix_price.unwrap_or(15.0);
+
+    if classification == "STRONG BUY" || classification == "ACCUMULATE" {
+        if vix < 15.0 {
+            strategy = "Long Call Option (Buy Call)";
+            strategy_desc = "Low volatility regime. Buy outright call options to leverage cheap premium.";
+        } else if vix <= 22.0 {
+            strategy = "Long Shares / Bull Call Spread";
+            strategy_desc = "Moderate volatility. Buy shares directly or use bull call debit spreads.";
+        } else {
+            strategy = "Sell Put Credit Spreads";
+            strategy_desc = "High volatility regime. Sell put credit spreads to harvest rich premium.";
+        }
+    } else if classification == "CAUTION / OVERBOUGHT" {
+        if vix > 22.0 {
+            strategy = "Sell Call Credit Spreads";
+            strategy_desc = "High volatility overbought. Sell call credit spreads for fast premium decay.";
+        } else {
+            strategy = "Protect Longs / Buy Puts";
+            strategy_desc = "Overbought stance. Trim shares or buy puts to hedge downside risk.";
+        }
+    }
+
+    OpportunityResult {
+        score: opportunity_pct,
+        classification,
+        color,
+        strategy,
+        description: strategy_desc,
+        checklist,
+    }
+}
+
 fn lagged_correlations(buckets: &[CorrelationBucket]) -> (f64, i32, Vec<LagSweepValue>) {
-    let mut best = None::<(f64, i32)>;
-    let mut sweeps = Vec::new();
-    for lag in -6_i32..=6 {
+    let mut max_r: f64 = 0.0;
+    let mut best_lag = 0;
+    let mut sweeps = Vec::with_capacity(11);
+    for lag in -5_i32..=5 {
         let mut pairs = Vec::new();
-        for price_index in 0..buckets.len() {
-            let sentiment_index = price_index as i64 - i64::from(lag);
-            if sentiment_index < 0 || sentiment_index >= buckets.len() as i64 {
+        for (index, sentiment_bucket) in buckets.iter().enumerate() {
+            let price_index = index as isize + lag as isize;
+            if price_index < 0 || price_index >= buckets.len() as isize {
                 continue;
             }
-            let price_bucket = &buckets[price_index];
-            let sentiment_bucket = &buckets[sentiment_index as usize];
-            if !price_bucket.is_market_open
-                || sentiment_bucket.positive + sentiment_bucket.neutral + sentiment_bucket.negative
-                    == 0
-            {
-                continue;
-            }
-            if let Some(change) = price_bucket.price_change {
-                pairs.push((sentiment_bucket.sentiment_index, change));
+            let price_bucket = &buckets[price_index as usize];
+            if let Some(price_change) = price_bucket.price_change {
+                if price_bucket.is_market_open {
+                    pairs.push((sentiment_bucket.sentiment_index, price_change));
+                }
             }
         }
-        let correlation = pearson(&pairs).unwrap_or(0.0);
-        if pearson(&pairs).is_some()
-            && best.is_none_or(|(current, _)| correlation.abs() > current.abs())
-        {
-            best = Some((correlation, lag));
-        }
+        let correlation = if pairs.len() < 4 {
+            0.0
+        } else {
+            pearson(&pairs).unwrap_or(0.0)
+        };
         sweeps.push(LagSweepValue {
             lag,
             r: correlation,
         });
+        if correlation.abs() > max_r.abs() {
+            max_r = correlation;
+            best_lag = lag;
+        }
     }
-    let (max_r, best_lag) = best.unwrap_or((0.0, 0));
     (max_r, best_lag, sweeps)
 }
 
@@ -1084,85 +1371,25 @@ async fn correlation_handler(
     let topic = params.topic.filter(|value| value != "all");
     let is_filtered = platform.is_some() || topic.is_some();
     let now = Utc::now();
-    let cutoff = now - chrono::Duration::hours(hours);
-
-    let agg_rows = sqlx::query(
-        r#"
-        SELECT date_trunc('hour', timestamp) AS bucket_hour,
-               COUNT(*) FILTER (WHERE sentiment = 'positive') AS pos_cnt,
-               COUNT(*) FILTER (WHERE sentiment = 'neutral') AS neu_cnt,
-               COUNT(*) FILTER (WHERE sentiment = 'negative') AS neg_cnt
-        FROM posts
-        WHERE symbol = $1 AND timestamp >= $2
-          AND ($3::TEXT IS NULL OR platform = $3)
-          AND ($4::TEXT IS NULL OR topic_label = $4)
-        GROUP BY date_trunc('hour', timestamp)
-        ORDER BY bucket_hour
-        "#,
-    )
-    .bind(&symbol)
-    .bind(cutoff)
-    .bind(platform.as_deref())
-    .bind(topic.as_deref())
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal_error)?;
-
-    let mut agg_map = std::collections::HashMap::new();
-    for row in agg_rows {
-        agg_map.insert(
-            row.get::<DateTime<Utc>, _>("bucket_hour"),
+    let cutoff = (now - chrono::Duration::hours(hours))
+        .with_minute(0)
+        .and_then(|v| v.with_second(0))
+        .and_then(|v| v.with_nanosecond(0))
+        .ok_or_else(|| {
             (
-                row.get::<i64, _>("pos_cnt"),
-                row.get::<i64, _>("neu_cnt"),
-                row.get::<i64, _>("neg_cnt"),
-            ),
-        );
-    }
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to construct cutoff timeline".to_string(),
+            )
+        })?;
 
-    let price_rows = sqlx::query(
-        r#"
-        SELECT date_trunc('hour', timestamp) AS bucket_hour,
-               (array_agg(price ORDER BY timestamp DESC))[1] AS close_price,
-               bool_or(market_session = 'regular') AS is_open
-        FROM stock_quotes
-        WHERE symbol = $1 AND timestamp >= $2
-        GROUP BY date_trunc('hour', timestamp)
-        ORDER BY bucket_hour
-        "#,
+    let primary_future_symbol = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT future FROM tracked_symbols WHERE symbol = $1 AND is_active",
     )
     .bind(&symbol)
-    .bind(cutoff)
-    .fetch_all(&state.pool)
+    .fetch_optional(&state.pool)
     .await
-    .map_err(internal_error)?;
-
-    let mut price_map = std::collections::HashMap::new();
-    for row in price_rows {
-        price_map.insert(
-            row.get::<DateTime<Utc>, _>("bucket_hour"),
-            (
-                row.get::<f64, _>("close_price"),
-                row.get::<bool, _>("is_open"),
-            ),
-        );
-    }
-
-    let coverage_start = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
-        r#"
-        SELECT MIN(timestamp)
-        FROM posts
-        WHERE symbol = $1
-          AND ($2::TEXT IS NULL OR platform = $2)
-          AND ($3::TEXT IS NULL OR topic_label = $3)
-        "#,
-    )
-    .bind(&symbol)
-    .bind(platform.as_deref())
-    .bind(topic.as_deref())
-    .fetch_one(&state.pool)
-    .await
-    .map_err(internal_error)?;
+    .map_err(internal_error)?
+    .flatten();
 
     let current_hour = now
         .with_minute(0)
@@ -1174,44 +1401,31 @@ async fn correlation_handler(
                 "failed to construct hourly timeline".to_string(),
             )
         })?;
-    let mut buckets = Vec::with_capacity(hours as usize + 1);
-    let mut previous_price = None::<f64>;
+
+    let mut buckets: Vec<CorrelationBucket> = Vec::with_capacity(hours as usize + 1);
+    let mut bucket_indices: std::collections::HashMap<DateTime<Utc>, usize> =
+        std::collections::HashMap::with_capacity(hours as usize + 1);
+    let mut total_weighted: Vec<f64> = vec![0.0; hours as usize + 1];
+    let mut weighted_signal: Vec<f64> = vec![0.0; hours as usize + 1];
+
     for offset in (0..=hours).rev() {
         let bucket_time = current_hour - chrono::Duration::hours(offset);
-        let (positive, neutral, negative) = agg_map.get(&bucket_time).copied().unwrap_or((0, 0, 0));
-        let total = positive + neutral + negative;
-        let sentiment_index = if total == 0 {
-            0.0
-        } else {
-            (positive - negative) as f64 / total as f64
-        };
-        let (raw_price, is_market_open) = price_map
-            .get(&bucket_time)
-            .copied()
-            .map_or((None, false), |(price, open)| (Some(price), open));
-        let price_change = raw_price.zip(previous_price).map(|(price, previous)| {
-            if previous == 0.0 {
-                0.0
-            } else {
-                (price - previous) / previous * 100.0
-            }
-        });
-        if raw_price.is_some() {
-            previous_price = raw_price;
-        }
+        let ts_str = bucket_time.to_rfc3339().replace("+00:00", "Z");
+        let idx = buckets.len();
+        bucket_indices.insert(bucket_time, idx);
         buckets.push(CorrelationBucket {
-            timestamp: bucket_time.to_rfc3339().replace("+00:00", "Z"),
-            positive,
-            neutral,
-            negative,
-            price_change,
+            timestamp: ts_str,
+            positive: 0,
+            neutral: 0,
+            negative: 0,
+            price_change: None,
             price_pct: None,
             future_change: None,
             future_pct: None,
-            is_market_open,
-            sentiment_index,
-            sentiment_sma: sentiment_index,
-            raw_price,
+            is_market_open: false,
+            sentiment_index: 0.0,
+            sentiment_sma: 0.0,
+            raw_price: None,
             buy_signal: None,
             signal_quality: None,
             buy_score: None,
@@ -1225,62 +1439,321 @@ async fn correlation_handler(
         });
     }
 
-    let sma_window = match hours {
-        1 => 3,
+    // 1. Resample target and future quotes to UTC-hour closes
+    let db_cutoff = cutoff - chrono::Duration::hours(1);
+    let mut market_symbols = vec![symbol.clone()];
+    if let Some(ref fut) = primary_future_symbol {
+        if fut != &symbol {
+            market_symbols.push(fut.clone());
+        }
+    }
+
+    struct HourlyMarketRow {
+        bucket_hour: DateTime<Utc>,
+        price: f64,
+        price_change: Option<f64>,
+    }
+
+    let hourly_market_rows = sqlx::query(
+        r#"
+        WITH hourly_sources AS (
+            SELECT
+                symbol,
+                bucket_hour,
+                close_price,
+                had_regular_session AS is_market_open,
+                last_observed_at
+            FROM market_hourly_facts
+            WHERE symbol = ANY($1) AND bucket_hour >= $2
+
+            UNION ALL
+
+            SELECT
+                symbol,
+                date_trunc('hour', timestamp, 'UTC') AS bucket_hour,
+                (array_agg(price ORDER BY timestamp DESC))[1] AS close_price,
+                bool_or(market_session = 'regular') AS is_market_open,
+                MAX(timestamp) AS last_observed_at
+            FROM stock_quotes
+            WHERE symbol = ANY($1) AND timestamp >= $2
+            GROUP BY symbol, date_trunc('hour', timestamp, 'UTC')
+        ),
+        hourly_closes AS (
+            SELECT
+                symbol,
+                bucket_hour,
+                (array_agg(close_price ORDER BY last_observed_at DESC))[1]
+                    AS close_price,
+                bool_or(is_market_open) AS is_market_open
+            FROM hourly_sources
+            GROUP BY symbol, bucket_hour
+        ),
+        hourly_with_previous AS (
+            SELECT
+                symbol,
+                bucket_hour,
+                close_price,
+                is_market_open,
+                lag(bucket_hour) OVER (
+                    PARTITION BY symbol ORDER BY bucket_hour
+                ) AS previous_hour,
+                lag(close_price) OVER (
+                    PARTITION BY symbol ORDER BY bucket_hour
+                ) AS previous_close
+            FROM hourly_closes
+        )
+        SELECT
+            symbol,
+            bucket_hour,
+            close_price AS price,
+            CASE
+                WHEN previous_hour = bucket_hour - INTERVAL '1 hour'
+                     AND previous_close <> 0
+                THEN ((close_price - previous_close) / previous_close) * 100.0
+                ELSE NULL
+            END AS price_change,
+            is_market_open
+        FROM hourly_with_previous
+        ORDER BY symbol, bucket_hour
+        "#,
+    )
+    .bind(&market_symbols)
+    .bind(db_cutoff)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut target_market_data = Vec::new();
+    let mut future_market_data = Vec::new();
+    for row in hourly_market_rows {
+        let sym: String = row.get("symbol");
+        let b_hour: DateTime<Utc> = row.get("bucket_hour");
+        let price: f64 = row.get("price");
+        let price_change: Option<f64> = row.get("price_change");
+        let is_market_open: bool = row.get("is_market_open");
+
+        if sym == symbol {
+            target_market_data.push(HourlyMarketRow {
+                bucket_hour: b_hour,
+                price,
+                price_change,
+            });
+            let b_hour_aligned = b_hour.with_minute(0).and_then(|v| v.with_second(0)).and_then(|v| v.with_nanosecond(0)).unwrap_or(b_hour);
+            if let Some(&idx) = bucket_indices.get(&b_hour_aligned) {
+                buckets[idx].price_change = price_change;
+                buckets[idx].raw_price = Some(price);
+                buckets[idx].is_market_open = is_market_open;
+            }
+        } else if primary_future_symbol.as_deref() == Some(&sym) {
+            future_market_data.push(HourlyMarketRow {
+                bucket_hour: b_hour,
+                price,
+                price_change,
+            });
+        }
+    }
+
+    let latest_future_price = future_market_data.last().map(|row| row.price);
+    for row in future_market_data {
+        let b_hour_aligned = row.bucket_hour.with_minute(0).and_then(|v| v.with_second(0)).and_then(|v| v.with_nanosecond(0)).unwrap_or(row.bucket_hour);
+        if let Some(&idx) = bucket_indices.get(&b_hour_aligned) {
+            buckets[idx].future_change = row.price_change;
+            if let Some(lfp) = latest_future_price.filter(|&p| p != 0.0) {
+                buckets[idx].future_pct = Some((row.price - lfp) / lfp * 100.0);
+            }
+        }
+    }
+
+    // 2. Canonical facts and legacy aggregates
+    let agg_rows = sqlx::query(
+        r#"
+        WITH canonical AS (
+            SELECT
+                bucket_hour,
+                SUM(positive_count)::bigint AS positive_count,
+                SUM(neutral_count)::bigint AS neutral_count,
+                SUM(negative_count)::bigint AS negative_count,
+                COALESCE(SUM(positive_weight_sum), 0.0)::double precision AS positive_weighted,
+                COALESCE(SUM(negative_weight_sum), 0.0)::double precision AS negative_weighted,
+                COALESCE(SUM(neutral_weight_sum), 0.0)::double precision AS neutral_weighted,
+                COALESCE(SUM(weight_sum), 0.0)::double precision AS total_weighted,
+                COALESCE(SUM(weighted_signal_sum), 0.0)::double precision AS weighted_signal_sum
+            FROM hourly_sentiment_facts
+            WHERE symbol = $1 AND bucket_hour >= $2
+              AND ($3::TEXT IS NULL OR platform = $3)
+              AND ($4::TEXT IS NULL OR topic_label = $4)
+            GROUP BY bucket_hour
+        ),
+        legacy AS (
+            SELECT
+                legacy.bucket_hour,
+                legacy.positive_count::bigint AS positive_count,
+                legacy.neutral_count::bigint AS neutral_count,
+                legacy.negative_count::bigint AS negative_count,
+                legacy.positive_weighted::double precision AS positive_weighted,
+                legacy.negative_weighted::double precision AS negative_weighted,
+                legacy.neutral_weighted::double precision AS neutral_weighted,
+                legacy.total_weighted::double precision AS total_weighted,
+                (legacy.positive_weighted - legacy.negative_weighted)::double precision
+                    AS weighted_signal_sum
+            FROM hourly_sentiment_agg AS legacy
+            WHERE legacy.symbol = $1
+              AND legacy.bucket_hour >= $2
+              AND $5::BOOLEAN = FALSE
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM canonical
+                  WHERE canonical.bucket_hour = legacy.bucket_hour
+              )
+        )
+        SELECT
+            bucket_hour,
+            positive_count,
+            neutral_count,
+            negative_count,
+            positive_weighted,
+            negative_weighted,
+            neutral_weighted,
+            total_weighted,
+            weighted_signal_sum,
+            (weighted_signal_sum / NULLIF(total_weighted, 0))::double precision AS sentiment_index
+        FROM canonical
+        UNION ALL
+        SELECT
+            bucket_hour,
+            positive_count,
+            neutral_count,
+            negative_count,
+            positive_weighted,
+            negative_weighted,
+            neutral_weighted,
+            total_weighted,
+            weighted_signal_sum,
+            (weighted_signal_sum / NULLIF(total_weighted, 0))::double precision AS sentiment_index
+        FROM legacy
+        ORDER BY bucket_hour
+        "#,
+    )
+    .bind(&symbol)
+    .bind(cutoff)
+    .bind(platform.as_deref())
+    .bind(topic.as_deref())
+    .bind(is_filtered)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    for row in agg_rows {
+        let b_hour: DateTime<Utc> = row.get("bucket_hour");
+        let b_hour_aligned = b_hour.with_minute(0).and_then(|v| v.with_second(0)).and_then(|v| v.with_nanosecond(0)).unwrap_or(b_hour);
+        if let Some(&idx) = bucket_indices.get(&b_hour_aligned) {
+            buckets[idx].positive = row.get::<i64, _>("positive_count");
+            buckets[idx].neutral = row.get::<i64, _>("neutral_count");
+            buckets[idx].negative = row.get::<i64, _>("negative_count");
+            let tw: f64 = row.get("total_weighted");
+            let ws: f64 = row.get("weighted_signal_sum");
+            total_weighted[idx] = tw;
+            weighted_signal[idx] = ws;
+            buckets[idx].sentiment_index = row.get::<Option<f64>, _>("sentiment_index").unwrap_or(0.0);
+        }
+    }
+
+    // 3. Overlay with live posts data (hot tier)
+    let post_rows = sqlx::query(
+        r#"
+        SELECT sentiment, scores, timestamp, engagement
+        FROM posts
+        WHERE symbol = $1 AND timestamp >= $2
+          AND ($3::TEXT IS NULL OR platform = $3)
+          AND ($4::TEXT IS NULL OR topic_label = $4)
+        "#,
+    )
+    .bind(&symbol)
+    .bind(cutoff)
+    .bind(platform.as_deref())
+    .bind(topic.as_deref())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    for p in post_rows {
+        let p_ts: DateTime<Utc> = p.get("timestamp");
+        let p_ts_aligned = p_ts.with_minute(0).and_then(|v| v.with_second(0)).and_then(|v| v.with_nanosecond(0)).unwrap_or(p_ts);
+        if let Some(&idx) = bucket_indices.get(&p_ts_aligned) {
+            let engagement: i32 = p.get::<Option<i32>, _>("engagement").unwrap_or(1).max(0);
+            let weight = (engagement as f64).ln_1p();
+            let sent: String = p.get("sentiment");
+            if sent == "positive" {
+                buckets[idx].positive += 1;
+            } else if sent == "negative" {
+                buckets[idx].negative += 1;
+            } else {
+                buckets[idx].neutral += 1;
+            }
+            total_weighted[idx] += weight;
+
+            let scores: Option<serde_json::Value> = p.get("scores");
+            let pos_prob = scores.as_ref()
+                .and_then(|s| s.get("positive"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(if sent == "positive" { 1.0 } else { 0.0 });
+            let neg_prob = scores.as_ref()
+                .and_then(|s| s.get("negative"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(if sent == "negative" { 1.0 } else { 0.0 });
+
+            weighted_signal[idx] += weight * (pos_prob - neg_prob);
+        }
+    }
+
+    // Post-process sentiment indices
+    for i in 0..buckets.len() {
+        if total_weighted[i] > 0.0 {
+            buckets[i].sentiment_index = weighted_signal[i] / total_weighted[i];
+        } else {
+            buckets[i].sentiment_index = 0.0;
+        }
+    }
+
+    // 4. Calculate SMA
+    let sma_period = match hours {
+        0..=1 => 3,
         2..=24 => 5,
         25..=168 => 12,
         169..=720 => 24,
         _ => 52,
     };
-    for index in 0..buckets.len() {
-        let start = (index + 1).saturating_sub(sma_window);
-        let sum = buckets[start..=index]
-            .iter()
-            .map(|bucket| bucket.sentiment_index)
-            .sum::<f64>();
-        buckets[index].sentiment_sma = sum / (index + 1 - start) as f64;
-    }
-
-    let mut prices = buckets
-        .iter()
-        .filter_map(|bucket| bucket.raw_price)
-        .filter(|price| price.is_finite())
-        .collect::<Vec<_>>();
-    let latest_price = prices.last().copied();
-    prices.sort_by(f64::total_cmp);
-    let support_price = percentile(&prices, 0.05);
-    let resistance_price = percentile(&prices, 0.95);
-    let (support_pct, resistance_pct) =
-        latest_price
-            .filter(|price| *price != 0.0)
-            .map_or((0.0, 0.0), |price| {
-                (
-                    (support_price - price) / price * 100.0,
-                    (resistance_price - price) / price * 100.0,
-                )
-            });
-    for index in 0..buckets.len() {
-        let start = (index + 1).saturating_sub(24);
-        let mut local_prices = buckets[start..=index]
-            .iter()
-            .filter_map(|bucket| bucket.raw_price)
-            .collect::<Vec<_>>();
-        local_prices.sort_by(f64::total_cmp);
-        if !local_prices.is_empty() {
-            let local_support = percentile(&local_prices, 0.05);
-            let local_resistance = percentile(&local_prices, 0.95);
-            buckets[index].support_price = Some(local_support);
-            buckets[index].resistance_price = Some(local_resistance);
-            if let Some(price) = latest_price.filter(|price| *price != 0.0) {
-                buckets[index].support_pct = Some((local_support - price) / price * 100.0);
-                buckets[index].resistance_pct = Some((local_resistance - price) / price * 100.0);
-                buckets[index].price_pct = buckets[index]
-                    .raw_price
-                    .map(|bucket_price| (bucket_price - price) / price * 100.0);
-            }
+    for i in 0..buckets.len() {
+        let mut sum_sma = 0.0;
+        let mut count_sma = 0;
+        let start_idx = (i + 1).saturating_sub(sma_period);
+        for j in start_idx..=i {
+            sum_sma += buckets[j].sentiment_index;
+            count_sma += 1;
         }
+        buckets[i].sentiment_sma = if count_sma > 0 { sum_sma / count_sma as f64 } else { 0.0 };
     }
 
+    // 5. Sentiment MACD
+    let (slow_period, signal_period) = match hours {
+        0..=1 => (6, 3),
+        2..=24 => (12, 5),
+        25..=168 => (26, 9),
+        _ => (52, 12),
+    };
+    let macd_indices: Vec<Option<f64>> = buckets
+        .iter()
+        .enumerate()
+        .map(|(i, b)| if total_weighted[i] > 0.0 { Some(b.sentiment_index) } else { None })
+        .collect();
+    let macd_series = compute_sentiment_macd(&macd_indices, sma_period, slow_period, signal_period);
+    for (i, m) in macd_series.into_iter().enumerate() {
+        buckets[i].sentiment_macd = m.macd;
+        buckets[i].sentiment_signal = m.signal;
+        buckets[i].sentiment_hist = m.hist;
+    }
+
+    // 6. Calculate Pearson correlation with lag sweeps
     let (max_r, best_lag, lag_sweeps) = lagged_correlations(&buckets);
     let correlation_strength = if max_r.abs() > 0.6 {
         "strong"
@@ -1289,45 +1762,265 @@ async fn correlation_handler(
     } else {
         "weak"
     };
-    let correlation_text = if max_r.abs() < 0.15 {
-        format!("Weak or no correlation (r = {max_r:+.2})")
-    } else if best_lag > 0 {
-        format!("Sentiment leads price by {best_lag}h (r = {max_r:+.2})")
-    } else if best_lag < 0 {
-        format!("Price leads sentiment by {}h (r = {max_r:+.2})", -best_lag)
+    let sign = if max_r >= 0.0 { "+" } else { "" };
+    let correlation_text = if max_r.abs() >= 0.15 {
+        let relationship = if max_r >= 0.0 { "positive" } else { "negative" };
+        if best_lag > 0 {
+            format!("Sentiment leads price by {best_lag}h ({relationship}, r = {sign}{max_r:.2})")
+        } else if best_lag < 0 {
+            format!("Price leads sentiment by {}h ({relationship}, r = {sign}{max_r:.2})", best_lag.abs())
+        } else {
+            format!("Coincident correlation ({relationship}, r = {sign}{max_r:.2})")
+        }
     } else {
-        format!("Coincident correlation (r = {max_r:+.2})")
+        format!("Weak or no correlation (r = {sign}{max_r:.2})")
     };
 
-    let mut closed_regions = Vec::new();
-    if !price_map.is_empty() {
-        let mut start = None::<String>;
-        for (index, bucket) in buckets.iter().enumerate() {
-            if !bucket.is_market_open {
-                start.get_or_insert_with(|| bucket.timestamp.clone());
-            } else if let Some(region_start) = start.take() {
-                let end = buckets[index.saturating_sub(1)].timestamp.clone();
-                closed_regions.push(ClosedRegion {
-                    start: region_start,
-                    end,
-                });
+    // 7. Closed regions
+    let latest_market_session = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT market_session FROM stock_quotes WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1",
+    )
+    .bind(&symbol)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal_error)?
+    .flatten();
+
+    let mut raw_closed_regions = Vec::new();
+    let mut current_start = None::<String>;
+    for idx in 0..buckets.len() {
+        if !buckets[idx].is_market_open {
+            if current_start.is_none() {
+                current_start = Some(buckets[idx].timestamp.clone());
             }
-        }
-        if let (Some(region_start), Some(last)) = (start, buckets.last()) {
-            closed_regions.push(ClosedRegion {
-                start: region_start,
-                end: last.timestamp.clone(),
+        } else if let Some(start_ts) = current_start.take() {
+            let end_ts = buckets[idx.saturating_sub(1)].timestamp.clone();
+            raw_closed_regions.push(ClosedRegion {
+                start: start_ts,
+                end: end_ts,
             });
         }
     }
+    if let (Some(start_ts), Some(last)) = (current_start, buckets.last()) {
+        raw_closed_regions.push(ClosedRegion {
+            start: start_ts,
+            end: last.timestamp.clone(),
+        });
+    }
+
+    if latest_market_session.as_deref() == Some("regular") && !raw_closed_regions.is_empty() {
+        if let (Some(last_region), Some(last_bucket)) = (raw_closed_regions.last(), buckets.last()) {
+            if last_region.end == last_bucket.timestamp {
+                raw_closed_regions.pop();
+            }
+        }
+    }
+
+    let mut closed_regions = Vec::new();
+    for r in raw_closed_regions {
+        if let (Ok(t_start), Ok(t_end)) = (
+            DateTime::parse_from_rfc3339(&r.start),
+            DateTime::parse_from_rfc3339(&r.end),
+        ) {
+            if (t_end - t_start) >= chrono::Duration::hours(8) {
+                closed_regions.push(r);
+            }
+        }
+    }
+
+    // 8. Support & Resistance
+    let prices: Vec<f64> = target_market_data.iter().map(|q| q.price).collect();
+    let mut support_price = 0.0;
+    let mut resistance_price = 0.0;
+    let mut support_pct = 0.0;
+    let mut resistance_pct = 0.0;
+    let latest_price = prices.last().copied();
+
+    if !prices.is_empty() {
+        let mut sorted_prices = prices.clone();
+        sorted_prices.sort_by(f64::total_cmp);
+        support_price = percentile(&sorted_prices, 0.05);
+        resistance_price = percentile(&sorted_prices, 0.95);
+        if let Some(lp) = latest_price.filter(|&p| p != 0.0) {
+            support_pct = (support_price - lp) / lp * 100.0;
+            resistance_pct = (resistance_price - lp) / lp * 100.0;
+        }
+    }
+
+    let rolling_window = 24;
+    for i in 0..buckets.len() {
+        let start = (i + 1).saturating_sub(rolling_window);
+        let mut window_prices = Vec::new();
+        for b in &buckets[start..=i] {
+            if let Some(rp) = b.raw_price {
+                window_prices.push(rp);
+            }
+        }
+        if !window_prices.is_empty() {
+            window_prices.sort_by(f64::total_cmp);
+            let local_support = percentile(&window_prices, 0.05);
+            let local_resistance = percentile(&window_prices, 0.95);
+            buckets[i].support_price = Some(local_support);
+            buckets[i].resistance_price = Some(local_resistance);
+            if let Some(lp) = latest_price.filter(|&p| p != 0.0) {
+                buckets[i].support_pct = Some((local_support - lp) / lp * 100.0);
+                buckets[i].resistance_pct = Some((local_resistance - lp) / lp * 100.0);
+                if let Some(bucket_raw) = buckets[i].raw_price {
+                    buckets[i].price_pct = Some((bucket_raw - lp) / lp * 100.0);
+                }
+            } else {
+                buckets[i].support_pct = Some(0.0);
+                buckets[i].resistance_pct = Some(0.0);
+            }
+        } else {
+            buckets[i].support_price = Some(support_price);
+            buckets[i].support_pct = Some(support_pct);
+            buckets[i].resistance_price = Some(resistance_price);
+            buckets[i].resistance_pct = Some(resistance_pct);
+        }
+    }
+
+    // 9. Opportunity inputs and signals
+    let pe_relative = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT pe_relative_sector FROM stock_metrics WHERE symbol = $1 ORDER BY updated_at DESC LIMIT 1",
+    )
+    .bind(&symbol)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal_error)?
+    .flatten();
+
+    let vix_price_opt = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT price FROM stock_quotes WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1",
+    )
+    .bind(&state.vix_symbol)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal_error)?
+    .flatten();
+    let vix_price = vix_price_opt.unwrap_or(15.0);
+
+    for i in 0..buckets.len() {
+        let bucket_price = buckets[i].raw_price;
+        let mut prev_prices = Vec::new();
+        let mut prev_sentiments = Vec::new();
+        let start = i.saturating_sub(2);
+        for k in start..=i {
+            if let Some(rp) = buckets[k].raw_price {
+                prev_prices.push(rp);
+            }
+            prev_sentiments.push(buckets[k].sentiment_index);
+        }
+
+        let opp = compute_opportunity(
+            bucket_price,
+            support_price,
+            resistance_price,
+            buckets[i].sentiment_index,
+            buckets[i].sentiment_sma,
+            Some(vix_price),
+            pe_relative,
+            &prev_prices,
+            &prev_sentiments,
+        );
+        buckets[i].buy_score = Some(opp.score);
+        buckets[i].buy_signal = Some(opp.score >= 50.0);
+        buckets[i].signal_quality = Some("pending".to_string());
+    }
+
+    // Forward returns for signals
+    for i in 0..buckets.len() {
+        if buckets[i].buy_signal == Some(true) {
+            if let Some(curr_price) = buckets[i].raw_price {
+                let mut forward_prices = Vec::new();
+                let end = (i + 1 + 24).min(buckets.len());
+                for k in (i + 1)..end {
+                    if let Some(rp) = buckets[k].raw_price {
+                        forward_prices.push(rp);
+                        if forward_prices.len() >= 2 {
+                            break;
+                        }
+                    }
+                }
+                if !forward_prices.is_empty() {
+                    let max_forward = forward_prices.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    if max_forward > curr_price * 1.002 {
+                        buckets[i].signal_quality = Some("good".to_string());
+                    } else {
+                        buckets[i].signal_quality = Some("bad".to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 10. Compute final current opportunity
+    let latest_item = buckets.last();
+    let mut latest_prices = Vec::new();
+    let mut latest_sentiments = Vec::new();
+    if buckets.len() >= 3 {
+        for b in &buckets[buckets.len() - 3..] {
+            if let Some(rp) = b.raw_price {
+                latest_prices.push(rp);
+            }
+            latest_sentiments.push(b.sentiment_index);
+        }
+    }
+    let current_opp = latest_item.map(|item| {
+        let opp = compute_opportunity(
+            item.raw_price,
+            support_price,
+            resistance_price,
+            item.sentiment_index,
+            item.sentiment_sma,
+            Some(vix_price),
+            pe_relative,
+            &latest_prices,
+            &latest_sentiments,
+        );
+        OpportunityResponse {
+            score: opp.score,
+            classification: opp.classification.to_string(),
+            color: opp.color.to_string(),
+            strategy: opp.strategy.to_string(),
+            description: opp.description.to_string(),
+            checklist: opp.checklist,
+        }
+    });
+
+    // 11. Coverage
+    let coverage_start = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        r#"
+        SELECT LEAST(
+            (SELECT MIN(timestamp) FROM posts
+             WHERE symbol = $1
+               AND ($2::TEXT IS NULL OR platform = $2)
+               AND ($3::TEXT IS NULL OR topic_label = $3)),
+            (SELECT MIN(bucket_hour) FROM hourly_sentiment_facts
+             WHERE symbol = $1
+               AND ($2::TEXT IS NULL OR platform = $2)
+               AND ($3::TEXT IS NULL OR topic_label = $3)),
+            CASE WHEN $4::BOOLEAN = FALSE THEN
+                (SELECT MIN(bucket_hour) FROM hourly_sentiment_agg WHERE symbol = $1)
+            ELSE NULL END
+        ) AS coverage_start
+        "#,
+    )
+    .bind(&symbol)
+    .bind(platform.as_deref())
+    .bind(topic.as_deref())
+    .bind(is_filtered)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
 
     let coverage_complete = coverage_start.is_some_and(|start| start <= cutoff);
     let coverage_start_text = coverage_start.map(|value| value.to_rfc3339().replace("+00:00", "Z"));
     let coverage_notice = (!coverage_complete).then(|| {
         let boundary = coverage_start_text
             .as_deref()
-            .unwrap_or("the first available observation");
-        format!("Requested history begins before {boundary}; earlier buckets are unavailable.")
+            .unwrap_or("the first canonical observation");
+        format!("Requested history begins before {boundary}; earlier buckets are reported as unavailable zeros.")
     });
 
     Ok(Json(CorrelationResponse {
@@ -1342,14 +2035,14 @@ async fn correlation_handler(
         lag_sweeps,
         correlation_text,
         correlation_strength: correlation_strength.to_string(),
-        opportunity: None,
+        opportunity: current_opp,
         coverage_start: coverage_start_text,
         coverage_end: now.to_rfc3339().replace("+00:00", "Z"),
         coverage_complete,
         coverage_mode: if is_filtered {
             "dimension-preserving".to_string()
         } else {
-            "live".to_string()
+            "legacy-unfiltered+canonical".to_string()
         },
         coverage_notice,
     }))
@@ -1484,7 +2177,10 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pearson, percentile, source_status, validated_hours};
+    use super::{
+        compute_opportunity, compute_sentiment_macd, pearson, percentile, source_status,
+        validated_hours,
+    };
 
     #[test]
     fn validates_query_window_bounds() {
@@ -1515,5 +2211,35 @@ mod tests {
         assert_eq!(source_status(2, 12, Some(60.0)), "active");
         assert_eq!(source_status(0, 12, Some(60.0)), "quiet");
         assert_eq!(source_status(0, 100, Some(20_000.0)), "stalled");
+    }
+
+    #[test]
+    fn computes_opportunity_scoring_and_classification() {
+        let opp = compute_opportunity(
+            Some(101.0),
+            100.0,
+            120.0,
+            0.5,
+            0.2,
+            Some(14.0),
+            Some(-0.5),
+            &[105.0, 103.0, 101.0],
+            &[0.1, 0.3, 0.5],
+        );
+        assert_eq!(opp.score, 100.0);
+        assert_eq!(opp.classification, "STRONG BUY");
+        assert_eq!(opp.color, "emerald");
+        assert_eq!(opp.strategy, "Long Call Option (Buy Call)");
+        assert_eq!(opp.checklist.len(), 4);
+    }
+
+    #[test]
+    fn computes_sentiment_macd_carry_forward() {
+        let indices = vec![Some(0.1), None, Some(0.3), Some(0.4), Some(0.5), Some(0.6)];
+        let macd = compute_sentiment_macd(&indices, 3, 5, 2);
+        assert_eq!(macd.len(), 6);
+        assert_eq!(macd[0].macd, None);
+        assert_eq!(macd[3].macd, None);
+        assert!(macd[4].macd.is_some());
     }
 }

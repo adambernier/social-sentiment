@@ -1,0 +1,26 @@
+# Local-only overlay for the API contract gate.
+#
+# The base compose file deliberately does NOT publish api-service to the host:
+# in production, external traffic reaches it through Caddy (caddy -> /api/* ->
+# api-service:8000). The contract harness (scripts/verify_api_contract.py)
+# needs to hit BOTH runtimes directly over loopback, so this overlay adds that
+# single host publish for local runs only.
+#
+# Both runtimes are left pointed at the shared stack database (base postgres
+# via DATABASE_DSN), so the OpenAPI route inventory and every read-only
+# response are compared against the same schema and seed data.
+#
+# Usage (from the repo root):
+#   docker compose -f docker-compose.yml -f docker-compose.rust.yml \
+#     -f docker-compose.contract.yml --profile rust-api \
+#     up -d --build api-service rust-api-service
+#   docker compose ps          # both up; schema-migrate exited 0
+#   python3 scripts/verify_api_contract.py \
+#     --python-url http://127.0.0.1:8000 --rust-url http://127.0.0.1:8001
+#
+# Do NOT use this overlay on the droplet; there the API is checked through
+# Caddy (https://<SITE_ADDRESS>/api/health), not a published port.
+services:
+  api-service:
+    ports:
+      - "127.0.0.1:8000:8000"
