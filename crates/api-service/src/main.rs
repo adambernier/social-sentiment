@@ -479,13 +479,16 @@ async fn fetch_market_snapshot(
         }
     });
 
-    Ok(Some((quote, delta.unwrap_or(MarketDelta {
-        symbol: symbol.to_string(),
-        reference_price: price,
-        latest_price: price,
-        pct_change: 0.0,
-        abs_change: 0.0,
-    }))))
+    Ok(Some((
+        quote,
+        delta.unwrap_or(MarketDelta {
+            symbol: symbol.to_string(),
+            reference_price: price,
+            latest_price: price,
+            pct_change: 0.0,
+            abs_change: 0.0,
+        }),
+    )))
 }
 
 async fn tracked_symbols_handler(
@@ -597,9 +600,7 @@ async fn dashboard_handler(
 
     // 4. Fetch market quotes
     let market_data = fetch_market_series(&state.pool, &symbol, cutoff).await?;
-    let (latest_quote, primary_delta) = fetch_market_snapshot(&state.pool, &symbol)
-        .await?
-        .unzip();
+    let (latest_quote, primary_delta) = fetch_market_snapshot(&state.pool, &symbol).await?.unzip();
 
     // 5. Fetch stock metrics
     let metrics_row = sqlx::query(
@@ -638,7 +639,9 @@ async fn dashboard_handler(
     let (primary_future_quote, primary_future_delta, primary_future_market_data) =
         if let Some(future_symbol) = primary_future_symbol.as_deref() {
             let data = fetch_market_series(&state.pool, future_symbol, cutoff).await?;
-            let (q, d) = fetch_market_snapshot(&state.pool, future_symbol).await?.unzip();
+            let (q, d) = fetch_market_snapshot(&state.pool, future_symbol)
+                .await?
+                .unzip();
             (q, d, data)
         } else {
             (None, None, Vec::new())
@@ -1208,6 +1211,7 @@ struct OpportunityResult {
     checklist: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_opportunity(
     price: Option<f64>,
     support: f64,
@@ -1253,7 +1257,8 @@ fn compute_opportunity(
         let sentiment_trend = prev_sentiments.last().unwrap() - prev_sentiments.first().unwrap();
         if price_trend < 0.0 && sentiment_trend > 0.1 {
             score += 2.0;
-            checklist.push("Bullish sentiment divergence (price down, sentiment rising)".to_string());
+            checklist
+                .push("Bullish sentiment divergence (price down, sentiment rising)".to_string());
         }
     }
 
@@ -1283,25 +1288,30 @@ fn compute_opportunity(
 
     // Strategy Recommendation
     let mut strategy = "Hold / Sell Covered Calls";
-    let mut strategy_desc = "Neutral market stance. Capitalize on range-bound behavior using covered call writing.";
+    let mut strategy_desc =
+        "Neutral market stance. Capitalize on range-bound behavior using covered call writing.";
 
     let vix = vix_price.unwrap_or(15.0);
 
     if classification == "STRONG BUY" || classification == "ACCUMULATE" {
         if vix < 15.0 {
             strategy = "Long Call Option (Buy Call)";
-            strategy_desc = "Low volatility regime. Buy outright call options to leverage cheap premium.";
+            strategy_desc =
+                "Low volatility regime. Buy outright call options to leverage cheap premium.";
         } else if vix <= 22.0 {
             strategy = "Long Shares / Bull Call Spread";
-            strategy_desc = "Moderate volatility. Buy shares directly or use bull call debit spreads.";
+            strategy_desc =
+                "Moderate volatility. Buy shares directly or use bull call debit spreads.";
         } else {
             strategy = "Sell Put Credit Spreads";
-            strategy_desc = "High volatility regime. Sell put credit spreads to harvest rich premium.";
+            strategy_desc =
+                "High volatility regime. Sell put credit spreads to harvest rich premium.";
         }
     } else if classification == "CAUTION / OVERBOUGHT" {
         if vix > 22.0 {
             strategy = "Sell Call Credit Spreads";
-            strategy_desc = "High volatility overbought. Sell call credit spreads for fast premium decay.";
+            strategy_desc =
+                "High volatility overbought. Sell call credit spreads for fast premium decay.";
         } else {
             strategy = "Protect Longs / Buy Puts";
             strategy_desc = "Overbought stance. Trim shares or buy puts to hedge downside risk.";
@@ -1538,7 +1548,11 @@ async fn correlation_handler(
                 price,
                 price_change,
             });
-            let b_hour_aligned = b_hour.with_minute(0).and_then(|v| v.with_second(0)).and_then(|v| v.with_nanosecond(0)).unwrap_or(b_hour);
+            let b_hour_aligned = b_hour
+                .with_minute(0)
+                .and_then(|v| v.with_second(0))
+                .and_then(|v| v.with_nanosecond(0))
+                .unwrap_or(b_hour);
             if let Some(&idx) = bucket_indices.get(&b_hour_aligned) {
                 buckets[idx].price_change = price_change;
                 buckets[idx].raw_price = Some(price);
@@ -1555,7 +1569,12 @@ async fn correlation_handler(
 
     let latest_future_price = future_market_data.last().map(|row| row.price);
     for row in future_market_data {
-        let b_hour_aligned = row.bucket_hour.with_minute(0).and_then(|v| v.with_second(0)).and_then(|v| v.with_nanosecond(0)).unwrap_or(row.bucket_hour);
+        let b_hour_aligned = row
+            .bucket_hour
+            .with_minute(0)
+            .and_then(|v| v.with_second(0))
+            .and_then(|v| v.with_nanosecond(0))
+            .unwrap_or(row.bucket_hour);
         if let Some(&idx) = bucket_indices.get(&b_hour_aligned) {
             buckets[idx].future_change = row.price_change;
             if let Some(lfp) = latest_future_price.filter(|&p| p != 0.0) {
@@ -1645,7 +1664,11 @@ async fn correlation_handler(
 
     for row in agg_rows {
         let b_hour: DateTime<Utc> = row.get("bucket_hour");
-        let b_hour_aligned = b_hour.with_minute(0).and_then(|v| v.with_second(0)).and_then(|v| v.with_nanosecond(0)).unwrap_or(b_hour);
+        let b_hour_aligned = b_hour
+            .with_minute(0)
+            .and_then(|v| v.with_second(0))
+            .and_then(|v| v.with_nanosecond(0))
+            .unwrap_or(b_hour);
         if let Some(&idx) = bucket_indices.get(&b_hour_aligned) {
             buckets[idx].positive = row.get::<i64, _>("positive_count");
             buckets[idx].neutral = row.get::<i64, _>("neutral_count");
@@ -1654,7 +1677,8 @@ async fn correlation_handler(
             let ws: f64 = row.get("weighted_signal_sum");
             total_weighted[idx] = tw;
             weighted_signal[idx] = ws;
-            buckets[idx].sentiment_index = row.get::<Option<f64>, _>("sentiment_index").unwrap_or(0.0);
+            buckets[idx].sentiment_index =
+                row.get::<Option<f64>, _>("sentiment_index").unwrap_or(0.0);
         }
     }
 
@@ -1678,7 +1702,11 @@ async fn correlation_handler(
 
     for p in post_rows {
         let p_ts: DateTime<Utc> = p.get("timestamp");
-        let p_ts_aligned = p_ts.with_minute(0).and_then(|v| v.with_second(0)).and_then(|v| v.with_nanosecond(0)).unwrap_or(p_ts);
+        let p_ts_aligned = p_ts
+            .with_minute(0)
+            .and_then(|v| v.with_second(0))
+            .and_then(|v| v.with_nanosecond(0))
+            .unwrap_or(p_ts);
         if let Some(&idx) = bucket_indices.get(&p_ts_aligned) {
             let engagement: i32 = p.get::<Option<i32>, _>("engagement").unwrap_or(1).max(0);
             let weight = (engagement as f64).ln_1p();
@@ -1693,11 +1721,13 @@ async fn correlation_handler(
             total_weighted[idx] += weight;
 
             let scores: Option<serde_json::Value> = p.get("scores");
-            let pos_prob = scores.as_ref()
+            let pos_prob = scores
+                .as_ref()
                 .and_then(|s| s.get("positive"))
                 .and_then(|v| v.as_f64())
                 .unwrap_or(if sent == "positive" { 1.0 } else { 0.0 });
-            let neg_prob = scores.as_ref()
+            let neg_prob = scores
+                .as_ref()
                 .and_then(|s| s.get("negative"))
                 .and_then(|v| v.as_f64())
                 .unwrap_or(if sent == "negative" { 1.0 } else { 0.0 });
@@ -1727,11 +1757,15 @@ async fn correlation_handler(
         let mut sum_sma = 0.0;
         let mut count_sma = 0;
         let start_idx = (i + 1).saturating_sub(sma_period);
-        for j in start_idx..=i {
-            sum_sma += buckets[j].sentiment_index;
+        for b in &buckets[start_idx..=i] {
+            sum_sma += b.sentiment_index;
             count_sma += 1;
         }
-        buckets[i].sentiment_sma = if count_sma > 0 { sum_sma / count_sma as f64 } else { 0.0 };
+        buckets[i].sentiment_sma = if count_sma > 0 {
+            sum_sma / count_sma as f64
+        } else {
+            0.0
+        };
     }
 
     // 5. Sentiment MACD
@@ -1744,7 +1778,13 @@ async fn correlation_handler(
     let macd_indices: Vec<Option<f64>> = buckets
         .iter()
         .enumerate()
-        .map(|(i, b)| if total_weighted[i] > 0.0 { Some(b.sentiment_index) } else { None })
+        .map(|(i, b)| {
+            if total_weighted[i] > 0.0 {
+                Some(b.sentiment_index)
+            } else {
+                None
+            }
+        })
         .collect();
     let macd_series = compute_sentiment_macd(&macd_indices, sma_period, slow_period, signal_period);
     for (i, m) in macd_series.into_iter().enumerate() {
@@ -1768,7 +1808,10 @@ async fn correlation_handler(
         if best_lag > 0 {
             format!("Sentiment leads price by {best_lag}h ({relationship}, r = {sign}{max_r:.2})")
         } else if best_lag < 0 {
-            format!("Price leads sentiment by {}h ({relationship}, r = {sign}{max_r:.2})", best_lag.abs())
+            format!(
+                "Price leads sentiment by {}h ({relationship}, r = {sign}{max_r:.2})",
+                best_lag.abs()
+            )
         } else {
             format!("Coincident correlation ({relationship}, r = {sign}{max_r:.2})")
         }
@@ -1809,7 +1852,8 @@ async fn correlation_handler(
     }
 
     if latest_market_session.as_deref() == Some("regular") && !raw_closed_regions.is_empty() {
-        if let (Some(last_region), Some(last_bucket)) = (raw_closed_regions.last(), buckets.last()) {
+        if let (Some(last_region), Some(last_bucket)) = (raw_closed_regions.last(), buckets.last())
+        {
             if last_region.end == last_bucket.timestamp {
                 raw_closed_regions.pop();
             }
@@ -1905,11 +1949,11 @@ async fn correlation_handler(
         let mut prev_prices = Vec::new();
         let mut prev_sentiments = Vec::new();
         let start = i.saturating_sub(2);
-        for k in start..=i {
-            if let Some(rp) = buckets[k].raw_price {
+        for b in &buckets[start..=i] {
+            if let Some(rp) = b.raw_price {
                 prev_prices.push(rp);
             }
-            prev_sentiments.push(buckets[k].sentiment_index);
+            prev_sentiments.push(b.sentiment_index);
         }
 
         let opp = compute_opportunity(
@@ -1934,8 +1978,8 @@ async fn correlation_handler(
             if let Some(curr_price) = buckets[i].raw_price {
                 let mut forward_prices = Vec::new();
                 let end = (i + 1 + 24).min(buckets.len());
-                for k in (i + 1)..end {
-                    if let Some(rp) = buckets[k].raw_price {
+                for b in &buckets[(i + 1)..end] {
+                    if let Some(rp) = b.raw_price {
                         forward_prices.push(rp);
                         if forward_prices.len() >= 2 {
                             break;
@@ -1943,7 +1987,10 @@ async fn correlation_handler(
                     }
                 }
                 if !forward_prices.is_empty() {
-                    let max_forward = forward_prices.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    let max_forward = forward_prices
+                        .iter()
+                        .copied()
+                        .fold(f64::NEG_INFINITY, f64::max);
                     if max_forward > curr_price * 1.002 {
                         buckets[i].signal_quality = Some("good".to_string());
                     } else {
