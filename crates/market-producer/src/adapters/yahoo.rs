@@ -238,6 +238,31 @@ impl YahooProvider {
                 .collect(),
         ))
     }
+
+    pub async fn fetch_hourly_quotes(
+        &self,
+        symbol: &str,
+        range: &str,
+    ) -> Result<AdapterOutcome<ChartBar>> {
+        let outcome = self.chart(symbol, "1h", None, None, Some(range)).await?;
+        if !matches!(
+            outcome.status,
+            ProviderStatus::Success | ProviderStatus::NoData
+        ) {
+            return Ok(AdapterOutcome::failure(outcome.status, outcome.retry_after));
+        }
+        if outcome.items.is_empty() {
+            return Ok(AdapterOutcome::success(Vec::new()));
+        }
+        if let Some(result) = outcome.items[0].pointer("/chart/result/0") {
+            if result.get("timestamp").is_none()
+                || result.get("timestamp").is_some_and(|v| v.is_null())
+            {
+                return Ok(AdapterOutcome::success(Vec::new()));
+            }
+        }
+        Ok(AdapterOutcome::success(parse_chart(&outcome.items[0])?))
+    }
 }
 
 #[async_trait]
@@ -449,5 +474,40 @@ mod tests {
         let bars = parse_chart(&fixture).unwrap();
         assert_eq!(bars.len(), 1);
         assert_eq!(bars[0].volume, Some(100.0));
+    }
+
+    #[tokio::test]
+    async fn fetch_hourly_quotes_parses_http_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 2048];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let body = r#"{"chart":{"result":[{"timestamp":[1700000000],"indicators":{"quote":[{"open":[10.0],"high":[12.0],"low":[9.0],"close":[11.0],"volume":[100]}]}}],"error":null}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = Client::builder().build().unwrap();
+        let yahoo = YahooProvider::with_bases(
+            client,
+            format!("http://127.0.0.1:{port}/chart"),
+            format!("http://127.0.0.1:{port}/summary"),
+        );
+
+        let outcome = yahoo.fetch_hourly_quotes("AAPL", "1mo").await.unwrap();
+        assert_eq!(outcome.status, ProviderStatus::Success);
+        assert_eq!(outcome.items.len(), 1);
+        assert_eq!(outcome.items[0].close, 11.0);
+        assert_eq!(outcome.items[0].volume, Some(100.0));
+
+        server.await.unwrap();
     }
 }

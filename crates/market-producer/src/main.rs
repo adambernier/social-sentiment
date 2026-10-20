@@ -14,6 +14,11 @@ async fn main() -> Result<()> {
             let interval = args.get(4).map(String::as_str).unwrap_or("1d");
             market_producer::runtime::backfill_global(start, end, interval).await
         }
+        Some("backfill-quotes") | Some("backfill-symbol") => {
+            let symbol = args.get(2).map(String::as_str);
+            let range = args.get(3).map(String::as_str).unwrap_or("1mo");
+            market_producer::runtime::backfill_quotes(symbol, range).await
+        }
         Some("sync-catalog") => market_producer::runtime::sync_catalog().await,
         Some(command) => anyhow::bail!("unknown market producer command: {command}"),
         None => market_producer::runtime::run().await,

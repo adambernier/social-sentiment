@@ -19,7 +19,7 @@ use social_sentiment_core::{
 };
 use sqlx::{postgres::PgPoolOptions, types::Json, PgPool, Row};
 use tokio::time::Instant;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     adapters::{taiwan::TaiwanIndexProvider, yahoo::YahooProvider, RoutedGlobalBarProvider},
@@ -380,6 +380,83 @@ pub async fn backfill_global(
             repository.upsert_global_bar(&bar).await?;
         }
     }
+    Ok(())
+}
+
+pub async fn backfill_quotes(target_symbol: Option<&str>, range: &str) -> Result<()> {
+    let config = Config::from_env();
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&config.database_dsn)
+        .await?;
+    let repository = Repository::new(pool.clone());
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("social-sentiment-market/1.0")
+        .build()?;
+    let yahoo = YahooProvider::new(client);
+    let calendar = UsMarketCalendar;
+
+    let symbols: Vec<String> = match target_symbol {
+        Some(symbol) => vec![symbol.trim().to_uppercase()],
+        None => repository
+            .active_symbols()
+            .await?
+            .into_iter()
+            .map(|item| item.symbol)
+            .collect(),
+    };
+
+    if symbols.is_empty() {
+        warn!("No active symbols found to backfill");
+        return Ok(());
+    }
+
+    let limiter = RateLimiter::new(20.0, Duration::from_secs(60));
+    let total_symbols = symbols.len();
+    let mut total_inserted = 0;
+    info!("Starting quote backfill for {total_symbols} symbol(s) (range: {range})");
+
+    for (index, symbol) in symbols.iter().enumerate() {
+        info!(
+            "Backfilling quotes for {symbol} ({}/{total_symbols})",
+            index + 1
+        );
+        limiter.acquire().await;
+        match yahoo.fetch_hourly_quotes(symbol, range).await {
+            Ok(outcome) if outcome.status == ProviderStatus::Success => {
+                let bar_count = outcome.items.len();
+                let mut symbol_inserted = 0;
+                for bar in outcome.items {
+                    let session = calendar.equity_session(bar.timestamp);
+                    let quote = StockQuote {
+                        symbol: symbol.clone(),
+                        timestamp: bar.timestamp,
+                        price: bar.close,
+                        volume: bar.volume.unwrap_or(0.0) as i64,
+                        market_session: session,
+                        provider: "yfinance".into(),
+                    };
+                    if insert_quote(&pool, &quote).await? {
+                        symbol_inserted += 1;
+                    }
+                }
+                total_inserted += symbol_inserted;
+                info!("Processed {bar_count} bars for {symbol}; inserted {symbol_inserted} new quotes");
+            }
+            Ok(outcome) => {
+                warn!(
+                    "No quotes retrieved for {symbol} (status: {:?})",
+                    outcome.status
+                );
+            }
+            Err(error) => {
+                error!(%error, "Failed to backfill quotes for {symbol}");
+            }
+        }
+    }
+
+    info!("Quote backfill complete; inserted {total_inserted} total quotes");
     Ok(())
 }
 
