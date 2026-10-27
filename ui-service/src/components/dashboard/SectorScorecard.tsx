@@ -7,7 +7,7 @@ import { format } from "date-fns";
 
 export default function SectorScorecard({ state, computed }: DashboardDataProps) {
   const { scorecardData } = computed;
-  const { symbol, metrics, latestQuote, correlationData } = state;
+  const { symbol, metrics, latestQuote, correlationData, hasHydrated } = state;
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [shareTab, setShareTab] = useState<"scorecard" | "opportunity">("scorecard");
 
@@ -30,7 +30,24 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
           </button>
         </div>
 
-        <div className="h-[250px] w-full mt-4">
+        <div className="flex flex-wrap items-center gap-2 mt-3">
+          {scorecardData.map((entry) => (
+            <div
+              key={entry.name}
+              className="flex items-center justify-between gap-2 px-2.5 py-1 rounded-lg bg-white/5 border border-white/5 text-xs tabular-nums flex-1 min-w-[95px]"
+            >
+              <span className="text-slate-400 font-medium">{entry.name}</span>
+              <span className={cn("font-bold", entry.value >= 0 ? "text-emerald-400" : "text-rose-400")}>
+                {entry.value > 0 ? "+" : ""}{entry.value.toFixed(1)}%
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div className="h-[220px] w-full mt-3">
+          {!hasHydrated ? (
+            <div className="w-full h-full rounded-xl bg-slate-950/40 border border-white/5 animate-pulse" />
+          ) : (
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={scorecardData} layout="vertical" margin={{ top: 0, right: 20, left: 20, bottom: 0 }}>
               <XAxis
@@ -61,13 +78,14 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
                 itemStyle={{ fontSize: '13px' }}
               />
               <ReferenceLine x={0} stroke="#64748b" />
-              <Bar dataKey="value" barSize={24} radius={[0, 4, 4, 0]}>
+              <Bar dataKey="value" barSize={24} radius={[0, 4, 4, 0]} isAnimationActive={false}>
                 {scorecardData.map((entry, index) => (
                   <Cell key={`cell-${index}`} fill={entry.value >= 0 ? '#10b981' : '#f43f5e'} />
                 ))}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
+          )}
         </div>
       </section>
 
@@ -111,7 +129,7 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
 
             {/* Tab 1: The 1:1 Scorecard Share Card */}
             {shareTab === "scorecard" && (
-              <div className="w-[520px] h-[520px] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black border border-white/10 rounded-3xl p-6 flex flex-col justify-between shadow-2xl relative overflow-hidden select-none">
+              <div className="w-[calc(100vw-2rem)] max-w-[520px] min-h-[480px] sm:h-[520px] share-card-bg border border-white/10 rounded-3xl p-5 sm:p-6 flex flex-col justify-between shadow-2xl relative overflow-hidden select-none">
                 
                 {/* Glow Accent */}
                 <div className="absolute top-0 right-0 w-48 h-48 bg-indigo-500/10 rounded-full blur-[80px] pointer-events-none" />
@@ -205,7 +223,7 @@ export default function SectorScorecard({ state, computed }: DashboardDataProps)
 
             {/* Tab 2: The 1:1 Opportunity Share Card */}
             {shareTab === "opportunity" && (
-              <div className="w-[520px] h-[520px] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black border border-white/10 rounded-3xl p-6 flex flex-col justify-between shadow-2xl relative overflow-hidden select-none">
+              <div className="w-[calc(100vw-2rem)] max-w-[520px] min-h-[480px] sm:h-[520px] share-card-bg border border-white/10 rounded-3xl p-5 sm:p-6 flex flex-col justify-between shadow-2xl relative overflow-hidden select-none">
                 
                 {/* Glow Accent */}
                 <div className="absolute top-0 right-0 w-48 h-48 bg-indigo-500/10 rounded-full blur-[80px] pointer-events-none" />

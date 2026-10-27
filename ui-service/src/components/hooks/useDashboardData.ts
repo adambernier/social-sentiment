@@ -279,9 +279,11 @@ export function useDashboardData() {
   const totalMentions = sentimentStats.reduce((sum, s) => sum + s.count, 0);
   const bullishCount = sentimentStats.find(s => s.sentiment === "positive")?.count || 0;
   const bearishCount = sentimentStats.find(s => s.sentiment === "negative")?.count || 0;
+  const neutralCount = sentimentStats.find(s => s.sentiment === "neutral")?.count || Math.max(0, totalMentions - bullishCount - bearishCount);
   
   const bullishPct = totalMentions ? Math.round((bullishCount / totalMentions) * 100) : 0;
   const bearishPct = totalMentions ? Math.round((bearishCount / totalMentions) * 100) : 0;
+  const neutralPct = totalMentions ? Math.max(0, 100 - bullishPct - bearishPct) : 0;
   
   // Override a stale 'regular' (weekend/holiday/stopped producer) to 'closed' so
   // the badge reflects whether the market is open *now*, not at the last quote.
@@ -342,18 +344,28 @@ export function useDashboardData() {
     ];
   }, [metrics]);
 
-  const filteredFeedPosts = useMemo(() => {
+  const topicFilteredPosts = useMemo(() => {
     const sourcePosts = selectedHour ? drillDownPosts : posts;
-    let list = sourcePosts.filter(p => feedTab === 'news' ? isNewsPlatform(p.platform) : !isNewsPlatform(p.platform));
-    if (selectedTopic !== "all") {
-      if (selectedTopic === "General / Outlier") {
-        list = list.filter(p => p.topic_label === "General / Outlier" || !p.topic_label);
-      } else {
-        list = list.filter(p => p.topic_label === selectedTopic);
-      }
+    if (selectedTopic === "all") return sourcePosts;
+    if (selectedTopic === "General / Outlier") {
+      return sourcePosts.filter(p => p.topic_label === "General / Outlier" || !p.topic_label);
     }
-    return list;
-  }, [posts, drillDownPosts, selectedHour, feedTab, selectedTopic]);
+    return sourcePosts.filter(p => p.topic_label === selectedTopic);
+  }, [posts, drillDownPosts, selectedHour, selectedTopic]);
+
+  const socialFeedCount = useMemo(
+    () => topicFilteredPosts.filter(p => !isNewsPlatform(p.platform)).length,
+    [topicFilteredPosts]
+  );
+
+  const newsFeedCount = useMemo(
+    () => topicFilteredPosts.filter(p => isNewsPlatform(p.platform)).length,
+    [topicFilteredPosts]
+  );
+
+  const filteredFeedPosts = useMemo(() => {
+    return topicFilteredPosts.filter(p => feedTab === 'news' ? isNewsPlatform(p.platform) : !isNewsPlatform(p.platform));
+  }, [topicFilteredPosts, feedTab]);
 
   const totalTopicCount = topicStats.reduce((sum, t) => sum + t.count, 0);
   const sortedTopics = useMemo(() => {
@@ -371,8 +383,9 @@ export function useDashboardData() {
       setSymbol, setHours, setPlatform, setSelectedTopic, setShowSR, setFeedTab, setChartView, setSelectedHour, setHideExtended
     },
     computed: {
-      totalMentions, bullishPct, bearishPct, marketSession, divergenceStatus,
-      vixRegime, scorecardData, filteredFeedPosts, totalTopicCount, sortedTopics
+      totalMentions, bullishCount, bearishCount, neutralCount, bullishPct, bearishPct, neutralPct,
+      marketSession, divergenceStatus, vixRegime, scorecardData, filteredFeedPosts,
+      socialFeedCount, newsFeedCount, totalTopicCount, sortedTopics
     }
   };
 }

@@ -197,7 +197,7 @@ const CorrelationTooltip = ({
 };
 
 export default function CorrelationChart({ state, setters }: DashboardDataProps) {
-  const { symbol, hours, chartView, correlationData, showSR, selectedHour, hideExtended } = state;
+  const { symbol, hours, chartView, correlationData, showSR, selectedHour, hideExtended, hasHydrated } = state;
   const { setChartView, setSelectedHour, setHideExtended } = setters;
 
   const displayData = React.useMemo<DisplayCorrelationBucket[]>(() => {
@@ -251,15 +251,16 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
   // and their local values are displayed inside the tooltip for each bucket.
 
   return (
-    <section className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl p-6 shadow-2xl">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-        <div className="flex items-center gap-3">
+    <section className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl p-4 sm:p-6 shadow-2xl">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
+        <div className="flex flex-wrap items-center gap-3">
           <h2 className="text-lg font-bold flex items-center gap-2 text-white">
-            <BarChart2 className="w-5 h-5 text-indigo-400" />
+            <BarChart2 className="w-5 h-5 text-indigo-400 shrink-0" />
             Sentiment vs. Price Correlation
           </h2>
-          <div className="flex bg-slate-950/60 p-0.5 rounded-lg border border-white/5">
+          <div className="flex flex-wrap items-center bg-slate-950/60 p-0.5 rounded-lg border border-white/5">
             <button
+              type="button"
               onClick={() => setChartView("volume")}
               className={cn(
                 "px-2.5 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer",
@@ -269,6 +270,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
               Volume
             </button>
             <button
+              type="button"
               onClick={() => setChartView("sentiment")}
               className={cn(
                 "px-2.5 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer",
@@ -279,6 +281,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
             </button>
             <div className="w-px h-4 bg-slate-700/50 mx-1 my-auto"></div>
             <button
+              type="button"
               onClick={() => setHideExtended(!hideExtended)}
               className={cn(
                 "px-2.5 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer",
@@ -288,6 +291,23 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
               {hideExtended ? "Show All Hours" : "Hide Closed"}
             </button>
           </div>
+          {selectedHour ? (
+            <span className="inline-flex items-center gap-1.5 text-xs bg-indigo-500/20 text-indigo-300 px-2.5 py-1 rounded-md border border-indigo-500/30">
+              Hour: {format(new Date(selectedHour), "MMM d, h:mm a")}
+              <button
+                type="button"
+                onClick={() => setSelectedHour(null)}
+                className="hover:text-white transition-colors cursor-pointer ml-0.5"
+                title="Clear hour selection"
+              >
+                ✕
+              </button>
+            </span>
+          ) : (
+            <span className="text-[11px] text-slate-500 hidden md:inline">
+              Click any hour on the chart to drill down feed
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-4 text-xs font-medium text-slate-400">
           {chartView === "volume" ? (
@@ -330,6 +350,11 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
         </div>
       </div>
       <div className="h-[400px]">
+        {!hasHydrated ? (
+          <div className="w-full h-full rounded-xl bg-slate-950/40 border border-white/5 animate-pulse flex items-center justify-center text-xs text-slate-500">
+            Loading correlation chart...
+          </div>
+        ) : (
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart 
             data={displayData} 
@@ -389,39 +414,40 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
 
             {chartView === "volume" ? (
               <>
-                <Bar yAxisId="volume" dataKey="positive" name="Positive Posts" stackId="a" fill="#10b981" fillOpacity={0.35} barSize={12} radius={[0, 0, 0, 0]} />
-                <Bar yAxisId="volume" dataKey="neutral" name="Neutral Posts" stackId="a" fill="#64748b" fillOpacity={0.35} radius={[0, 0, 0, 0]} />
-                <Bar yAxisId="volume" dataKey="negative" name="Negative Posts" stackId="a" fill="#f43f5e" fillOpacity={0.35} radius={[4, 4, 0, 0]} />
+                <Bar yAxisId="volume" dataKey="positive" name="Positive Posts" stackId="a" fill="#10b981" fillOpacity={0.35} barSize={12} radius={[0, 0, 0, 0]} isAnimationActive={false} />
+                <Bar yAxisId="volume" dataKey="neutral" name="Neutral Posts" stackId="a" fill="#64748b" fillOpacity={0.35} radius={[0, 0, 0, 0]} isAnimationActive={false} />
+                <Bar yAxisId="volume" dataKey="negative" name="Negative Posts" stackId="a" fill="#f43f5e" fillOpacity={0.35} radius={[4, 4, 0, 0]} isAnimationActive={false} />
               </>
             ) : (
               <>
-                <Area yAxisId="left" type="monotone" dataKey="sentimentIndex" name="Weighted Sentiment Index" stroke="#818cf8" strokeWidth={1.5} fill="url(#sentimentGrad)" />
-                <Line yAxisId="left" type="monotone" dataKey="sentimentSMA" name="Sentiment SMA" stroke="#06b6d4" strokeWidth={3} dot={false} />
+                <Area yAxisId="left" type="monotone" dataKey="sentimentIndex" name="Weighted Sentiment Index" stroke="#818cf8" strokeWidth={1.5} fill="url(#sentimentGrad)" isAnimationActive={false} />
+                <Line yAxisId="left" type="monotone" dataKey="sentimentSMA" name="Sentiment SMA" stroke="#06b6d4" strokeWidth={3} dot={false} isAnimationActive={false} />
               </>
             )}
 
             <Line
               yAxisId="dollar" type="monotone" dataKey="rawPrice" name={`${symbol} Price`}
-              stroke="#fbbf24" strokeWidth={3} dot={<CustomizedOpportunityDot />} connectNulls={true}
+              stroke="#fbbf24" strokeWidth={3} dot={<CustomizedOpportunityDot />} connectNulls={true} isAnimationActive={false}
             />
             <Line
               yAxisId="right" type="monotone" dataKey="futurePct" name="NQ Futures"
-              stroke="#8b5cf6" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={true}
+              stroke="#8b5cf6" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={true} isAnimationActive={false}
             />
             {showSR && correlationData.supportPrice > 0 && (
               <Line
                 yAxisId="dollar" type="monotone" dataKey="supportPrice" name="Support Level"
-                stroke="#10b981" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls={true}
+                stroke="#10b981" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls={true} isAnimationActive={false}
               />
             )}
             {showSR && correlationData.resistancePrice > 0 && (
               <Line
                 yAxisId="dollar" type="monotone" dataKey="resistancePrice" name="Resistance Level"
-                stroke="#f43f5e" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls={true}
+                stroke="#f43f5e" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls={true} isAnimationActive={false}
               />
             )}
           </ComposedChart>
         </ResponsiveContainer>
+        )}
       </div>
       {chartView === "sentiment" && (
         <div className="mt-1">
@@ -440,7 +466,7 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
                 <YAxis stroke="#64748b" tickLine={false} axisLine={false} tick={{ fontSize: 10 }} domain={['auto', 'auto']} />
                 <Tooltip contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.9)', borderColor: '#334155', borderRadius: '8px', backdropFilter: 'blur(8px)' }} labelFormatter={(l) => format(new Date(l), "MMM d, yyyy h:mm a")} itemStyle={{ fontSize: '13px' }} formatter={(v) => [typeof v === 'number' ? v.toFixed(2) : v, "Momentum"]} />
                 <ReferenceLine y={0} stroke="#475569" />
-                <Bar dataKey="sentimentHist" name="Sentiment Momentum">
+                <Bar dataKey="sentimentHist" name="Sentiment Momentum" isAnimationActive={false}>
                   {correlationData.data.map((entry, idx) => (
                     <Cell key={idx} fill={(entry.sentimentHist ?? 0) >= 0 ? "#10b981" : "#f43f5e"} />
                   ))}

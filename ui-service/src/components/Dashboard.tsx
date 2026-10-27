@@ -20,20 +20,13 @@ const GlobalContextPanel =
 
 export default function Dashboard() {
   const dashboardData = useDashboardData();
-
-  if (!dashboardData.state.hasHydrated || !dashboardData.state.hasSetDefaultHours) {
-    return (
-      <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black text-slate-100 flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-8 h-8 rounded-full border-2 border-indigo-500/30 border-t-indigo-500 animate-spin"></div>
-          <p className="text-slate-400 text-sm animate-pulse">Loading dashboard...</p>
-        </div>
-      </div>
-    );
-  }
+  const isInitialHydrating = !dashboardData.state.hasHydrated || !dashboardData.state.hasSetDefaultHours;
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f111a] to-black text-slate-100 p-4 md:p-8 font-sans selection:bg-indigo-500/30">
+    <div className="min-h-screen terminal-bg text-slate-100 p-4 md:p-8 font-sans selection:bg-indigo-500/30 relative overflow-x-hidden">
+      {isInitialHydrating && (
+        <div className="fixed top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-indigo-500 via-cyan-400 to-emerald-400 animate-pulse z-50" />
+      )}
       <div className="max-w-[1600px] mx-auto space-y-6">
         <Header {...dashboardData} />
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">

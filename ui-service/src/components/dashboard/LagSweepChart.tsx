@@ -37,7 +37,7 @@ export default function LagSweepChart({ state }: DashboardDataProps) {
               labelFormatter={(lag) => (lag > 0 ? `+${lag}h · sentiment leads price` : lag < 0 ? `${lag}h · price leads sentiment` : "Coincident (0h)")}
             />
             <ReferenceLine y={0} stroke="#475569" />
-            <Bar dataKey="r" radius={[2, 2, 0, 0]}>
+            <Bar dataKey="r" radius={[2, 2, 0, 0]} isAnimationActive={false}>
               {correlationData.lagSweeps.map((entry) => (
                 <Cell
                   key={entry.lag}
