@@ -1,7 +1,6 @@
-# Opt-in Rust worker/producer overlay. The base Compose file remains the
-# one-command Python rollback. Apply this overlay and name only the service
-# being promoted; service names, dependencies, environments and queues remain
-# inherited from docker-compose.yml.
+# Compatibility overlay retained while hosts transition off
+# `COMPOSE_FILE=docker-compose.yml:docker-compose.rust.yml`.
+# `docker-compose.yml` now builds these Rust targets by default.
 services:
   preprocessing-service:
     build:

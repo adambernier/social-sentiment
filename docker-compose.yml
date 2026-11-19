@@ -98,13 +98,14 @@ services:
   preprocessing-service:
     build:
       context: .
-      dockerfile: preprocessing-service/Dockerfile
+      dockerfile: Dockerfile.rust
+      target: rust-preprocessing
     environment:
     - RABBITMQ_HOST=rabbitmq
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - RABBITMQ_USER=${RABBITMQ_USER}
     - RABBITMQ_PASS=${RABBITMQ_PASS}
-    - PYTHONUNBUFFERED=1
+    - RUST_LOG=${RUST_LOG:-info}
     - TOPIC_MODEL_VERSION=${TOPIC_MODEL_VERSION:-zero-shot-onnx-v1}
     - PIPELINE_GIT_COMMIT=${PIPELINE_GIT_COMMIT:-unknown}
     depends_on:
@@ -115,11 +116,13 @@ services:
   sentiment-service:
     build:
       context: .
-      dockerfile: sentiment-service/Dockerfile
+      dockerfile: Dockerfile.rust
+      target: rust-sentiment
     environment:
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER}
     - RABBITMQ_PASS=${RABBITMQ_PASS}
+    - RUST_LOG=${RUST_LOG:-info}
     - SENTIMENT_MODEL_VERSION=${SENTIMENT_MODEL_VERSION:-fintwitbert-onnx-v1}
     - PIPELINE_GIT_COMMIT=${PIPELINE_GIT_COMMIT:-unknown}
     depends_on:
@@ -128,12 +131,14 @@ services:
   storage-service:
     build:
       context: .
-      dockerfile: storage-service/Dockerfile
+      dockerfile: Dockerfile.rust
+      target: rust-storage
     environment:
     - RABBITMQ_HOST=rabbitmq
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - RABBITMQ_USER=${RABBITMQ_USER}
     - RABBITMQ_PASS=${RABBITMQ_PASS}
+    - RUST_LOG=${RUST_LOG:-info}
     - GLOBAL_CONTEXT_ENABLED=${GLOBAL_CONTEXT_ENABLED:-false}
     - POST_RETENTION_DAYS=${POST_RETENTION_DAYS:-14}
     - QUOTE_RETENTION_DAYS=${QUOTE_RETENTION_DAYS:-90}
@@ -151,13 +156,14 @@ services:
   bluesky-producer:
     build:
       context: .
-      dockerfile: bluesky-producer/Dockerfile
+      dockerfile: Dockerfile.rust
+      target: rust-bluesky-producer
     environment:
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER}
     - RABBITMQ_PASS=${RABBITMQ_PASS}
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-    - PYTHONUNBUFFERED=1
+    - RUST_LOG=${RUST_LOG:-info}
     - PIPELINE_GIT_COMMIT=${PIPELINE_GIT_COMMIT:-unknown}
     depends_on:
       rabbitmq:
@@ -169,13 +175,14 @@ services:
   stocktwits-producer:
     build:
       context: .
-      dockerfile: stocktwits-producer/Dockerfile
+      dockerfile: Dockerfile.rust
+      target: rust-stocktwits-producer
     environment:
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER}
     - RABBITMQ_PASS=${RABBITMQ_PASS}
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-    - PYTHONUNBUFFERED=1
+    - RUST_LOG=${RUST_LOG:-info}
     - PIPELINE_GIT_COMMIT=${PIPELINE_GIT_COMMIT:-unknown}
     depends_on:
       rabbitmq:
@@ -191,13 +198,14 @@ services:
     profiles: ["reddit"]
     build:
       context: .
-      dockerfile: reddit-producer/Dockerfile
+      dockerfile: Dockerfile.rust
+      target: rust-reddit-producer
     environment:
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER}
     - RABBITMQ_PASS=${RABBITMQ_PASS}
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-    - PYTHONUNBUFFERED=1
+    - RUST_LOG=${RUST_LOG:-info}
     - PIPELINE_GIT_COMMIT=${PIPELINE_GIT_COMMIT:-unknown}
     - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-bot/1.0 (DigitalOcean; +github.com/adambernier/social-sentiment)}
     - REDDIT_PROXY_URL=${REDDIT_PROXY_URL}
@@ -215,14 +223,15 @@ services:
   finnhub-producer:
     build:
       context: .
-      dockerfile: finnhub-producer/Dockerfile
+      dockerfile: Dockerfile.rust
+      target: rust-finnhub-producer
     environment:
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER}
     - RABBITMQ_PASS=${RABBITMQ_PASS}
     - FINNHUB_API_KEY=${FINNHUB_API_KEY}
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-    - PYTHONUNBUFFERED=1
+    - RUST_LOG=${RUST_LOG:-info}
     - PIPELINE_GIT_COMMIT=${PIPELINE_GIT_COMMIT:-unknown}
     depends_on:
       rabbitmq:
@@ -234,7 +243,8 @@ services:
   alpaca-producer:
     build:
       context: .
-      dockerfile: alpaca-producer/Dockerfile
+      dockerfile: Dockerfile.rust
+      target: rust-alpaca-producer
     environment:
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER}
@@ -243,7 +253,7 @@ services:
     - ALPACA_API_SECRET=${ALPACA_API_SECRET}
     - ALPACA_URL=${ALPACA_URL}
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-    - PYTHONUNBUFFERED=1
+    - RUST_LOG=${RUST_LOG:-info}
     - PIPELINE_GIT_COMMIT=${PIPELINE_GIT_COMMIT:-unknown}
     depends_on:
       rabbitmq:
@@ -255,12 +265,14 @@ services:
   market-producer:
     build:
       context: .
-      dockerfile: market-producer/Dockerfile
+      dockerfile: Dockerfile.rust
+      target: rust-market-producer
     environment:
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - RABBITMQ_HOST=rabbitmq
     - RABBITMQ_USER=${RABBITMQ_USER}
     - RABBITMQ_PASS=${RABBITMQ_PASS}
+    - RUST_LOG=${RUST_LOG:-info}
     - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-social-sentiment-bot/1.0 (DigitalOcean; +github.com/adambernier/social-sentiment)}
     - REDDIT_PROXY_URL=${REDDIT_PROXY_URL}
     - GLOBAL_CONTEXT_ENABLED=${GLOBAL_CONTEXT_ENABLED:-false}
@@ -278,9 +290,11 @@ services:
   global-events-producer:
     build:
       context: .
-      dockerfile: global-events-producer/Dockerfile
+      dockerfile: Dockerfile.rust
+      target: rust-global-events-producer
     environment:
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    - RUST_LOG=${RUST_LOG:-info}
     - GLOBAL_CONTEXT_ENABLED=${GLOBAL_CONTEXT_ENABLED:-false}
     - GLOBAL_EVENTS_POLL_SECONDS=${GLOBAL_EVENTS_POLL_SECONDS:-900}
     - GLOBAL_EVENTS_MAX_PER_RULE_DAY=${GLOBAL_EVENTS_MAX_PER_RULE_DAY:-20}
@@ -293,11 +307,14 @@ services:
   api-service:
     build:
       context: .
-      dockerfile: api-service/Dockerfile
+      dockerfile: Dockerfile.rust
+      target: rust-api
     environment:
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     - ADMIN_API_KEY=${ADMIN_API_KEY}
     - GLOBAL_CONTEXT_ENABLED=${GLOBAL_CONTEXT_ENABLED:-false}
+    - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-}
+    - RUST_LOG=${RUST_LOG:-info}
     depends_on:
       postgres:
         condition: service_healthy
