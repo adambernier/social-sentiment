@@ -39,32 +39,31 @@ real-time market data to drive a stock-performance dashboard.
 | `preprocessing-service` | Cleans text, runs a quantized ONNX zero-shot topic model, drops short posts |
 | `sentiment-service`     | Scores clean posts with a quantized ONNX FinTwitBERT model, in batches   |
 | `storage-service`       | Consumes scored posts and performs batched, idempotent database writes   |
-| `api-service`           | FastAPI backend exposing aggregated endpoints like `/stats/dashboard`    |
+| `api-service`           | Axum (Rust) backend exposing aggregated endpoints like `/stats/dashboard` |
+| `schema-migrate`        | Standalone Python one-shot runner applying immutable SQL migrations       |
+| `archive-service`       | Standalone Python monthly Parquet exporter to S3/Spaces (`archive` profile)|
 | `ui-service`            | Next.js (React) web frontend with real-time charts and scorecards        |
 
-Tracked tickers/symbols are centralized in `shared/symbols.py`. Both transformer
-models ship as quantized ONNX in `*/model_quant/`, so there is no large
-model download on first boot.
+Both transformer models ship as quantized ONNX in `*/model_quant/`, so there is
+no large model download on first boot.
 
 ## Architecture notes
 
-- **Async ingest pipeline.** The consumers (`preprocessing`, `sentiment`,
-  `storage`) use `aio-pika` with `connect_robust` and process messages in
-  batches, acking on success and re-queuing (`nack(requeue=True)`) on failure.
-- **Async connection pooling.** `api-service` and `storage-service` use a
-  `psycopg_pool.AsyncConnectionPool` for Postgres access.
-- **Graceful shutdown.** Every service routes its entrypoint through
-  `shared/runtime.py`, which traps `SIGINT`/`SIGTERM` so in-flight work
-  finishes (and unacked messages re-queue) before exit — important for clean
-  container stops.
+- **Rust backend workspace (`crates/`).** All 11 runtime backend services —
+  the 7 ingestion producers, 3 RabbitMQ workers (`preprocessing`, `sentiment`,
+  `storage`), and the HTTP/WebSocket `api-service` — run as native Rust binaries
+  built from `Dockerfile.rust` by default in `docker-compose.yml`.
+- **Async ingest pipeline.** The Rust workers (`preprocessing`, `sentiment`,
+  `storage`) use `lapin` with publisher confirms, reconnect loops, explicit
+  ack/retry/dead-letter handling, and `sqlx` connection pooling for Postgres.
+- **Graceful shutdown.** Every Rust service traps `SIGINT`/`SIGTERM` via
+  `social-sentiment-core` so in-flight work finishes and unacked messages
+  requeue cleanly before exit.
 - **Real-time updates.** A Postgres `LISTEN/NOTIFY` trigger on new posts is
-  relayed to the UI over the `/stats/stream` WebSocket.
-- **[Phased Rust migration](docs/rust-backend-migration.md).** Python remains the default implementation. The
-  Rust backend candidates are organized in the `crates/` workspace (`social-sentiment-core`,
-  `preprocessing-service`, `sentiment-service`, `storage-service`, `social-news-producer`,
-  `market-producer`, `global-events-producer`, and `api-service`). The Rust worker overlay is opt-in,
-  using confirmed RabbitMQ publishing, reconnect loops, graceful shutdown, and Prometheus endpoints.
-  The Rust API runs as a side-by-side candidate while contract, load, and soak gates are completed.
+  relayed to the UI over the `/api/stats/stream` WebSocket.
+- **Retained Python utilities.** `schema-migrate/` (one-shot DB migrations) and
+  `archive-service/` (monthly encrypted Parquet export) remain standalone Python
+  containers with hashed lockfiles. See [the Rust migration record](docs/rust-backend-migration.md).
 
 ## Features
 
@@ -129,7 +128,8 @@ Inspired by hockey stat cards, the dashboard features a **Divergent Bar Chart** 
 
 ## Quick start (Docker Compose)
 
-The whole stack — RabbitMQ, Postgres, and every service — is orchestrated by
+The whole stack — RabbitMQ, Postgres, `schema-migrate`, the 11 Rust backend
+services, UI, Prometheus, Grafana, and Caddy — is orchestrated by
 `docker-compose.yml`:
 
 ```bash
@@ -137,35 +137,12 @@ docker compose up -d --build
 docker compose ps
 ```
 
-To evaluate the Rust preprocessing, sentiment, and storage workers while
-keeping the production-parity Python API, apply the explicit overlay:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.rust.yml up -d --build
-```
-
-Model promotion is gated by a cross-runtime fixture check:
-
-```bash
-python scripts/verify_model_parity.py
-```
-
-Run the Rust API beside the Python oracle and compare their contracts:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.rust.yml \
-  --profile rust-api up -d --build api-service rust-api-service
-python scripts/verify_api_contract.py \
-  --python-url http://127.0.0.1:8000 \
-  --rust-url http://127.0.0.1:8001
-```
-
 Compose runs `schema-migrate` once after PostgreSQL is healthy. Database-using
 services start only after that migration exits successfully; ordinary service
 startup never executes DDL.
 
-The quantized ONNX models ship in the images, so first boot is fast; the
-`hf_cache` named volume caches any tokenizer assets across restarts.
+The quantized ONNX models ship in the images (`preprocessing-service/model_quant`
+and `sentiment-service/model_quant`), so first boot is fast.
 
 Useful endpoints once the stack is up:
 - UI dashboard: http://localhost:3000
@@ -191,16 +168,14 @@ docker compose down -v           # also drop postgres_data and hf_cache
 
 ## Local development (services on host, infra in Docker)
 
-For iterating on a single service it's often nicer to run that service from
-the venv while the rest stays in Compose. Stop just the service you want to
-replace, then run it locally — `shared/config.py` reads everything from env
-vars, with defaults that match `localhost`:
+For iterating on a single Rust service, keep infra in Compose and run the crate
+directly on the host (`social-sentiment-core` reads env vars with defaults
+matching `localhost`):
 
 ```bash
 docker compose up -d rabbitmq postgres
 docker compose run --rm schema-migrate
-source .venv/bin/activate
-python preprocessing-service/main.py    # for example
+cargo run --locked -p service-preprocessing    # for example
 ```
 
 The migration runner records the checksum of each applied migration in
@@ -232,17 +207,16 @@ Override defaults with env vars if needed (see `shared/config.py`):
 
 ## Dependency lockfiles
 
-Each service installs from a fully hashed, transitively pinned `requirements.txt`
-compiled by [`uv`](https://github.com/astral-sh/uv) from its `requirements.in`
-(direct deps) plus the shared `constraints.txt` (cross-service version pins).
-Images install with `pip install --require-hashes`, so builds are reproducible
-and artifact-verified.
+The retained Python containers (`schema-migrate` and `archive-service`) install
+from fully hashed, transitively pinned `requirements.txt` files compiled by
+[`uv`](https://github.com/astral-sh/uv) from `requirements.in` plus the shared
+`constraints.txt`. Images install with `pip install --require-hashes`.
 
 Regenerate after editing any `requirements.in` or `constraints.txt`:
 
 ```bash
-scripts/lock.sh                 # recompile all services
-scripts/lock.sh api-service     # or just one
+scripts/lock.sh                    # recompile all retained Python services
+scripts/lock.sh schema-migrate     # or just one
 docker compose up -d --build
 ```
 
@@ -290,26 +264,19 @@ instrument metadata lives in
 catalog sync; entries omitted from the catalog are never deleted automatically.
 
 For a new installation, keep the flag false while applying the structural
-migrations, sync the catalog, then run the paced two-year daily backfill:
+migrations, sync the YAML catalog, then run the paced daily backfill:
 
 ```bash
 docker compose up -d postgres schema-migrate
-docker compose run --rm market-producer \
-  python market-producer/sync_global_instruments.py
+python market-producer/sync_global_instruments.py
 GLOBAL_CONTEXT_ENABLED=true docker compose run --rm market-producer \
-  python market-producer/global_backfill.py
+  /app/producer-market backfill 2024-01-01T00:00:00Z 2026-01-01T00:00:00Z 1d
 ```
 
-Adding or changing instrument metadata does not require a schema migration.
-After deploying the IX0143 adapter, sync and backfill the targeted instrument:
+For equity hourly quote backfills, use the Rust `market-producer` CLI:
 
 ```bash
-docker compose run --rm market-producer \
-  python market-producer/sync_global_instruments.py
-
-GLOBAL_CONTEXT_ENABLED=true docker compose run --rm market-producer \
-  python market-producer/global_backfill.py \
-  --instrument-key index:taiwan-semiconductor
+docker compose run --rm market-producer /app/producer-market backfill-quotes AAPL 1mo
 ```
 
 The official Taiwan Index Plus feed supplies daily closing history for
@@ -464,12 +431,8 @@ environment variable (defaults to the in-network `http://api-service:8000`).
 
 ## Recent changes
 
-- Created **phased Rust backend migration workspace** (`crates/`) covering core libraries (`social-sentiment-core`), processing workers (`preprocessing`, `sentiment`, `storage`), ingestion producers (`social-news`, `market`, `global-events`), and side-by-side Axum API candidate.
-- Added **live Docker-backed worker qualification harness** (`scripts/qualify_worker.py`) with RabbitMQ/PostgreSQL fault injection, 1,000-message recorded replay parity gates, and 24-hour observation windows.
-- Implemented **producer fixture parity and shadow capture verification harness** (`scripts/qualify_producer.py` and `scripts/verify_producer_parity.py`).
-- Added **cross-runtime model parity gate** (`scripts/verify_model_parity.py`) and side-by-side **API contract validation harness** (`scripts/verify_api_contract.py`).
+- Promoted the **Rust backend workspace (`crates/`)** to the default runtime in `docker-compose.yml` for all 11 backend services, isolated `schema-migrate/` as a standalone migration container, and removed the superseded Python service implementations.
+- Added **Rust quote backfill** (`producer-market backfill-quotes`) alongside global bar backfill in `crates/market-producer`.
+- Retained `schema-migrate/` and `archive-service/` as standalone Python containers with hashed lockfiles, plus unported one-off maintenance CLIs (`market-producer/sync_global_instruments.py`, `storage-service/rollup.py`, `preprocessing-service/backfill_topics.py`).
 - Integrated **opt-in global context factor & event model** with Asian indices, FX pairs, geopolitical rules, and 30/90-session lag statistics (`GLOBAL_CONTEXT_ENABLED`).
-- Migrated ingest consumers to **async `aio-pika`** with batched processing and explicit ack/re-queue.
-- Added **async Postgres connection pooling** (`psycopg_pool`) in the API and storage services.
-- Added **hourly sentiment rollup + retention pruning** (`storage-service/rollup.py`) with a two-tier hot/cold read path in the API.
-- Added **graceful `SIGTERM`/`SIGINT` shutdown** across all services via `shared/runtime.py`.
+- Added **two-tier analytical retention** with atomic hourly sentiment & market fact rollups, WAL-G PITR backups, and monthly SSE-C encrypted Parquet archiving (`archive-service`).

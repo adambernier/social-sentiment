@@ -69,25 +69,3 @@ services:
       target: rust-api
     environment:
       - RUST_LOG=${RUST_LOG:-info}
-
-  # Side-by-side API candidate for contract, browser, and load gates. It does
-  # not replace the Python api-service or change the frontend's API_URL.
-  rust-api-service:
-    profiles: ["rust-api"]
-    build:
-      context: .
-      dockerfile: Dockerfile.rust
-      target: rust-api
-    environment:
-      - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      - ADMIN_API_KEY=${ADMIN_API_KEY}
-      - GLOBAL_CONTEXT_ENABLED=${GLOBAL_CONTEXT_ENABLED:-false}
-      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-}
-      - RUST_LOG=${RUST_LOG:-info}
-    ports:
-      - 127.0.0.1:8001:8000
-    depends_on:
-      postgres:
-        condition: service_healthy
-      schema-migrate:
-        condition: service_completed_successfully

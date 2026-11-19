@@ -1,9 +1,16 @@
 # Rust backend migration
 
-Python remains the production default and behavioral oracle until the gates in
-this document pass. PostgreSQL migrations, RabbitMQ queue names and payloads,
-environment variables, the public `/api` contract, and the Next.js frontend
-remain shared across runtimes.
+> **Cutover status:** `docker-compose.yml` now builds all 11 backend services
+> (the 3 RabbitMQ workers, 7 ingestion producers, and `api-service`) directly
+> from `Dockerfile.rust`, and the superseded Python runtime implementations
+> have been removed. `schema-migrate/` and `archive-service/` remain standalone
+> Python containers with hashed lockfiles, alongside a small set of unported
+> maintenance CLIs (`market-producer/sync_global_instruments.py`,
+> `storage-service/rollup.py`, `preprocessing-service/backfill_topics.py`).
+> `docker-compose.rust.yml` is retained temporarily as a compatibility overlay
+> while hosts drop `COMPOSE_FILE=docker-compose.yml:docker-compose.rust.yml`
+> from `.env`. The sections below document the migration architecture and
+> qualification methodology used during cutover.
 
 ## Runtime inventory
 
@@ -17,9 +24,10 @@ The backend has three queue workers, one API, and seven ingestion producers:
 6. market data (writes normalized quotes, metrics, instruments, and bars)
 7. global events (writes normalized event signals and links)
 
-The Rust preprocessing, sentiment, and storage workers are available in
-`docker-compose.rust.yml`. The Rust API candidate is a side-by-side service in
-the `rust-api` profile and never replaces the Python API implicitly.
+All 11 services are built by default from `Dockerfile.rust` in
+`docker-compose.yml`. PostgreSQL migrations (`schema-migrate/`), monthly
+Parquet exports (`archive-service/`), RabbitMQ queues, environment variables,
+the public `/api` contract, and the Next.js frontend remain unchanged.
 
 ## Current implementation status
 
