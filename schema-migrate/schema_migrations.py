@@ -2,8 +2,8 @@
 
 import hashlib
 import logging
+import os
 import random
-import sys
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -11,9 +11,9 @@ from pathlib import Path
 
 import psycopg
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
-
-from shared.config import DATABASE_DSN
+DATABASE_DSN = os.environ.get(
+    "DATABASE_DSN", "postgresql://postgres:sentiment@localhost:5432/sentiment"
+)
 
 logger = logging.getLogger("schema-migrations")
 SCHEMA_APPLY_RETRIES = 5

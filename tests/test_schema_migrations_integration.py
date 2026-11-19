@@ -13,7 +13,7 @@ from schema_migrations import MIGRATIONS, apply_migrations
 
 TEST_DATABASE_DSN = os.environ.get("TEST_DATABASE_DSN")
 SCHEMA_SQL = (
-    Path(__file__).resolve().parents[1] / "storage-service" / "schema.sql"
+    Path(__file__).resolve().parents[1] / "schema-migrate" / "schema.sql"
 ).read_text()
 
 pytestmark = pytest.mark.skipif(

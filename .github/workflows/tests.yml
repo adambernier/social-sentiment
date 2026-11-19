@@ -57,6 +57,7 @@ jobs:
                     -r archive-service/requirements.txt \
                     -r market-producer/requirements.txt \
                     -r preprocessing-service/requirements.txt \
+                    -r schema-migrate/requirements.txt \
                     -r sentiment-service/requirements.txt \
                     -r storage-service/requirements.txt
         # 2. Install test framework packages (unhashed)

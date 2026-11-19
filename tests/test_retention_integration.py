@@ -42,7 +42,7 @@ def retention_database():
             sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_name))
         )
         _set_search_path(conn, schema_name)
-        storage_dir = Path(__file__).resolve().parent.parent / "storage-service"
+        migrations_dir = Path(__file__).resolve().parent.parent / "schema-migrate"
         for migration_name in (
             "schema.sql",
             "0003_analytical_facts.sql",
@@ -50,7 +50,7 @@ def retention_database():
             "0005_provenance_and_quality.sql",
             "0006_analytical_constraints.sql",
         ):
-            conn.execute((storage_dir / migration_name).read_text())
+            conn.execute((migrations_dir / migration_name).read_text())
 
     try:
         yield schema_name

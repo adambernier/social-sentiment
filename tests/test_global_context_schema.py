@@ -3,7 +3,7 @@ from pathlib import Path
 from schema_migrations import MIGRATIONS
 
 MIGRATION_SQL = (
-    Path(__file__).resolve().parents[1] / "storage-service" / "0002_global_context.sql"
+    Path(__file__).resolve().parents[1] / "schema-migrate" / "0002_global_context.sql"
 ).read_text()
 
 

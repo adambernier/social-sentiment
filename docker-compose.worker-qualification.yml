@@ -56,8 +56,7 @@ services:
     profiles: ["qualification"]
     build:
       context: .
-      dockerfile: storage-service/Dockerfile
-    command: ["python", "storage-service/migrate.py"]
+      dockerfile: schema-migrate/Dockerfile
     environment:
       DATABASE_DSN: postgresql://qualification:qualification@postgres:5432/qualification
     depends_on:

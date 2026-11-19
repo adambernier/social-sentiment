@@ -87,8 +87,7 @@ services:
   schema-migrate:
     build:
       context: .
-      dockerfile: storage-service/Dockerfile
-    command: ["python", "storage-service/migrate.py"]
+      dockerfile: schema-migrate/Dockerfile
     environment:
     - DATABASE_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     depends_on:

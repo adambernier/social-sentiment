@@ -205,7 +205,7 @@ python preprocessing-service/main.py    # for example
 
 The migration runner records the checksum of each applied migration in
 `schema_migrations`. Applied SQL files are immutable: add a new version to
-`storage-service/schema_migrations.py` for later schema changes.
+`schema-migrate/schema_migrations.py` for later schema changes.
 
 The UI is a Next.js app; iterate on it with `npm run dev` (it is already run
 this way inside the `ui-service` container, with the source bind-mounted for
