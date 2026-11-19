@@ -1,4 +1,3 @@
-import importlib
 import math
 import os
 import threading
@@ -17,8 +16,6 @@ from db import (
     ROLLUP_AND_PRUNE_POSTS_SQL,
     ROLLUP_AND_PRUNE_QUOTES_SQL,
 )
-
-api_main = importlib.import_module("api-service.main")
 
 
 TEST_DATABASE_DSN = os.environ.get("TEST_DATABASE_DSN")
@@ -228,26 +225,6 @@ def test_retention_adds_late_posts_preserves_boundary_and_repeats_safely(
             "SELECT model_kind, model_hash FROM model_artifacts ORDER BY model_kind"
         ).fetchall() == [("sentiment", "legacy"), ("topic", "legacy")]
 
-        fact_query, fact_params, is_filtered = (
-            api_main._sentiment_aggregate_query(
-                "NVDA",
-                bucket_hour,
-                "bluesky",
-                "Unassigned",
-            )
-        )
-        assert is_filtered is True
-        assert conn.execute(fact_query, fact_params).fetchone()[1:4] == (0, 0, 1)
-        coverage_query, coverage_params = api_main._sentiment_coverage_query(
-            "NVDA",
-            "bluesky",
-            "Unassigned",
-        )
-        assert conn.execute(
-            coverage_query,
-            coverage_params,
-        ).fetchone() == (bucket_hour,)
-
 
 def test_retention_rolls_back_delete_when_aggregate_write_fails(
     retention_database,
@@ -441,14 +418,3 @@ def test_quote_retention_preserves_ohlc_and_updates_for_late_quotes(
         )
 
         assert _run_quote_retention(conn, cutoff) == (0, 0, 0)
-
-        hourly_rows = conn.execute(
-            api_main.HOURLY_MARKET_QUERY,
-            [
-                ["NVDA"],
-                bucket_hour - timedelta(hours=1),
-                ["NVDA"],
-                bucket_hour - timedelta(hours=1),
-            ],
-        ).fetchall()
-        assert [row[1] for row in hourly_rows] == [bucket_hour, cutoff]

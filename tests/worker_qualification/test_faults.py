@@ -38,7 +38,7 @@ async def _wait_for(
 
 
 @pytest.mark.parametrize("worker", ["preprocessing", "sentiment"])
-@pytest.mark.parametrize("runtime", ["python", "rust"])
+@pytest.mark.parametrize("runtime", ["rust"])
 async def test_unroutable_output_retries_then_dead_letters(
     qualification_stack: QualificationStack,
     qualification_fixtures: dict[str, dict[str, Any]],
@@ -70,7 +70,7 @@ async def test_unroutable_output_retries_then_dead_letters(
 
 
 @pytest.mark.parametrize("worker", ["preprocessing", "sentiment"])
-@pytest.mark.parametrize("runtime", ["python", "rust"])
+@pytest.mark.parametrize("runtime", ["rust"])
 async def test_publisher_rejection_retries_then_dead_letters(
     qualification_stack: QualificationStack,
     qualification_fixtures: dict[str, dict[str, Any]],

@@ -43,32 +43,21 @@ jobs:
         python-version: '3.12'
         cache: 'pip' # Caches pip dependencies automatically
 
-    - name: Set up Rust for model parity
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: 1.94.0
-
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 1. Install service dependencies using their hashed lockfiles
+        # 1. Install retained Python service dependencies using their hashed lockfiles
         pip install --require-hashes \
-                    -r api-service/requirements.txt \
                     -r archive-service/requirements.txt \
-                    -r market-producer/requirements.txt \
-                    -r preprocessing-service/requirements.txt \
-                    -r schema-migrate/requirements.txt \
-                    -r sentiment-service/requirements.txt \
-                    -r storage-service/requirements.txt
-        # 2. Install test framework packages (unhashed)
-        pip install pytest pytest-asyncio
+                    -r schema-migrate/requirements.txt
+        # 2. Install test framework and retained utility packages
+        pip install -c constraints.txt \
+                    pytest pytest-asyncio aio-pika numpy onnxruntime \
+                    psycopg-pool pydantic PyYAML transformers
 
     - name: Run test suite
       run: |
         pytest
-
-    - name: Verify Python/Rust model parity
-      run: python scripts/verify_model_parity.py
 
   frontend:
     runs-on: ubuntu-latest
@@ -165,22 +154,20 @@ jobs:
       with:
         python-version: '3.12'
         cache: pip
-        cache-dependency-path: storage-service/requirements.txt
+        cache-dependency-path: schema-migrate/requirements.txt
 
     - name: Install harness dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install --require-hashes -r storage-service/requirements.txt
-        pip install pytest pytest-asyncio
+        pip install --require-hashes -r schema-migrate/requirements.txt
+        pip install -c constraints.txt pytest pytest-asyncio aio-pika
 
     - name: Build isolated worker qualification images
       run: |
         docker compose -f docker-compose.worker-qualification.yml \
           --profile qualification build \
           schema-migrate \
-          python-preprocessing rust-preprocessing \
-          python-sentiment rust-sentiment \
-          python-storage rust-storage
+          rust-preprocessing rust-sentiment rust-storage
 
     - name: Run deterministic live worker smoke cases
       run: >-

@@ -528,17 +528,12 @@ async def test_storage_retention_transaction_gate(
         "sentiment_scored_at",
     ):
         payload[field] = old_timestamp
-    python_result = await _retention_result(
-        qualification_stack,
-        "python",
-        payload,
-    )
     rust_result = await _retention_result(
         qualification_stack,
         "rust",
         payload,
     )
-    assert rust_result == python_result == (0, 1, 1)
+    assert rust_result == (0, 1, 1)
 
 
 async def _observation_window(

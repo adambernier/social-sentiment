@@ -1,5 +1,4 @@
-# Isolated, opt-in topology for black-box Python/Rust worker qualification.
-# The production Compose files and their Python defaults remain unchanged.
+# Isolated, opt-in topology for black-box Rust worker qualification.
 x-worker-environment: &worker-environment
   RABBITMQ_HOST: rabbitmq
   RABBITMQ_PORT: "5672"
@@ -12,11 +11,6 @@ x-worker-environment: &worker-environment
   PIPELINE_GIT_COMMIT: worker-qualification
   POST_RETENTION_DAYS: "1"
   QUOTE_RETENTION_DAYS: "1"
-
-x-python-worker: &python-worker
-  profiles: ["qualification"]
-  restart: "no"
-  environment: *worker-environment
 
 x-rust-worker: &rust-worker
   profiles: ["qualification"]
@@ -64,12 +58,6 @@ services:
         condition: service_healthy
     restart: "no"
 
-  python-preprocessing:
-    <<: *python-worker
-    build:
-      context: .
-      dockerfile: preprocessing-service/Dockerfile
-
   rust-preprocessing:
     <<: *rust-worker
     build:
@@ -77,24 +65,12 @@ services:
       dockerfile: Dockerfile.rust
       target: rust-preprocessing
 
-  python-sentiment:
-    <<: *python-worker
-    build:
-      context: .
-      dockerfile: sentiment-service/Dockerfile
-
   rust-sentiment:
     <<: *rust-worker
     build:
       context: .
       dockerfile: Dockerfile.rust
       target: rust-sentiment
-
-  python-storage:
-    <<: *python-worker
-    build:
-      context: .
-      dockerfile: storage-service/Dockerfile
 
   rust-storage:
     <<: *rust-worker

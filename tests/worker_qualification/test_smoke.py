@@ -1,9 +1,8 @@
-"""Deterministic live-container qualification cases suitable for CI."""
+"""Deterministic live-container Rust worker qualification cases for CI."""
 
 from __future__ import annotations
 
 import asyncio
-import copy
 from collections.abc import Callable
 from typing import Any
 
@@ -12,10 +11,8 @@ import pytest
 from .harness import (
     QualificationStack,
     QueueNames,
-    Runtime,
     Worker,
     assert_compatible_dlq_headers,
-    assert_worker_payload_parity,
     running_worker,
 )
 
@@ -40,11 +37,10 @@ async def _wait_for(
 async def _run_output_worker(
     stack: QualificationStack,
     worker: Worker,
-    runtime: Runtime,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    queues = QueueNames.unique(f"{worker}-{runtime}-valid")
-    async with running_worker(stack, worker, runtime, queues) as broker:
+    queues = QueueNames.unique(f"{worker}-rust-valid")
+    async with running_worker(stack, worker, "rust", queues) as broker:
         await broker.publish(queues.input_for(worker), payload)
         output = queues.output_for(worker)
         assert output is not None
@@ -58,41 +54,40 @@ async def _run_output_worker(
 
 
 @pytest.mark.parametrize("worker", ["preprocessing", "sentiment"])
-async def test_valid_python_rust_payload_parity(
+async def test_valid_rust_worker_produces_expected_output(
     qualification_stack: QualificationStack,
     qualification_fixtures: dict[str, dict[str, Any]],
     worker: Worker,
 ) -> None:
     payload = qualification_fixtures[worker]["valid"]
-    python_output = await _run_output_worker(
-        qualification_stack,
-        worker,
-        "python",
-        payload,
-    )
     rust_output = await _run_output_worker(
         qualification_stack,
         worker,
-        "rust",
         payload,
     )
-    assert_worker_payload_parity(worker, python_output, rust_output)
+    assert rust_output["id"] == payload["id"]
+    assert rust_output["symbol"] == payload["symbol"]
+    if worker == "preprocessing":
+        assert rust_output["topic_label"]
+        assert rust_output["topic_model_hash"]
+    else:
+        assert rust_output["sentiment"] in {"positive", "negative", "neutral"}
+        assert set(rust_output["scores"]) == {"positive", "negative", "neutral"}
+        assert rust_output["sentiment_model_hash"]
 
 
 @pytest.mark.parametrize("worker", ["preprocessing", "sentiment", "storage"])
-@pytest.mark.parametrize("runtime", ["python", "rust"])
 async def test_malformed_payload_reaches_compatible_dlq(
     qualification_stack: QualificationStack,
     qualification_fixtures: dict[str, dict[str, Any]],
     worker: Worker,
-    runtime: Runtime,
 ) -> None:
-    queues = QueueNames.unique(f"{worker}-{runtime}-malformed")
+    queues = QueueNames.unique(f"{worker}-rust-malformed")
     malformed = qualification_fixtures[worker]["malformed"]
     async with running_worker(
         qualification_stack,
         worker,
-        runtime,
+        "rust",
         queues,
     ) as broker:
         await broker.publish(queues.input_for(worker), malformed)
@@ -106,98 +101,26 @@ async def test_malformed_payload_reaches_compatible_dlq(
     assert qualification_stack.queue_state(queues.input_for(worker)) == (0, 0)
 
 
-async def _storage_snapshot(
-    stack: QualificationStack,
-    runtime: Runtime,
-    payload: dict[str, Any],
-) -> tuple[list[dict[str, Any]], int]:
-    stack.truncate_worker_state()
-    queues = QueueNames.unique(f"storage-{runtime}-duplicate")
-    async with running_worker(stack, "storage", runtime, queues) as broker:
-        await broker.publish(queues.scored, payload)
-        await broker.publish(queues.scored, payload)
-        await _wait_for(
-            lambda: len(stack.post_snapshot()) == 1 and stack.duplicate_count() == 1,
-            timeout=60,
-            description=f"{runtime} storage did not persist/idempotently count duplicate",
-        )
-        stack.wait_for_queue_state(queues.scored, lambda state: state == (0, 0))
-        return stack.post_snapshot(), stack.duplicate_count()
-
-
-async def test_storage_duplicate_state_matches_python(
+async def test_storage_duplicate_state_is_idempotent(
     qualification_stack: QualificationStack,
     qualification_fixtures: dict[str, dict[str, Any]],
 ) -> None:
     payload = qualification_fixtures["storage"]["valid"]
-    python_rows, python_duplicates = await _storage_snapshot(
-        qualification_stack,
-        "python",
-        payload,
-    )
-    rust_rows, rust_duplicates = await _storage_snapshot(
-        qualification_stack,
-        "rust",
-        payload,
-    )
-    assert rust_rows == python_rows
-    assert rust_duplicates == python_duplicates == 1
-
-
-@pytest.mark.parametrize("worker", ["preprocessing", "sentiment", "storage"])
-async def test_python_is_one_command_runtime_rollback(
-    qualification_stack: QualificationStack,
-    qualification_fixtures: dict[str, dict[str, Any]],
-    worker: Worker,
-) -> None:
-    """Exercise the same Rust-to-Python service replacement used by rollback."""
-    queues = QueueNames.unique(f"{worker}-rollback")
-    payload = copy.deepcopy(qualification_fixtures[worker]["valid"])
-    if worker == "storage":
-        qualification_stack.truncate_worker_state()
-
-    async with running_worker(
-        qualification_stack,
-        worker,
-        "rust",
-        queues,
-    ) as broker:
-        await broker.publish(queues.input_for(worker), payload)
-        output = queues.output_for(worker)
-        if output is not None:
-            await broker.receive(output)
-        else:
-            await _wait_for(
-                lambda: len(qualification_stack.post_snapshot()) == 1,
-                description="Rust storage did not persist rollback probe",
-            )
-        qualification_stack.wait_for_direct_queue_state(
-            queues.input_for(worker),
-            lambda state: state == (0, 0),
+    qualification_stack.truncate_worker_state()
+    queues = QueueNames.unique("storage-rust-duplicate")
+    async with running_worker(qualification_stack, "storage", "rust", queues) as broker:
+        await broker.publish(queues.scored, payload)
+        await broker.publish(queues.scored, payload)
+        await _wait_for(
+            lambda: (
+                len(qualification_stack.post_snapshot()) == 1
+                and qualification_stack.duplicate_count() == 1
+            ),
+            timeout=60,
+            description="rust storage did not persist/idempotently count duplicate",
         )
-
-    payload["id"] = "qualification-post-after-rollback"
-    async with running_worker(
-        qualification_stack,
-        worker,
-        "python",
-        queues,
-    ) as broker:
-        await broker.publish(queues.input_for(worker), payload)
-        output = queues.output_for(worker)
-        if output is not None:
-            message = await broker.receive(output)
-            assert message.json()["id"] == payload["id"]
-        else:
-            await _wait_for(
-                lambda: len(qualification_stack.post_snapshot()) == 2,
-                description="Python storage rollback did not persist probe",
-            )
-        qualification_stack.wait_for_direct_queue_state(
-            queues.input_for(worker),
-            lambda state: state == (0, 0),
+        qualification_stack.wait_for_queue_state(
+            queues.scored, lambda state: state == (0, 0)
         )
-
-    assert qualification_stack.direct_queue_state(
-        queues.input_for(worker)
-    ) == (0, 0)
+        assert len(qualification_stack.post_snapshot()) == 1
+        assert qualification_stack.duplicate_count() == 1
