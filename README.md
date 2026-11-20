@@ -377,32 +377,31 @@ This uses `watchdog` (pre-installed in the `.venv`) to listen to file modificati
 
 A GitHub Actions workflow is configured in `.github/workflows/tests.yml` to automatically execute the full test suite on every code push and pull request targeting the `main` branch. The tests run in an isolated environment using mocks, meaning they complete quickly without needing any Docker containers or database services running in CI.
 
-### Worker & Producer Qualification Harnesses
+### Worker Qualification & Fixture Harnesses
 
-For black-box qualification of the Rust pipeline workers (`preprocessing`, `sentiment`, `storage`) and ingestion producers against isolated Docker containers (`docker-compose.worker-qualification.yml`), use `scripts/qualify_worker.py` and `scripts/qualify_producer.py`:
+For black-box qualification of the Rust pipeline workers (`preprocessing`, `sentiment`, `storage`) against isolated Docker containers (`docker-compose.worker-qualification.yml`), use `scripts/qualify_worker.py`:
 
 ```bash
-# 1,000-message recorded replay parity gate
-python scripts/qualify_worker.py preprocessing --mode replay --replay-count 1000 --build
+# Deterministic live smoke cases (also run in CI)
+python scripts/qualify_worker.py preprocessing --mode smoke --build
 
-# Sustained-load gate (Python/Rust p95 latency and throughput under load)
-python scripts/qualify_worker.py preprocessing --mode load
+# Destructive fault-injection cases
+python scripts/qualify_worker.py preprocessing --mode faults
 
 # 24-hour observation stability gate
 python scripts/qualify_worker.py preprocessing --mode observe --observe-hours 24
 
-# Full worker promotion gate (smoke, faults, replay, load, observation)
-python scripts/qualify_worker.py preprocessing --mode promotion
+# Storage atomic retention gate
+python scripts/qualify_worker.py storage --mode retention
 
-# Producer fixture parity gate
-python scripts/qualify_producer.py bluesky --mode fixtures
+# Provider JSON fixture contract check
+python scripts/verify_producer_parity.py --fixtures-only
 ```
 
-Each gate writes a JSON evidence record to `artifacts/` naming the source commit,
-the container images, and the host it exercised, alongside the measured result,
-the margin it passed by, and a `passed`/`failed` status.
+Observation gates write a JSON evidence record to `artifacts/` naming the source commit,
+the container image, and the host it exercised alongside a `passed`/`failed` status.
 
-See [docs/rust-backend-migration.md](docs/rust-backend-migration.md) for full worker promotion and release gate documentation.
+See [docs/rust-backend-migration.md](docs/rust-backend-migration.md) for full worker qualification documentation.
 
 ## Dashboard
 

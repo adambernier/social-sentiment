@@ -26,8 +26,7 @@ use crate::{adapters, publish_then_commit, PendingUnit};
 
 const REDDIT_FEED: &str = "https://www.reddit.com/r/wallstreetbets+stocks+investing+SecurityAnalysis+options+StockMarket+semiconductors+Spacestocks/comments.json?limit=100";
 
-/// Reddit feed URL, overridable for replay-based shadow captures
-/// (`scripts/provider_replay.py`); the default is the production feed.
+/// Reddit feed URL, overridable via `REDDIT_FEED_URL`; defaults to the production feed.
 fn reddit_feed() -> String {
     env::var("REDDIT_FEED_URL").unwrap_or_else(|_| REDDIT_FEED.to_owned())
 }

@@ -1,11 +1,10 @@
-"""Manually triggered replay, load, retention, and observation promotion gates."""
+"""Manually triggered Rust worker retention and observation gates."""
 
 from __future__ import annotations
 
 import asyncio
 import copy
 import os
-import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -14,16 +13,10 @@ import pytest
 
 from .evidence import artifact_path, evidence_artifact, git_revision, host_platform
 from .harness import (
-    PROBABILITY_TOLERANCE,
     Broker,
     QualificationStack,
     QueueNames,
-    Runtime,
     Worker,
-    assert_regression_within_tolerance,
-    assert_worker_payload_parity,
-    latency_summary,
-    margin_record,
     running_worker,
 )
 
@@ -50,26 +43,6 @@ async def _wait_for(
             return value
         await asyncio.sleep(0.5)
     raise TimeoutError(description)
-
-
-def _payload_batch(
-    fixture: dict[str, Any],
-    count: int,
-    prefix: str,
-) -> list[dict[str, Any]]:
-    payloads = []
-    for index in range(count):
-        payload = copy.deepcopy(fixture)
-        payload["id"] = f"{prefix}-{index:06d}"
-        payloads.append(payload)
-    return payloads
-
-
-def _replay_payloads(
-    fixture: dict[str, Any],
-    count: int,
-) -> list[dict[str, Any]]:
-    return _payload_batch(fixture, count, "qualification-replay")
 
 
 def _current_timestamp() -> str:
@@ -103,410 +76,23 @@ def _evidence_record(
     }
 
 
-async def _output_replay(
-    stack: QualificationStack,
-    worker: Worker,
-    runtime: Runtime,
-    payloads: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    queues = QueueNames.unique(f"{worker}-{runtime}-replay")
-    outputs: dict[str, dict[str, Any]] = {}
-    async with running_worker(stack, worker, runtime, queues) as broker:
-        for payload in payloads:
-            await broker.publish(queues.input_for(worker), payload)
-        output_queue = queues.output_for(worker)
-        assert output_queue is not None
-        for _payload in payloads:
-            output = (await broker.receive(output_queue, timeout=300)).json()
-            outputs[output["id"]] = output
-        stack.wait_for_queue_state(
-            queues.input_for(worker),
-            lambda state: state == (0, 0),
-            timeout=120,
-        )
-    assert len(outputs) == len(payloads)
-    return outputs
-
-
-async def _storage_replay(
-    stack: QualificationStack,
-    runtime: Runtime,
-    payloads: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], int]:
-    stack.truncate_worker_state()
-    queues = QueueNames.unique(f"storage-{runtime}-replay")
-    duplicate_payloads = payloads[::10]
-    async with running_worker(stack, "storage", runtime, queues) as broker:
-        for payload in [*payloads, *duplicate_payloads]:
-            await broker.publish(queues.scored, payload)
-        await _wait_for(
-            lambda: (
-                len(stack.post_snapshot()) == len(payloads)
-                and stack.duplicate_count() == len(duplicate_payloads)
-            ),
-            timeout=300,
-            description=f"{runtime} storage replay did not converge",
-        )
-        stack.wait_for_queue_state(
-            queues.scored,
-            lambda state: state == (0, 0),
-            timeout=120,
-        )
-        return stack.post_snapshot(), stack.duplicate_count()
-
-
-async def test_recorded_replay_gate(
-    qualification_stack: QualificationStack,
-    qualification_fixtures: dict[str, dict[str, Any]],
-) -> None:
-    count = int(os.getenv("QUALIFICATION_REPLAY_COUNT", "0"))
-    if count <= 0:
-        pytest.skip("set QUALIFICATION_REPLAY_COUNT (normally 1000) to run")
-    worker = _selected_worker()
-    payloads = _replay_payloads(
-        qualification_fixtures[worker]["valid"],
-        count,
-    )
-    record = _evidence_record(
-        worker,
-        "replay",
-        f"rust-{worker}",
-        qualification_stack.project_name,
-    )
-    record["message_count"] = count
-    record["comparison"] = "python_vs_rust"
-    with evidence_artifact(artifact_path("replay", worker), record) as evidence:
-        if worker == "storage":
-            python_state, python_duplicates = await _storage_replay(
-                qualification_stack,
-                "python",
-                payloads,
-            )
-            rust_state, rust_duplicates = await _storage_replay(
-                qualification_stack,
-                "rust",
-                payloads,
-            )
-            assert rust_state == python_state
-            evidence["reference"] = {
-                "rows": len(python_state),
-                "duplicate_rows": python_duplicates,
-            }
-            evidence["candidate"] = {
-                "rows": len(rust_state),
-                "duplicate_rows": rust_duplicates,
-            }
-            evidence["margin"] = margin_record(
-                "persisted_row_difference",
-                0.0,
-                0.0,
-                criterion="candidate rows and duplicate accounting equal the reference",
-            )
-        else:
-            python_outputs = await _output_replay(
-                qualification_stack,
-                worker,
-                "python",
-                payloads,
-            )
-            rust_outputs = await _output_replay(
-                qualification_stack,
-                worker,
-                "rust",
-                payloads,
-            )
-            assert python_outputs.keys() == rust_outputs.keys()
-            largest_delta = 0.0
-            for post_id, python_payload in python_outputs.items():
-                largest_delta = max(
-                    largest_delta,
-                    assert_worker_payload_parity(
-                        worker,
-                        python_payload,
-                        rust_outputs[post_id],
-                    ),
-                )
-            evidence["reference"] = {"messages": len(python_outputs)}
-            evidence["candidate"] = {"messages": len(rust_outputs)}
-            evidence["payloads_compared"] = len(python_outputs)
-            evidence["mismatches"] = 0
-            if worker == "sentiment":
-                evidence["margin"] = margin_record(
-                    "max_probability_delta",
-                    largest_delta,
-                    PROBABILITY_TOLERANCE,
-                    criterion="every label within the probability tolerance",
-                )
-            else:
-                # The comparison is exact equality, so the delta is zero by
-                # construction and the limit admits no deviation at all.
-                evidence["margin"] = margin_record(
-                    "max_normalized_payload_delta",
-                    largest_delta,
-                    0.0,
-                    criterion="every normalized payload equal to the reference",
-                )
-        evidence["images"] = qualification_stack.container_image_provenance(
-            [f"python-{worker}", f"rust-{worker}"]
-        )
-
-
-async def _warmup(
-    stack: QualificationStack,
-    broker: Broker,
-    queues: QueueNames,
-    worker: Worker,
-    payload: dict[str, Any],
-    *,
-    timeout: float,
-) -> None:
-    """Send one message and wait for it, keeping warm-up out of the samples."""
-    payload = copy.deepcopy(payload)
-    payload["id"] = f"{payload['id']}-load-warmup"
-    output_queue = queues.output_for(worker)
-    await broker.publish(queues.input_for(worker), payload)
-    if output_queue is None:
-        await _wait_for(
-            lambda: stack.post_count() >= 1,
-            timeout=timeout,
-            description="storage worker did not persist the warm-up message",
-        )
-        return
-    output = (await broker.receive(output_queue, timeout=timeout)).json()
-    assert output["id"] == payload["id"]
-
-
-async def _publish_paced(
-    broker: Broker,
-    queue_name: str,
-    payloads: list[dict[str, Any]],
-    *,
-    rate: float,
-    sent_at: dict[str, float],
-) -> None:
-    """Publish a sustained load, stamping each message as it is handed over."""
-    interval = 1.0 / rate if rate > 0 else 0.0
-    loop = asyncio.get_running_loop()
-    start = loop.time()
-    for index, payload in enumerate(payloads):
-        # Stamped before the publish returns: the broker can deliver a message
-        # before its publisher confirm arrives, and a later stamp would race the
-        # consumer for the identifier, losing a sample.
-        sent_at[payload["id"]] = time.time()
-        await broker.publish(queue_name, payload)
-        if interval:
-            delay = start + (index + 1) * interval - loop.time()
-            if delay > 0:
-                await asyncio.sleep(delay)
-
-
-async def _collect(
-    broker: Broker,
-    queue_name: str,
-    received_at: dict[str, float],
-    expected: int,
-) -> None:
-    async for message in broker.consume(queue_name):
-        received_at[message.json()["id"]] = time.time()
-        if len(received_at) >= expected:
-            return
-
-
-async def _load_run(
-    stack: QualificationStack,
-    worker: Worker,
-    runtime: Runtime,
-    payloads: list[dict[str, Any]],
-    *,
-    rate: float,
-    timeout: float,
-) -> dict[str, Any]:
-    """Publish one sustained load and measure how the runtime absorbs it."""
-    if worker == "storage":
-        stack.truncate_worker_state()
-    queues = QueueNames.unique(f"{worker}-{runtime}-load")
-    input_queue = queues.input_for(worker)
-    output_queue = queues.output_for(worker)
-    sent_at: dict[str, float] = {}
-    received_at: dict[str, float] = {}
-
-    async with running_worker(stack, worker, runtime, queues) as broker:
-        await _warmup(stack, broker, queues, worker, payloads[0], timeout=timeout)
-        warmup_rows = stack.post_count() if worker == "storage" else 0
-        started = time.time()
-        consumer: asyncio.Task[None] | None = None
-        if output_queue is not None:
-            consumer = asyncio.create_task(
-                _collect(broker, output_queue, received_at, len(payloads))
-            )
-        await _publish_paced(
-            broker,
-            input_queue,
-            payloads,
-            rate=rate,
-            sent_at=sent_at,
-        )
-        published_at = time.time()
-        if consumer is not None:
-            await asyncio.wait_for(consumer, timeout=timeout)
-        else:
-            await _wait_for(
-                lambda: stack.post_count() >= warmup_rows + len(payloads),
-                timeout=timeout,
-                description=f"{runtime} storage worker did not persist the load",
-            )
-        handled_at = time.time()
-        stack.wait_for_queue_state(
-            input_queue,
-            lambda state: state == (0, 0),
-            timeout=120,
-        )
-        dead_letter = stack.queue_state(f"{input_queue}.dead-letter")
-        rows = stack.post_count() if worker == "storage" else 0
-        duplicates = stack.duplicate_count() if worker == "storage" else 0
-
-    assert dead_letter == (0, 0), (
-        f"{runtime} sustained load dead-lettered messages: {dead_letter}"
-    )
-    elapsed = handled_at - started
-    drain = handled_at - published_at
-    result: dict[str, Any] = {
-        "runtime": runtime,
-        "messages": len(payloads),
-        "publish_seconds": round(published_at - started, 3),
-        "elapsed_seconds": round(elapsed, 3),
-        # The publish pace pins the total, so the tail past the last publish is
-        # what separates a runtime that keeps up from one that falls behind.
-        "drain_seconds": round(drain, 3),
-        "absorbed_per_second": round(len(payloads) / max(elapsed, 1e-9), 3),
-        "dead_letter_depth": list(dead_letter),
-    }
-    if worker == "storage":
-        assert rows == warmup_rows + len(payloads), (
-            f"{runtime} persisted {rows} rows for {len(payloads)} messages"
-        )
-        assert duplicates == 0, f"{runtime} recorded {duplicates} duplicate rows"
-        result["rows"] = rows
-        result["duplicate_rows"] = duplicates
-    else:
-        assert set(received_at) == set(sent_at), (
-            f"{runtime} handled {len(received_at)} of {len(sent_at)} messages"
-        )
-        result["latency"] = latency_summary(
-            [received_at[payload["id"]] - sent_at[payload["id"]] for payload in payloads]
-        )
-    return result
-
-
-async def test_sustained_load_gate(
-    qualification_stack: QualificationStack,
-    qualification_fixtures: dict[str, dict[str, Any]],
-) -> None:
-    """Compare both runtimes under the same sustained publish rate.
-
-    The observation window proves a worker stays alive at one message every few
-    minutes; this gate proves it keeps up. Rust may not regress past the
-    tolerance on p95 end-to-end latency, or, for the storage worker, which has
-    no output queue to time against, on the time it takes to absorb the load.
-    """
-    count = int(os.getenv("QUALIFICATION_LOAD_COUNT", "0"))
-    if count <= 0:
-        pytest.skip("set QUALIFICATION_LOAD_COUNT (normally 2000) to run")
-    rate = float(os.getenv("QUALIFICATION_LOAD_RATE", "50"))
-    if rate <= 0:
-        raise ValueError("QUALIFICATION_LOAD_RATE must be greater than zero")
-    tolerance = float(os.getenv("QUALIFICATION_LOAD_P95_TOLERANCE", "0.10"))
-    latency_floor_ms = float(os.getenv("QUALIFICATION_LOAD_LATENCY_FLOOR_MS", "5"))
-    duration_floor_seconds = float(
-        os.getenv("QUALIFICATION_LOAD_DURATION_FLOOR_SECONDS", "2")
-    )
-    timeout = max(300.0, count / rate * 4)
-    worker = _selected_worker()
-    payloads = _payload_batch(
-        qualification_fixtures[worker]["valid"],
-        count,
-        "qualification-load",
-    )
-    if worker == "storage":
-        # The storage worker prunes posts older than POST_RETENTION_DAYS (one day
-        # in the qualification topology), so probe timestamps must be current or
-        # the load is archived mid-gate.
-        for payload in payloads:
-            payload["timestamp"] = _current_timestamp()
-
-    record = _evidence_record(
-        worker,
-        "load",
-        f"rust-{worker}",
-        qualification_stack.project_name,
-    )
-    record["message_count"] = count
-    record["publish_rate_per_second"] = rate
-    record["thresholds"] = {
-        "p95_tolerance": tolerance,
-        "latency_floor_ms": latency_floor_ms,
-        "duration_floor_seconds": duration_floor_seconds,
-    }
-    with evidence_artifact(artifact_path("load", worker), record) as evidence:
-        reference = await _load_run(
-            qualification_stack,
-            worker,
-            "python",
-            payloads,
-            rate=rate,
-            timeout=timeout,
-        )
-        candidate = await _load_run(
-            qualification_stack,
-            worker,
-            "rust",
-            payloads,
-            rate=rate,
-            timeout=timeout,
-        )
-        evidence["reference"] = reference
-        evidence["candidate"] = candidate
-        evidence["images"] = qualification_stack.container_image_provenance(
-            [f"python-{worker}", f"rust-{worker}"]
-        )
-        if worker == "storage":
-            evidence["margin"] = assert_regression_within_tolerance(
-                reference["drain_seconds"],
-                candidate["drain_seconds"],
-                metric="drain_seconds",
-                tolerance=tolerance,
-                floor=duration_floor_seconds,
-                label=f"{worker} drain time",
-            )
-        else:
-            evidence["margin"] = assert_regression_within_tolerance(
-                reference["latency"]["p95_ms"],
-                candidate["latency"]["p95_ms"],
-                metric="p95_ms",
-                tolerance=tolerance,
-                floor=latency_floor_ms,
-                label=f"{worker} p95 latency",
-            )
-
-
 async def _retention_result(
     stack: QualificationStack,
-    runtime: Runtime,
     payload: dict[str, Any],
 ) -> tuple[int, int, int]:
     stack.truncate_worker_state()
-    queues = QueueNames.unique(f"storage-{runtime}-retention")
-    async with running_worker(stack, "storage", runtime, queues) as broker:
+    queues = QueueNames.unique("storage-rust-retention")
+    async with running_worker(stack, "storage", "rust", queues) as broker:
         await broker.publish(queues.scored, payload)
         await _wait_for(
             lambda: stack.retention_snapshot()[0] == 1,
             timeout=60,
-            description=f"{runtime} storage did not persist retention fixture",
+            description="rust storage did not persist retention fixture",
         )
         await _wait_for(
             lambda: stack.retention_snapshot() == (0, 1, 1),
             timeout=100,
-            description=f"{runtime} retention transaction did not complete",
+            description="rust retention transaction did not complete",
         )
         return stack.retention_snapshot()
 
@@ -530,7 +116,6 @@ async def test_storage_retention_transaction_gate(
         payload[field] = old_timestamp
     rust_result = await _retention_result(
         qualification_stack,
-        "rust",
         payload,
     )
     assert rust_result == (0, 1, 1)
@@ -549,7 +134,7 @@ async def _observation_window(
     probe_interval: float,
     probe_timeout: float,
 ) -> dict[str, Any]:
-    """Hold one runtime in a live window and prove it keeps consuming.
+    """Hold one worker in a live window and prove it keeps consuming.
 
     A running container with a quiet queue does not prove the worker still
     consumes, so the window is bounded by verified probes at their own cadence.
