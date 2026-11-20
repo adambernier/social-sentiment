@@ -11,10 +11,10 @@ COPY . .
 # reuses this stage instead of compiling the full dependency graph separately.
 FROM rust-source AS worker-builder
 ENV CARGO_BUILD_JOBS=1
-RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=social-sentiment-cargo-git,target=/usr/local/cargo/git \
-    --mount=type=cache,id=social-sentiment-cargo-target,target=/usr/src/app/target \
-    --mount=type=cache,id=social-sentiment-ort-cache,target=/root/.cache/ort.pyke.io \
+RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=social-sentiment-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=social-sentiment-cargo-target,target=/usr/src/app/target,sharing=locked \
+    --mount=type=cache,id=social-sentiment-ort-cache,target=/root/.cache/ort.pyke.io,sharing=locked \
     cargo build --locked --release \
         --bin service-preprocessing \
         --bin service-sentiment \
@@ -26,9 +26,9 @@ RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/carg
 
 FROM rust-source AS api-builder
 ENV CARGO_BUILD_JOBS=1
-RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=social-sentiment-cargo-git,target=/usr/local/cargo/git \
-    --mount=type=cache,id=social-sentiment-cargo-target,target=/usr/src/app/target \
+RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=social-sentiment-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=social-sentiment-cargo-target,target=/usr/src/app/target,sharing=locked \
     cargo build --locked --release --bin service-api \
     && mkdir -p /usr/src/app/out \
     && cp target/release/service-api /usr/src/app/out/
@@ -38,9 +38,9 @@ RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/carg
 # separate, independently promotable runtime targets below.
 FROM rust-source AS producer-builder
 ENV CARGO_BUILD_JOBS=1
-RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=social-sentiment-cargo-git,target=/usr/local/cargo/git \
-    --mount=type=cache,id=social-sentiment-cargo-target,target=/usr/src/app/target \
+RUN --mount=type=cache,id=social-sentiment-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=social-sentiment-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=social-sentiment-cargo-target,target=/usr/src/app/target,sharing=locked \
     cargo build --locked --release \
         --bin producer-bluesky \
         --bin producer-stocktwits \
