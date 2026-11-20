@@ -53,6 +53,11 @@ no large model download on first boot.
   the 7 ingestion producers, 3 RabbitMQ workers (`preprocessing`, `sentiment`,
   `storage`), and the HTTP/WebSocket `api-service` — run as native Rust binaries
   built from `Dockerfile.rust` by default in `docker-compose.yml`.
+- **Formally verified math kernel (`crates/social-sentiment-math`).** Pure,
+  zero-dependency scoring, ONNX post-processing, simplex validation, FX/NAV
+  math, and leakage-free time-series alignment live in `social-sentiment-math`
+  and are formally verified with [Kani](https://model-checking.github.io/kani/).
+  See [the formal verification strategy](docs/formal-verification-strategy.md).
 - **Async ingest pipeline.** The Rust workers (`preprocessing`, `sentiment`,
   `storage`) use `lapin` with publisher confirms, reconnect loops, explicit
   ack/retry/dead-letter handling, and `sqlx` connection pooling for Postgres.
@@ -358,9 +363,35 @@ scripts/watch_tests.sh
 ```
 This uses `watchdog` (pre-installed in the `.venv`) to listen to file modifications and trigger `pytest`.
 
+### Rust Workspace & Formal Verification (Kani)
+
+Run Rust formatting, linting, and unit/contract tests across the workspace:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```
+
+Run the Kani formal proof suite on `crates/social-sentiment-math` (17 harnesses covering softmax/NLI post-processing, simplex validation, FX/NAV math, opportunity scoring monotonicity, and zero-lookahead alignment):
+
+```bash
+# One-time local install
+cargo install --locked kani-verifier --version 0.68.0
+cargo kani setup
+
+# Verify all proofs
+cargo kani -p social-sentiment-math -Z stubbing --output-format terse
+```
+
 ### Continuous Integration (CI)
 
-A GitHub Actions workflow is configured in `.github/workflows/tests.yml` to automatically execute the full test suite on every code push and pull request targeting the `main` branch. The tests run in an isolated environment using mocks, meaning they complete quickly without needing any Docker containers or database services running in CI.
+GitHub Actions (`.github/workflows/tests.yml`) runs five jobs on every push and pull request:
+- **`test`**: Python unit and Postgres-backed integration tests via `pytest`.
+- **`frontend`**: Next.js tests, TypeScript type-check, lint, audit, and build.
+- **`rust`**: `cargo fmt`, `cargo clippy --locked -D warnings`, `cargo test --workspace --locked`, provider fixture parity, and Compose validation.
+- **`kani`**: Formal verification of `crates/social-sentiment-math` using `kani-verifier 0.68.0`.
+- **`worker-qualification-smoke`**: Live Docker smoke qualification for the Rust pipeline workers.
 
 ### Worker Qualification & Fixture Harnesses
 
@@ -415,6 +446,7 @@ environment variable (defaults to the in-network `http://api-service:8000`).
 
 ## Recent changes
 
+- Extracted a zero-dependency **`crates/social-sentiment-math`** kernel formally verified with **Kani** (17 proof harnesses + CI `kani` job), fixing `pe_relative_sector` sign inversion in opportunity scoring, `exp()` overflow in topic NLI post-processing (Rust and `shared/topics.py`), FX `NaN`/overflow handling, conservative `neutral`-first sentiment argmax tie-breaking, and eager `0.0 / 0.0` division in synthetic NAV estimation; serialized shared BuildKit Cargo cache mounts in `Dockerfile.rust`.
 - Promoted the **Rust backend workspace (`crates/`)** to the default runtime in `docker-compose.yml` for all 11 backend services, isolated `schema-migrate/` as a standalone migration container, and removed the superseded Python service implementations.
 - Added **Rust quote backfill** (`producer-market backfill-quotes`) alongside global bar backfill in `crates/market-producer`.
 - Retained `schema-migrate/` and `archive-service/` as standalone Python containers with hashed lockfiles, plus unported one-off maintenance CLIs (`market-producer/sync_global_instruments.py`, `storage-service/rollup.py`, `preprocessing-service/backfill_topics.py`).
