@@ -133,7 +133,6 @@ jobs:
     - name: Validate Compose configurations
       run: |
         docker compose config --quiet
-        docker compose -f docker-compose.yml -f docker-compose.rust.yml config --quiet
         docker compose -f docker-compose.worker-qualification.yml config --quiet
 
   worker-qualification-smoke:

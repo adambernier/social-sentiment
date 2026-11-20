@@ -2,15 +2,14 @@
 
 > **Cutover status:** `docker-compose.yml` now builds all 11 backend services
 > (the 3 RabbitMQ workers, 7 ingestion producers, and `api-service`) directly
-> from `Dockerfile.rust`, and the superseded Python runtime implementations
-> have been removed. `schema-migrate/` and `archive-service/` remain standalone
-> Python containers with hashed lockfiles, alongside a small set of unported
+> from `Dockerfile.rust`, the superseded Python runtime implementations have
+> been removed, and the temporary `docker-compose.rust.yml` overlay has been
+> retired. `schema-migrate/` and `archive-service/` remain standalone Python
+> containers with hashed lockfiles, alongside a small set of unported
 > maintenance CLIs (`market-producer/sync_global_instruments.py`,
 > `storage-service/rollup.py`, `preprocessing-service/backfill_topics.py`).
-> `docker-compose.rust.yml` is retained temporarily as a compatibility overlay
-> while hosts drop `COMPOSE_FILE=docker-compose.yml:docker-compose.rust.yml`
-> from `.env`. The sections below document the migration architecture and
-> qualification methodology used during cutover.
+> The sections below document the migration architecture and qualification
+> methodology used during cutover.
 
 ## Runtime inventory
 

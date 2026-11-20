@@ -40,8 +40,6 @@ def deterministic_gates(producer: str) -> None:
             "compose",
             "-f",
             "docker-compose.yml",
-            "-f",
-            "docker-compose.rust.yml",
             "config",
             "--quiet",
         ]
