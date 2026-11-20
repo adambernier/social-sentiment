@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+social-sentiment-math = { path = "../social-sentiment-math" }
 tokio = { workspace = true, features = ["test-util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

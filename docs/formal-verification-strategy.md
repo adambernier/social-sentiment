@@ -17,9 +17,9 @@ Formal mathematics cannot prove open-ended empirical claims (e.g., *"FinTwitBERT
 
 ## 2. Where *Not* to Apply Formal Math Here
 
-The two ML models in `social-sentiment` are quantized ONNX transformers:
+The two ML models in `social-sentiment` are quantized ONNX transformers (all 11 backend runtime services now run in Rust, with `shared/topics.py` retained for the `preprocessing-service/backfill_topics.py` maintenance CLI):
 
-- **Sentiment**: FinTwitBERT (`BertForSequenceClassification`, 12 layers, GELU, hidden size 768) in `crates/sentiment-service/src/sentiment_model.rs` and `sentiment-service/model.py`.
+- **Sentiment**: FinTwitBERT (`BertForSequenceClassification`, 12 layers, GELU, hidden size 768) in `crates/sentiment-service/src/sentiment_model.rs`.
 - **Topics**: DistilBERT-MNLI (`DistilBertForSequenceClassification`, 6 layers, GELU, zero-shot NLI over 8 hypotheses) in `crates/preprocessing-service/src/topic_model.rs` and `shared/topics.py`.
 
 **Category 2 (direct neural-network weight verification via $\alpha,\beta$-CROWN / Marabou)** is intractable for 6–12 layer GELU BERT transformers over discrete token sequences and low-ROI here.
@@ -94,6 +94,14 @@ Two concrete Category 4 upgrades:
 
 ## 4. Phased Roadmap
 
-1. **Phase 1 — Kani on Pure Rust Math**: Isolate pure, zero-I/O math/scoring/post-processing functions in the Rust workspace and verify them with Kani in CI (fixing the `topic_model.rs` `exp()` overflow, `normalize_fx_ohlc` `NaN` bypass, and `pe_relative_sector` sign inversion along the way).
+1. **Phase 1 — Kani on Pure Rust Math *(Implemented)***:
+   - Extracted the zero-dependency Trusted Computing Base crate `crates/social-sentiment-math` and wired `social-sentiment-core`, `market-producer`, `service-preprocessing`, `service-sentiment`, and `service-api` directly to it.
+   - Verified **17 Kani proof harnesses** (`cargo kani -p social-sentiment-math -Z stubbing --output-format terse`) in CI (`.github/workflows/tests.yml`, `kani` job).
+   - Fixed five real issues surfaced by formal specs and Kani:
+     1. `topic_model` `exp()` overflow above `88.7f32` (fixed in both Rust and `shared/topics.py`).
+     2. `normalize_fx_ohlc` `NaN`/non-finite bypass and subnormal inversion overflow guard.
+     3. `sentiment_model` conservative `neutral`-first argmax tie-breaking and `f64` simplex stability.
+     4. `pe_relative_sector` sign inversion in `compute_opportunity` (aligned with `market-producer`, Postgres `stock_metrics`, and the UI scorecard).
+     5. Eager `.then_some(weighted / covered)` `0.0 / 0.0` `NaN` division caught directly by Kani in the synthetic NAV combiner (`synthetic_nav.rs`), plus panic-free clamping in `percentile` and zero-period guards in `sma`.
 2. **Phase 2 — Rollup Contract & Error Budget (Lean 4 / Z3)**: Formalize the `hourly_sentiment_facts` and OHLC commutative monoids and reconcile the `ScoredPost::validate()` (`1e-4`) vs. `0006_analytical_constraints.sql` (`1e-6`) floating-point tolerances.
 3. **Phase 3 — Conformal Calibration & Finite-Sample Bounds**: Build calibration and uncertainty bounds on top of the `raw_post_archive_staging` `probability` cohort and immutable `model_artifacts` hashes.

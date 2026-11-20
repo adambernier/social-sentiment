@@ -78,3 +78,21 @@ def test_topic_model_prediction_success(mock_onnx_and_tokenizer):
     # Index 3 maps to "AI & Compute"
     assert res_id == 3
     assert res_label == "AI & Compute"
+
+
+def test_topic_model_handles_extreme_logits_without_overflow(mock_onnx_and_tokenizer):
+    _, session = mock_onnx_and_tokenizer
+
+    # Logits > 88.7 previously overflowed float32 exp() to inf / inf = NaN.
+    dummy_logits = np.zeros((8, 3), dtype=np.float32)
+    dummy_logits[:, 0] = -100.0
+    dummy_logits[:, 2] = 100.0
+    dummy_logits[3, 0] = 100.0
+    dummy_logits[3, 2] = 99.0
+    session.run.return_value = [dummy_logits]
+
+    model = TopicModel(model_dir="mock_dir")
+    res_id, res_label = model.predict("This is a valid long text sentence to test.")
+
+    assert res_id == 3
+    assert res_label == "AI & Compute"

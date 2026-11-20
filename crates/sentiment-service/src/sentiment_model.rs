@@ -123,39 +123,18 @@ impl SentimentModel {
             let l1 = logits[offset + 1]; // positive
             let l2 = logits[offset + 2]; // negative
 
-            let max_l = l0.max(l1).max(l2);
-            let e0 = (l0 - max_l).exp();
-            let e1 = (l1 - max_l).exp();
-            let e2 = (l2 - max_l).exp();
-            let sum_e = e0 + e1 + e2;
-
-            let p0 = (e0 / sum_e) as f64; // neutral
-            let p1 = (e1 / sum_e) as f64; // positive
-            let p2 = (e2 / sum_e) as f64; // negative
-
-            let (top_label, _top_p) = if p1 >= p0 && p1 >= p2 {
-                ("positive", p1)
-            } else if p2 >= p0 && p2 >= p1 {
-                ("negative", p2)
-            } else {
-                ("neutral", p0)
-            };
+            let pred =
+                social_sentiment_math::postprocess::sentiment_softmax_and_label([l0, l1, l2])
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Non-finite sentiment logits for batch item {i}")
+                    })?;
 
             let mut scores = HashMap::new();
-            scores.insert("neutral".to_string(), p0);
-            scores.insert("positive".to_string(), p1);
-            scores.insert("negative".to_string(), p2);
+            scores.insert("neutral".to_string(), pred.neutral);
+            scores.insert("positive".to_string(), pred.positive);
+            scores.insert("negative".to_string(), pred.negative);
 
-            // Minor rounding adjustment to ensure exact sum = 1.0 within float precision
-            let sum_p = p0 + p1 + p2;
-            if (sum_p - 1.0).abs() > 1e-6 {
-                let diff = 1.0 - sum_p;
-                if let Some(val) = scores.get_mut(top_label) {
-                    *val += diff;
-                }
-            }
-
-            results.push((top_label.to_string(), scores));
+            results.push((pred.label.as_str().to_string(), scores));
         }
 
         Ok(results)

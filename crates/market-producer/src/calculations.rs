@@ -4,17 +4,7 @@ use crate::DailyClose;
 use social_sentiment_core::schemas::StockMetrics;
 
 pub fn calculate_relative(value: Option<f64>, baseline: Option<f64>, invert: bool) -> f64 {
-    match (value, baseline) {
-        (Some(value), Some(baseline)) if baseline != 0.0 => {
-            let relative = (value - baseline) / baseline;
-            if invert {
-                -relative
-            } else {
-                relative
-            }
-        }
-        _ => 0.0,
-    }
+    social_sentiment_math::market::calculate_relative(value, baseline, invert)
 }
 
 pub fn one_year_return(history: &[DailyClose]) -> Option<f64> {
@@ -100,13 +90,14 @@ pub fn normalize_fx_ohlc(
     close: f64,
     provider_is_local_per_usd: bool,
 ) -> anyhow::Result<(f64, f64, f64, f64)> {
-    if provider_is_local_per_usd {
-        return Ok((open, high, low, close));
-    }
-    if [open, high, low, close].iter().any(|price| *price <= 0.0) {
-        anyhow::bail!("FX prices must be positive before inversion");
-    }
-    Ok((1.0 / open, 1.0 / low, 1.0 / high, 1.0 / close))
+    social_sentiment_math::market::normalize_fx_ohlc(
+        open,
+        high,
+        low,
+        close,
+        provider_is_local_per_usd,
+    )
+    .map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 #[cfg(test)]

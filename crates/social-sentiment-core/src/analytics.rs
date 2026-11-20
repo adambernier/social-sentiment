@@ -28,14 +28,7 @@ pub struct RelationshipStatistic {
 }
 
 pub fn correlation_strength(correlation: Option<f64>) -> Option<&'static str> {
-    let absolute = correlation?.abs();
-    Some(if absolute < 0.20 {
-        "weak"
-    } else if absolute < 0.40 {
-        "moderate"
-    } else {
-        "strong"
-    })
+    social_sentiment_math::timeseries::correlation_strength(correlation)
 }
 
 fn returns(closes: &[DailyClose]) -> Vec<(DateTime<Utc>, f64)> {
@@ -53,33 +46,7 @@ fn returns(closes: &[DailyClose]) -> Vec<(DateTime<Utc>, f64)> {
 }
 
 fn pearson_and_beta(pairs: &[(f64, f64)], minimum_samples: usize) -> (Option<f64>, Option<f64>) {
-    if pairs.len() < minimum_samples {
-        return (None, None);
-    }
-
-    let count = pairs.len() as f64;
-    let factor_mean = pairs.iter().map(|(factor, _)| factor).sum::<f64>() / count;
-    let stock_mean = pairs.iter().map(|(_, stock)| stock).sum::<f64>() / count;
-    let factor_ss = pairs
-        .iter()
-        .map(|(factor, _)| (factor - factor_mean).powi(2))
-        .sum::<f64>();
-    let stock_ss = pairs
-        .iter()
-        .map(|(_, stock)| (stock - stock_mean).powi(2))
-        .sum::<f64>();
-    if factor_ss <= 0.0 || stock_ss <= 0.0 {
-        return (None, None);
-    }
-
-    let covariance = pairs
-        .iter()
-        .map(|(factor, stock)| (factor - factor_mean) * (stock - stock_mean))
-        .sum::<f64>();
-    (
-        Some(covariance / (factor_ss * stock_ss).sqrt()),
-        Some(covariance / factor_ss),
-    )
+    social_sentiment_math::timeseries::pearson_and_beta(pairs, minimum_samples)
 }
 
 /// Align factor returns to the first later U.S. close and score each lag.
@@ -114,6 +81,13 @@ pub fn calculate_relationship_with_options(
     stocks.sort_by_key(|close| close.ends_at);
     let factor_returns = returns(&factors);
     let stock_returns = returns(&stocks);
+    let stock_ends: Vec<i64> = stock_returns
+        .iter()
+        .map(|(ts, _)| {
+            ts.timestamp_nanos_opt()
+                .unwrap_or_else(|| ts.timestamp_micros())
+        })
+        .collect();
 
     let lag_statistics = lags
         .iter()
@@ -121,11 +95,15 @@ pub fn calculate_relationship_with_options(
             let mut pairs = factor_returns
                 .iter()
                 .filter_map(|(factor_end, factor_return)| {
-                    let first_later =
-                        stock_returns.partition_point(|(stock_end, _)| stock_end <= factor_end);
-                    stock_returns
-                        .get(first_later + lag)
-                        .map(|(_, stock_return)| (*factor_return, *stock_return))
+                    let factor_ts = factor_end
+                        .timestamp_nanos_opt()
+                        .unwrap_or_else(|| factor_end.timestamp_micros());
+                    let target = social_sentiment_math::timeseries::align_single_factor(
+                        factor_ts,
+                        &stock_ends,
+                        lag,
+                    )?;
+                    Some((*factor_return, stock_returns[target].1))
                 })
                 .collect::<Vec<_>>();
             if pairs.len() > horizon_sessions {
@@ -181,12 +159,21 @@ pub fn calculate_relationship_with_options(
 pub fn next_close_move(stock_closes: &[DailyClose], occurred_at: DateTime<Utc>) -> Option<f64> {
     let mut closes = stock_closes.to_vec();
     closes.sort_by_key(|close| close.ends_at);
-    let before_index = closes.partition_point(|close| close.ends_at < occurred_at);
-    let after_index = closes.partition_point(|close| close.ends_at <= occurred_at);
-    if before_index == 0 || after_index >= closes.len() {
-        return None;
-    }
-    let before = closes[before_index - 1].close_price;
+    let sorted_ends: Vec<i64> = closes
+        .iter()
+        .map(|close| {
+            close
+                .ends_at
+                .timestamp_nanos_opt()
+                .unwrap_or_else(|| close.ends_at.timestamp_micros())
+        })
+        .collect();
+    let occurred_ts = occurred_at
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| occurred_at.timestamp_micros());
+    let (before_index, after_index) =
+        social_sentiment_math::timeseries::next_close_bracket(&sorted_ends, occurred_ts)?;
+    let before = closes[before_index].close_price;
     let after = closes[after_index].close_price;
     (before > 0.0 && after > 0.0).then_some((after / before - 1.0) * 100.0)
 }

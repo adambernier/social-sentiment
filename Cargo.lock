@@ -1742,6 +1742,7 @@ dependencies = [
  "serde",
  "serde_json",
  "social-sentiment-core",
+ "social-sentiment-math",
  "sqlx",
  "tokio",
  "tracing",
@@ -2977,6 +2978,7 @@ dependencies = [
  "serde",
  "serde_json",
  "social-sentiment-core",
+ "social-sentiment-math",
  "sqlx",
  "tokio",
  "tower-http 0.5.2",
@@ -2997,6 +2999,7 @@ dependencies = [
  "serde",
  "serde_json",
  "social-sentiment-core",
+ "social-sentiment-math",
  "tokenizers",
  "tokio",
  "tracing",
@@ -3016,6 +3019,7 @@ dependencies = [
  "serde",
  "serde_json",
  "social-sentiment-core",
+ "social-sentiment-math",
  "tokenizers",
  "tokio",
  "tracing",
@@ -3151,11 +3155,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "social-sentiment-math",
  "sqlx",
  "tempfile",
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "social-sentiment-math"
+version = "0.1.0"
 
 [[package]]
 name = "socket2"

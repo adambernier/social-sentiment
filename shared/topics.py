@@ -115,13 +115,16 @@ class TopicModel:
                 0
             ]  # Shape: (len(candidate_labels), 3)
 
-            # Compute entailment vs contradiction probability
-            entail_logits = logits[:, 0]
-            contra_logits = logits[:, 2]
-
-            exp_entail = np.exp(entail_logits)
-            exp_contra = np.exp(contra_logits)
-            entail_probs = exp_entail / (exp_entail + exp_contra)
+            # Compute overflow-safe entailment vs contradiction probability
+            # via branch-stable sigmoid(entail - contra) in float64.
+            entail_logits = logits[:, 0].astype(np.float64)
+            contra_logits = logits[:, 2].astype(np.float64)
+            diff = entail_logits - contra_logits
+            entail_probs = np.where(
+                diff >= 0.0,
+                1.0 / (1.0 + np.exp(-np.abs(diff))),
+                np.exp(-np.abs(diff)) / (1.0 + np.exp(-np.abs(diff))),
+            )
 
             top_idx = np.argmax(entail_probs)
             top_prob = entail_probs[top_idx]

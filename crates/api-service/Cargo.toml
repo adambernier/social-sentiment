@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 social-sentiment-core = { path = "../social-sentiment-core" }
+social-sentiment-math = { path = "../social-sentiment-math" }
 tokio = { workspace = true }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }

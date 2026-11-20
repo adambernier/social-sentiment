@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 social-sentiment-core = { path = "../social-sentiment-core" }
+social-sentiment-math = { path = "../social-sentiment-math" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

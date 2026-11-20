@@ -169,31 +169,27 @@ impl TopicModel {
             return Err(anyhow::anyhow!("Unexpected logits shape: {:?}", out_shape));
         }
 
-        let mut max_entail_prob = -1.0f32;
-        let mut best_idx = 0;
         let mut entail_probs = Vec::with_capacity(num_pairs);
 
         for i in 0..num_pairs {
             let entail = logits[i * 3];
             let contra = logits[i * 3 + 2];
 
-            let exp_entail = entail.exp();
-            let exp_contra = contra.exp();
-            let entail_prob = exp_entail / (exp_entail + exp_contra);
+            let entail_prob =
+                social_sentiment_math::postprocess::topic_entailment_prob(entail, contra)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Non-finite topic logits for candidate index {i}")
+                    })?;
             entail_probs.push(entail_prob);
-
-            if entail_prob > max_entail_prob {
-                max_entail_prob = entail_prob;
-                best_idx = i;
-            }
         }
 
-        if max_entail_prob < 0.60 {
-            Ok((-1, "General / Outlier".to_string(), entail_probs))
-        } else {
-            let desc_label = self.candidate_labels[best_idx];
-            let mapped_label = self.label_map.get(desc_label).unwrap_or(&desc_label);
-            Ok((best_idx as i32, mapped_label.to_string(), entail_probs))
+        match social_sentiment_math::postprocess::select_topic_index(&entail_probs, 0.60) {
+            None => Ok((-1, "General / Outlier".to_string(), entail_probs)),
+            Some(best_idx) => {
+                let desc_label = self.candidate_labels[best_idx];
+                let mapped_label = self.label_map.get(desc_label).unwrap_or(&desc_label);
+                Ok((best_idx as i32, mapped_label.to_string(), entail_probs))
+            }
         }
     }
 }

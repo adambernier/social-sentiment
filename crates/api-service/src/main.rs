@@ -1118,215 +1118,10 @@ async fn posts_handler(
     Ok(Json(posts))
 }
 
-fn pearson(pairs: &[(f64, f64)]) -> Option<f64> {
-    if pairs.len() < 3 {
-        return None;
-    }
-    let count = pairs.len() as f64;
-    let mean_x = pairs.iter().map(|(x, _)| x).sum::<f64>() / count;
-    let mean_y = pairs.iter().map(|(_, y)| y).sum::<f64>() / count;
-    let numerator = pairs
-        .iter()
-        .map(|(x, y)| (x - mean_x) * (y - mean_y))
-        .sum::<f64>();
-    let sum_x = pairs.iter().map(|(x, _)| (x - mean_x).powi(2)).sum::<f64>();
-    let sum_y = pairs.iter().map(|(_, y)| (y - mean_y).powi(2)).sum::<f64>();
-    let denominator = (sum_x * sum_y).sqrt();
-    (denominator > f64::EPSILON).then_some(numerator / denominator)
-}
-
-struct MacdPoint {
-    macd: Option<f64>,
-    signal: Option<f64>,
-    hist: Option<f64>,
-}
-
-fn sma(seq: &[Option<f64>], i: usize, period: usize) -> Option<f64> {
-    if i + 1 < period {
-        return None;
-    }
-    let window = &seq[i + 1 - period..=i];
-    let mut sum = 0.0;
-    for &val in window {
-        match val {
-            Some(v) => sum += v,
-            None => return None,
-        }
-    }
-    Some(sum / period as f64)
-}
-
-fn compute_sentiment_macd(
-    indices: &[Option<f64>],
-    fast: usize,
-    slow: usize,
-    signal: usize,
-) -> Vec<MacdPoint> {
-    let n = indices.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut filled = Vec::with_capacity(n);
-    let mut last = None;
-    for &v in indices {
-        if v.is_some() {
-            last = v;
-        }
-        filled.push(last);
-    }
-
-    let mut macd_line = Vec::with_capacity(n);
-    for i in 0..n {
-        let f = sma(&filled, i, fast);
-        let s = sma(&filled, i, slow);
-        macd_line.push(match (f, s) {
-            (Some(f_val), Some(s_val)) => Some(f_val - s_val),
-            _ => None,
-        });
-    }
-
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let sig = sma(&macd_line, i, signal);
-        let m = macd_line[i];
-        let hist = match (m, sig) {
-            (Some(m_val), Some(sig_val)) => Some(m_val - sig_val),
-            _ => None,
-        };
-        out.push(MacdPoint {
-            macd: m,
-            signal: sig,
-            hist,
-        });
-    }
-    out
-}
-
-struct OpportunityResult {
-    score: f64,
-    classification: &'static str,
-    color: &'static str,
-    strategy: &'static str,
-    description: &'static str,
-    checklist: Vec<String>,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compute_opportunity(
-    price: Option<f64>,
-    support: f64,
-    _resistance: f64,
-    sentiment: f64,
-    sentiment_sma: f64,
-    vix_price: Option<f64>,
-    pe_relative: Option<f64>,
-    prev_prices: &[f64],
-    prev_sentiments: &[f64],
-) -> OpportunityResult {
-    let mut score: f64 = 0.0;
-    let mut checklist = Vec::new();
-
-    // 1. Price near support
-    if let Some(p) = price {
-        if support > 0.0 && p > 0.0 {
-            let dist_to_support = (p - support) / p;
-            if dist_to_support <= 0.025 {
-                score += 3.0;
-                checklist.push("Price near support level".to_string());
-            } else if dist_to_support <= 0.05 {
-                score += 1.5;
-                checklist.push("Price approaching support level".to_string());
-            }
-        }
-    }
-
-    // 2. Sentiment momentum (crossover)
-    if sentiment > sentiment_sma {
-        if sentiment_sma > 0.0 {
-            score += 3.0;
-            checklist.push("Bullish sentiment crossover (above positive SMA)".to_string());
-        } else {
-            score += 1.5;
-            checklist.push("Bullish sentiment crossover (above negative SMA)".to_string());
-        }
-    }
-
-    // 3. Sentiment-price divergence (price down, sentiment up in recent trailing window)
-    if prev_prices.len() >= 3 && prev_sentiments.len() >= 3 {
-        let price_trend = prev_prices.last().unwrap() - prev_prices.first().unwrap();
-        let sentiment_trend = prev_sentiments.last().unwrap() - prev_sentiments.first().unwrap();
-        if price_trend < 0.0 && sentiment_trend > 0.1 {
-            score += 2.0;
-            checklist
-                .push("Bullish sentiment divergence (price down, sentiment rising)".to_string());
-        }
-    }
-
-    // 4. Valuation vs sector benchmark
-    if let Some(pe_rel) = pe_relative {
-        if pe_rel < 0.0 {
-            score += 2.0;
-            checklist.push("Undervalued relative to sector benchmarks".to_string());
-        } else if pe_rel == 0.0 {
-            score += 1.0;
-            checklist.push("Fairly valued relative to sector benchmarks".to_string());
-        }
-    }
-
-    let opportunity_pct = (score / 10.0 * 100.0).min(100.0);
-
-    // Classification
-    let (classification, color) = if opportunity_pct >= 75.0 {
-        ("STRONG BUY", "emerald")
-    } else if opportunity_pct >= 50.0 {
-        ("ACCUMULATE", "teal")
-    } else if opportunity_pct >= 30.0 {
-        ("HOLD / NEUTRAL", "slate")
-    } else {
-        ("CAUTION / OVERBOUGHT", "rose")
-    };
-
-    // Strategy Recommendation
-    let mut strategy = "Hold / Sell Covered Calls";
-    let mut strategy_desc =
-        "Neutral market stance. Capitalize on range-bound behavior using covered call writing.";
-
-    let vix = vix_price.unwrap_or(15.0);
-
-    if classification == "STRONG BUY" || classification == "ACCUMULATE" {
-        if vix < 15.0 {
-            strategy = "Long Call Option (Buy Call)";
-            strategy_desc =
-                "Low volatility regime. Buy outright call options to leverage cheap premium.";
-        } else if vix <= 22.0 {
-            strategy = "Long Shares / Bull Call Spread";
-            strategy_desc =
-                "Moderate volatility. Buy shares directly or use bull call debit spreads.";
-        } else {
-            strategy = "Sell Put Credit Spreads";
-            strategy_desc =
-                "High volatility regime. Sell put credit spreads to harvest rich premium.";
-        }
-    } else if classification == "CAUTION / OVERBOUGHT" {
-        if vix > 22.0 {
-            strategy = "Sell Call Credit Spreads";
-            strategy_desc =
-                "High volatility overbought. Sell call credit spreads for fast premium decay.";
-        } else {
-            strategy = "Protect Longs / Buy Puts";
-            strategy_desc = "Overbought stance. Trim shares or buy puts to hedge downside risk.";
-        }
-    }
-
-    OpportunityResult {
-        score: opportunity_pct,
-        classification,
-        color,
-        strategy,
-        description: strategy_desc,
-        checklist,
-    }
-}
+use social_sentiment_math::{
+    scoring::compute_opportunity,
+    timeseries::{compute_sentiment_macd, pearson, percentile},
+};
 
 fn lagged_correlations(buckets: &[CorrelationBucket]) -> (f64, i32, Vec<LagSweepValue>) {
     let mut max_r: f64 = 0.0;
@@ -1361,14 +1156,6 @@ fn lagged_correlations(buckets: &[CorrelationBucket]) -> (f64, i32, Vec<LagSweep
         }
     }
     (max_r, best_lag, sweeps)
-}
-
-fn percentile(sorted: &[f64], fraction: f64) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let index = ((sorted.len() - 1) as f64 * fraction).floor() as usize;
-    sorted[index]
 }
 
 async fn correlation_handler(
@@ -2031,7 +1818,7 @@ async fn correlation_handler(
             color: opp.color.to_string(),
             strategy: opp.strategy.to_string(),
             description: opp.description.to_string(),
-            checklist: opp.checklist,
+            checklist: opp.checklist.into_iter().map(str::to_string).collect(),
         }
     });
 
@@ -2276,7 +2063,7 @@ mod tests {
             0.5,
             0.2,
             Some(14.0),
-            Some(-0.5),
+            Some(0.5),
             &[105.0, 103.0, 101.0],
             &[0.1, 0.3, 0.5],
         );
@@ -2285,6 +2072,21 @@ mod tests {
         assert_eq!(opp.color, "emerald");
         assert_eq!(opp.strategy, "Long Call Option (Buy Call)");
         assert_eq!(opp.checklist.len(), 4);
+
+        // Overvalued (negative pe_relative_sector) must not get the undervalued bonus.
+        let overvalued = compute_opportunity(
+            Some(101.0),
+            100.0,
+            120.0,
+            0.5,
+            0.2,
+            Some(14.0),
+            Some(-0.5),
+            &[105.0, 103.0, 101.0],
+            &[0.1, 0.3, 0.5],
+        );
+        assert_eq!(overvalued.score, 80.0);
+        assert_eq!(overvalued.checklist.len(), 3);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/social-sentiment-math",
     "crates/social-sentiment-core",
     "crates/social-news-producer",
     "crates/market-producer",

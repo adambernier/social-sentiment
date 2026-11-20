@@ -131,22 +131,8 @@ impl ScoredPost {
         let neu = self.scores["neutral"];
         let neg = self.scores["negative"];
 
-        for (label, val) in [("positive", pos), ("neutral", neu), ("negative", neg)] {
-            if !val.is_finite() || !(0.0..=1.0).contains(&val) {
-                return Err(format!(
-                    "score for {} must be finite and in [0, 1], got {}",
-                    label, val
-                ));
-            }
-        }
-
-        let sum = pos + neu + neg;
-        if (sum - 1.0).abs() > 0.0001 {
-            return Err(format!(
-                "scores sum to {}, which is not 1.0 (abs_tol 0.0001)",
-                sum
-            ));
-        }
+        social_sentiment_math::validation::validate_probability_simplex(pos, neu, neg)
+            .map_err(|err| err.to_string())?;
 
         Ok(())
     }

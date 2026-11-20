@@ -1,0 +1,10 @@
+[package]
+name = "social-sentiment-math"
+version = "0.1.0"
+edition = "2021"
+description = "Pure, zero-dependency mathematical kernel formally verified with Kani."
+
+[dependencies]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

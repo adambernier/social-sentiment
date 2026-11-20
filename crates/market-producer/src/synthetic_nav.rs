@@ -6,15 +6,8 @@ use chrono_tz::America::New_York;
 use crate::{DailyClose, SessionCalendar};
 
 pub const NAV_SYMBOL: &str = "SWYGX";
-pub const MAX_PLAUSIBLE_MOVE: f64 = 8.0;
-pub const HOLDINGS: [(&str, f64); 6] = [
-    ("SCHB", 0.55),
-    ("SCHF", 0.27),
-    ("SCHE", 0.08),
-    ("SCHZ", 0.06),
-    ("SCHP", 0.02),
-    ("SCHO", 0.02),
-];
+pub const MAX_PLAUSIBLE_MOVE: f64 = social_sentiment_math::market::MAX_PLAUSIBLE_MOVE;
+pub const HOLDINGS: [(&str, f64); 6] = social_sentiment_math::market::NAV_HOLDINGS;
 
 pub fn proxy_change(history: &[DailyClose], session_date: NaiveDate) -> anyhow::Result<f64> {
     let latest = history
@@ -28,31 +21,21 @@ pub fn proxy_change(history: &[DailyClose], session_date: NaiveDate) -> anyhow::
         .rev()
         .find(|close| close.date < session_date)
         .ok_or_else(|| anyhow::anyhow!("insufficient price history"))?;
-    let change = (latest.close - previous.close) / previous.close * 100.0;
-    if !change.is_finite() || change.abs() > MAX_PLAUSIBLE_MOVE {
-        anyhow::bail!("implausible proxy move");
-    }
-    Ok(change)
+    social_sentiment_math::market::proxy_change_pct(previous.close, latest.close)
+        .map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 pub fn estimate_pct_change(
     histories: &HashMap<String, Vec<DailyClose>>,
     session_date: NaiveDate,
 ) -> Option<f64> {
-    let mut weighted = 0.0;
-    let mut covered = 0.0;
-    for (symbol, weight) in HOLDINGS {
-        let Ok(change) = histories
-            .get(symbol)
-            .ok_or_else(|| anyhow::anyhow!("missing proxy"))
-            .and_then(|history| proxy_change(history, session_date))
-        else {
-            continue;
-        };
-        weighted += change * weight;
-        covered += weight;
+    let mut changes = [None; 6];
+    for (slot, (symbol, _)) in changes.iter_mut().zip(HOLDINGS.iter()) {
+        *slot = histories
+            .get(*symbol)
+            .and_then(|history| proxy_change(history, session_date).ok());
     }
-    (covered > 0.0).then_some(weighted / covered)
+    social_sentiment_math::market::weighted_proxy_return(changes)
 }
 
 pub fn official_is_final(date: NaiveDate, now_utc: DateTime<Utc>) -> bool {
