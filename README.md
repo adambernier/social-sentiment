@@ -317,24 +317,9 @@ Inspect bar/event timestamps and Prometheus metrics before rebuilding with
 `global_context_rule_matches_total`, and
 `global_context_relationship_sample_sufficient`.
 
-## Smoke test (synthetic posts)
+## Inspecting Data
 
-`test_publisher.py` publishes a handful of canned posts directly to
-`raw-posts`, bypassing the Bluesky producer:
-
-```bash
-python test_publisher.py
-```
-
-Expected behavior:
-- 7 `Published ...` lines from the publisher.
-- Preprocessing logs each cleaned post; the `t3` (`"hi"`) post is dropped as
-  too short.
-- Sentiment logs a batch with a label and confidence per post.
-- Storage logs `Inserting batch of N posts` and the affected row count;
-  re-running the publisher inserts 0 new rows (deduplicated via `ON CONFLICT`).
-
-Inspect the data:
+Inspect stored posts in Postgres:
 ```bash
 docker compose exec postgres psql -U postgres -d sentiment \
   -c "SELECT id, platform, sentiment, scores FROM posts ORDER BY timestamp DESC LIMIT 10;"

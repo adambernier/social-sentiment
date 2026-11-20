@@ -8,7 +8,7 @@
 }
 
 {$SITE_ADDRESS} {
-	# API traffic -> FastAPI backend
+	# API traffic -> Rust Axum backend
 	@api {
 		path /api/*
 	}
