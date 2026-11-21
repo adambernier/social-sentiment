@@ -46,6 +46,7 @@ def retention_database():
             "0004_fact_topic_labels.sql",
             "0005_provenance_and_quality.sql",
             "0006_analytical_constraints.sql",
+            "0007_stock_metrics_constraints.sql",
         ):
             conn.execute((migrations_dir / migration_name).read_text())
 
@@ -418,3 +419,58 @@ def test_quote_retention_preserves_ohlc_and_updates_for_late_quotes(
         )
 
         assert _run_quote_retention(conn, cutoff) == (0, 0, 0)
+
+
+def test_boundary_simplex_posts_roll_up_cleanly_and_stock_metrics_reject_non_finite(
+    retention_database,
+):
+    bucket_hour = datetime(2026, 7, 15, 14, tzinfo=timezone.utc)
+    cutoff = bucket_hour + timedelta(hours=1)
+    with _connect_to_retention_database(retention_database) as conn:
+        # Posts at the tightened 5e-7 ingestion boundary (sum = 1.0000004) must
+        # satisfy 0006's 1e-6 per-post probability CHECK when rolled up.
+        conn.execute(
+            """
+            INSERT INTO posts (
+                id, symbol, platform, text, timestamp, sentiment, scores,
+                topic_id, topic_label, engagement
+            )
+            VALUES (
+                'boundary-1', 'NVDA', 'bluesky', 'Boundary simplex post',
+                %s, 'positive',
+                '{"positive": 0.7000004, "neutral": 0.2, "negative": 0.1}'::jsonb,
+                0, 'Earnings & Guidance', 5
+            )
+            """,
+            [bucket_hour + timedelta(minutes=10)],
+        )
+        assert _run_retention(conn, cutoff) == (1, 1)
+        assert conn.execute(
+            "SELECT post_count FROM hourly_sentiment_facts WHERE symbol = 'NVDA'"
+        ).fetchone() == (1,)
+
+        # Migration 0007 enforces finite sector-relative scores on stock_metrics.
+        conn.execute(
+            """
+            INSERT INTO stock_metrics (
+                symbol, pe_relative_sector, beta_relative_sector, return_relative_sector
+            )
+            VALUES ('NVDA', 0.25, -0.1, 0.4)
+            """
+        )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                """
+                UPDATE stock_metrics
+                SET pe_relative_sector = 'NaN'::double precision
+                WHERE symbol = 'NVDA'
+                """
+            )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                """
+                UPDATE stock_metrics
+                SET return_relative_sector = 'Infinity'::double precision
+                WHERE symbol = 'NVDA'
+                """
+            )

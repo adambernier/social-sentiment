@@ -11,6 +11,7 @@
 
 pub mod bounds;
 pub mod market;
+pub mod ops;
 pub mod postprocess;
 pub mod rollup;
 pub mod scoring;

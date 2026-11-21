@@ -1,5 +1,8 @@
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
+use chrono::{
+    DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Timelike, Utc, Weekday,
+};
 use chrono_tz::America::New_York;
+use social_sentiment_math::ops::{classify_equity_session, classify_futures_session};
 
 use crate::SessionCalendar;
 
@@ -85,49 +88,24 @@ impl UsMarketCalendar {
 impl SessionCalendar for UsMarketCalendar {
     fn equity_session(&self, now: DateTime<Utc>) -> String {
         let local = now.with_timezone(&New_York);
-        if !self.is_trading_day(local.date_naive()) {
-            return "closed".into();
-        }
-        let time = local.time();
-        let pre = NaiveTime::from_hms_opt(4, 0, 0).unwrap();
-        let open = NaiveTime::from_hms_opt(9, 30, 0).unwrap();
-        let close = NaiveTime::from_hms_opt(
-            if Self::is_early_close(local.date_naive()) {
-                13
-            } else {
-                16
-            },
-            0,
-            0,
+        let date = local.date_naive();
+        classify_equity_session(
+            self.is_trading_day(date),
+            Self::is_early_close(date),
+            local.time().num_seconds_from_midnight(),
         )
-        .unwrap();
-        let after = NaiveTime::from_hms_opt(20, 0, 0).unwrap();
-        if time >= open && time <= close {
-            "regular".into()
-        } else if time >= pre && time < open {
-            "pre".into()
-        } else if time > close && time <= after {
-            "after".into()
-        } else {
-            "closed".into()
-        }
+        .as_str()
+        .to_string()
     }
 
     fn futures_session(&self, _symbol: &str, now: DateTime<Utc>) -> String {
         let local = now.with_timezone(&New_York);
-        let time = local.time();
-        let break_start = NaiveTime::from_hms_opt(17, 0, 0).unwrap();
-        let break_end = NaiveTime::from_hms_opt(18, 0, 0).unwrap();
-        if local.weekday() == Weekday::Sat
-            || (local.weekday() == Weekday::Fri && time >= break_start)
-            || (local.weekday() == Weekday::Sun && time < break_end)
-        {
-            "futures_closed".into()
-        } else if time >= break_start && time < break_end {
-            "futures_break".into()
-        } else {
-            "futures_open".into()
-        }
+        classify_futures_session(
+            local.weekday().num_days_from_monday() as u8,
+            local.time().num_seconds_from_midnight(),
+        )
+        .as_str()
+        .to_string()
     }
 
     fn is_trading_day(&self, date: NaiveDate) -> bool {
@@ -166,5 +144,20 @@ mod tests {
         let winter_open = Utc.with_ymd_and_hms(2026, 12, 21, 14, 30, 0).unwrap();
         assert_eq!(calendar.equity_session(summer_open), "regular");
         assert_eq!(calendar.equity_session(winter_open), "regular");
+    }
+
+    #[test]
+    fn previous_trading_day_exists_for_every_day_2000_through_2050() {
+        let calendar = UsMarketCalendar;
+        let mut day = NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2050, 12, 31).unwrap();
+        while day <= end {
+            let prev = calendar
+                .previous_trading_day(day)
+                .unwrap_or_else(|| panic!("no previous trading day within 10d of {day}"));
+            assert!(prev < day);
+            assert!(calendar.is_trading_day(prev));
+            day = day.succ_opt().unwrap();
+        }
     }
 }

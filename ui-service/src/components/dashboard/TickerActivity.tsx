@@ -56,13 +56,23 @@ export default function TickerActivity({ state, setters }: DashboardDataProps) {
           const active = symbol === item.symbol;
           const si = item.sentiment_index_4h;
           const z = item.buzz_z;
+          const hasCi =
+            typeof item.sentiment_ci_low_4h === "number" &&
+            typeof item.sentiment_ci_high_4h === "number";
+          const isSignificant = item.sentiment_significant_4h === true;
+          const methodLabel =
+            item.sentiment_bound_method_4h === "empirical_bernstein"
+              ? "Empirical Bernstein"
+              : "Hoeffding";
+          const formatSignedPct = (v: number) =>
+            `${v > 0 ? "+" : ""}${Math.round(v * 100)}%`;
           const status =
             z !== null && z >= 2 && item.post_count_4h >= 10
               ? { label: "Buzzing", cls: "bg-amber-500/20 text-amber-300" }
               : z !== null && z >= 1 && item.post_count_4h >= 5
               ? { label: "Active", cls: "bg-emerald-500/10 text-emerald-400" }
               : null;
-              
+
           return (
             <button
               key={item.symbol}
@@ -72,10 +82,13 @@ export default function TickerActivity({ state, setters }: DashboardDataProps) {
                 `${item.post_count_4h} posts in last 4h · ` +
                 (z !== null
                   ? `${z >= 0 ? "+" : ""}${z.toFixed(1)}σ vs typical for these hours on comparable days (n=${item.baseline_samples}h)`
-                  : "baseline too sparse to score")
+                  : "baseline too sparse to score") +
+                (hasCi
+                  ? ` · 95% CI: [${formatSignedPct(item.sentiment_ci_low_4h!)}, ${formatSignedPct(item.sentiment_ci_high_4h!)}] (${methodLabel}, ${isSignificant ? "statistically significant" : "crosses 0% — within noise"})`
+                  : "")
               }
               className={cn(
-                "flex-shrink-0 min-w-[116px] flex flex-col gap-1 p-2.5 rounded-xl border text-left transition-all cursor-pointer",
+                "flex-shrink-0 min-w-[128px] flex flex-col gap-1 p-2.5 rounded-xl border text-left transition-all cursor-pointer",
                 active
                   ? "bg-indigo-500/20 border-indigo-500/50 shadow-[0_0_12px_rgba(99,102,241,0.18)]"
                   : "bg-slate-950/50 border-white/5 hover:bg-slate-800/60 hover:border-white/10"
@@ -93,11 +106,36 @@ export default function TickerActivity({ state, setters }: DashboardDataProps) {
                 <span className="text-[10px] text-slate-400">{item.post_count_4h} posts</span>
                 <span className={cn(
                   "text-[10px] font-semibold",
-                  si > 0.1 ? "text-emerald-400" : si < -0.1 ? "text-rose-400" : "text-slate-400"
+                  si > 0.1
+                    ? isSignificant ? "text-emerald-400" : "text-emerald-400/70"
+                    : si < -0.1
+                    ? isSignificant ? "text-rose-400" : "text-rose-400/70"
+                    : "text-slate-400"
                 )}>
                   {si > 0 ? "+" : ""}{(si * 100).toFixed(0)}%
                 </span>
               </div>
+              {hasCi && (
+                <div className="flex items-center justify-between w-full gap-1.5 pt-0.5 border-t border-white/5 tabular-nums">
+                  <span className="text-[9px] text-slate-500">
+                    95% [{formatSignedPct(item.sentiment_ci_low_4h!)}, {formatSignedPct(item.sentiment_ci_high_4h!)}]
+                  </span>
+                  {isSignificant ? (
+                    <span
+                      className={cn(
+                        "text-[9px] font-semibold px-1 rounded border",
+                        si >= 0
+                          ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                          : "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                      )}
+                    >
+                      sig
+                    </span>
+                  ) : (
+                    <span className="text-[9px] text-slate-500">noise</span>
+                  )}
+                </div>
+              )}
             </button>
           );
         })}

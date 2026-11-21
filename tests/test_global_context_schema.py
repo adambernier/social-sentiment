@@ -15,6 +15,7 @@ def test_global_context_migration_is_registered_after_baseline():
         "0004_fact_topic_labels",
         "0005_provenance_and_quality",
         "0006_analytical_constraints",
+        "0007_stock_metrics_constraints",
     ]
 
 

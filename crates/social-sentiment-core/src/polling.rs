@@ -108,9 +108,13 @@ pub struct PerSymbolBackoff {
 
 impl PerSymbolBackoff {
     pub fn new(base: Duration, maximum: Duration) -> Self {
+        let (base_nanos, max_nanos) = social_sentiment_math::ops::normalize_backoff_bounds(
+            base.as_nanos(),
+            maximum.as_nanos(),
+        );
         Self {
-            base: base.max(Duration::from_nanos(1)),
-            maximum: maximum.max(base),
+            base: Duration::from_nanos(base_nanos.min(u64::MAX as u128) as u64),
+            maximum: Duration::from_nanos(max_nanos.min(u64::MAX as u128) as u64),
             penalties: HashMap::new(),
             next_allowed: HashMap::new(),
         }
@@ -138,13 +142,13 @@ impl PerSymbolBackoff {
             self.next_allowed.remove(symbol);
             return;
         }
-        let next_penalty = retry_after.unwrap_or_else(|| {
-            self.penalties
-                .get(symbol)
-                .and_then(|current| current.checked_mul(2))
-                .unwrap_or(self.base)
-        });
-        let next_penalty = next_penalty.max(Duration::from_nanos(1)).min(self.maximum);
+        let next_nanos = social_sentiment_math::ops::next_backoff_nanos(
+            self.base.as_nanos(),
+            self.maximum.as_nanos(),
+            self.penalties.get(symbol).map(Duration::as_nanos),
+            retry_after.map(|d| d.as_nanos()),
+        );
+        let next_penalty = Duration::from_nanos(next_nanos.min(u64::MAX as u128) as u64);
         self.penalties.insert(symbol.to_string(), next_penalty);
         self.next_allowed
             .insert(symbol.to_string(), now + next_penalty);

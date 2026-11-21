@@ -25,6 +25,7 @@ interface DisplayCorrelationBucket extends CorrelationBucket {
   positiveCount: number;
   neutralCount: number;
   negativeCount: number;
+  sentimentCiBand: [number, number] | null;
 }
 
 interface OpportunityDotProps {
@@ -106,6 +107,7 @@ const CorrelationTooltip = ({
       </p>
       {payload.map((entry, index) => {
         const dataKey = entry.dataKey;
+        if (dataKey === "sentimentCiBand") return null;
         const isDollar =
           dataKey === "rawPrice" ||
           dataKey === "supportPrice" ||
@@ -126,7 +128,7 @@ const CorrelationTooltip = ({
         } else if (isFuture) {
           display = `${entry.value > 0 ? "+" : ""}${entry.value.toFixed(1)}%`;
         } else if (isSentimentIndex) {
-          display = `${entry.value.toFixed(2)}%`;
+          display = `${entry.value > 0 ? "+" : ""}${(entry.value * 100).toFixed(1)}%`;
         } else if (isVolume) {
           const count =
             dataKey === "positive"
@@ -157,6 +159,41 @@ const CorrelationTooltip = ({
           </div>
         );
       })}
+      {typeof data.sentimentCiLow === "number" &&
+        typeof data.sentimentCiHigh === "number" && (
+          <div className="mt-2.5 pt-2.5 border-t border-white/5">
+            <div className="flex items-center justify-between gap-3 mb-1">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                95% Sentiment CI
+              </span>
+              <span
+                className={cn(
+                  "text-[10px] font-semibold px-1.5 py-0.5 rounded border",
+                  data.sentimentSignificant
+                    ? data.sentimentCiLow > 0
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                      : "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                    : "bg-slate-500/10 text-slate-400 border-slate-500/20",
+                )}
+              >
+                {data.sentimentSignificant ? "Significant" : "Within Noise"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-4 text-xs tabular-nums">
+              <span className="text-slate-400">
+                {data.sentimentBoundMethod === "empirical_bernstein"
+                  ? "Empirical Bernstein"
+                  : "Hoeffding"}
+              </span>
+              <span className="text-white font-semibold">
+                [{data.sentimentCiLow > 0 ? "+" : ""}
+                {Math.round(data.sentimentCiLow * 100)}%,{" "}
+                {data.sentimentCiHigh > 0 ? "+" : ""}
+                {Math.round(data.sentimentCiHigh * 100)}%]
+              </span>
+            </div>
+          </div>
+        )}
       {data.buySignal && (
         <div className="mt-3 pt-3 border-t border-white/5">
           <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
@@ -199,6 +236,7 @@ const CorrelationTooltip = ({
 export default function CorrelationChart({ state, setters }: DashboardDataProps) {
   const { symbol, hours, chartView, correlationData, showSR, selectedHour, hideExtended, hasHydrated } = state;
   const { setChartView, setSelectedHour, setHideExtended } = setters;
+  const [showCiBand, setShowCiBand] = React.useState(true);
 
   const displayData = React.useMemo<DisplayCorrelationBucket[]>(() => {
     if (!correlationData?.data) return [];
@@ -214,11 +252,17 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
       const neu = d.neutral ?? 0;
       const neg = d.negative ?? 0;
       const total = pos + neu + neg;
+      const sentimentCiBand: [number, number] | null =
+        typeof d.sentimentCiLow === "number" &&
+        typeof d.sentimentCiHigh === "number"
+          ? [d.sentimentCiLow, d.sentimentCiHigh]
+          : null;
       return {
         ...d,
         positiveCount: pos,
         neutralCount: neu,
         negativeCount: neg,
+        sentimentCiBand,
         positive: total ? (pos / total) * 100 : 0,
         neutral: total ? (neu / total) * 100 : 0,
         negative: total ? (neg / total) * 100 : 0,
@@ -290,6 +334,19 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
             >
               {hideExtended ? "Show All Hours" : "Hide Closed"}
             </button>
+            {chartView === "sentiment" && (
+              <button
+                type="button"
+                onClick={() => setShowCiBand(!showCiBand)}
+                title="Toggle finite-sample 95% Hoeffding / Empirical Bernstein confidence band"
+                className={cn(
+                  "px-2.5 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer",
+                  showCiBand ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shadow-md" : "text-slate-400 hover:text-slate-200"
+                )}
+              >
+                95% CI
+              </button>
+            )}
           </div>
           {selectedHour ? (
             <span className="inline-flex items-center gap-1.5 text-xs bg-indigo-500/20 text-indigo-300 px-2.5 py-1 rounded-md border border-indigo-500/30">
@@ -320,6 +377,11 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
             <>
               <div className="flex items-center gap-1"><div className="w-3 h-0.5 bg-[#818cf8]"></div> Sentiment Index</div>
               <div className="flex items-center gap-1"><div className="w-3 h-0.5 bg-[#06b6d4]"></div> Sentiment SMA</div>
+              {showCiBand && (
+                <div className="flex items-center gap-1" title="Finite-sample 95% Hoeffding / Empirical Bernstein confidence interval">
+                  <div className="w-3 h-2 rounded-xs bg-indigo-400/25 border border-indigo-400/40"></div> 95% CI
+                </div>
+              )}
             </>
           )}
           <div className="hidden sm:block h-4 w-px bg-slate-700 mx-1"></div>
@@ -420,6 +482,19 @@ export default function CorrelationChart({ state, setters }: DashboardDataProps)
               </>
             ) : (
               <>
+                {showCiBand && (
+                  <Area
+                    yAxisId="left"
+                    type="monotone"
+                    dataKey="sentimentCiBand"
+                    name="95% Confidence Band"
+                    stroke="none"
+                    fill="#818cf8"
+                    fillOpacity={0.14}
+                    connectNulls={false}
+                    isAnimationActive={false}
+                  />
+                )}
                 <Area yAxisId="left" type="monotone" dataKey="sentimentIndex" name="Weighted Sentiment Index" stroke="#818cf8" strokeWidth={1.5} fill="url(#sentimentGrad)" isAnimationActive={false} />
                 <Line yAxisId="left" type="monotone" dataKey="sentimentSMA" name="Sentiment SMA" stroke="#06b6d4" strokeWidth={3} dot={false} isAnimationActive={false} />
               </>

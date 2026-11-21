@@ -58,6 +58,10 @@ MIGRATIONS = (
         "0006_analytical_constraints",
         Path(__file__).parent / "0006_analytical_constraints.sql",
     ),
+    Migration(
+        "0007_stock_metrics_constraints",
+        Path(__file__).parent / "0007_stock_metrics_constraints.sql",
+    ),
 )
 
 

@@ -82,10 +82,10 @@ Two concrete Category 4 upgrades:
 
 1. **Phase 1 — Kani on Pure Rust Math *(Implemented)***:
    - Extracted the zero-dependency Trusted Computing Base crate `crates/social-sentiment-math` and wired `social-sentiment-core`, `market-producer`, `service-preprocessing`, `service-sentiment`, and `service-api` directly to it.
-   - Verified **36 Kani proof harnesses** (`cargo kani -p social-sentiment-math -Z stubbing --output-format terse`) in a dedicated path-filtered CI workflow (`.github/workflows/kani.yml`).
+   - Verified **39 Kani proof harnesses** (`cargo kani -p social-sentiment-math -Z stubbing --output-format terse`) in a dedicated path-filtered CI workflow (`.github/workflows/kani.yml`), including operational session-partitioning and overflow-safe exponential backoff (`ops.rs`) plus `schema-migrate/0007_stock_metrics_constraints.sql`.
 2. **Phase 2 — Rollup Contract & Error Budget *(Implemented)***:
-   - Proved sentiment/OHLC rollup monoid laws and SQL `CHECK` invariants in `rollup.rs` and reconciled `SIMPLEX_TOLERANCE` (`5e-7`) against `schema-migrate/0006_analytical_constraints.sql` (`1e-6`).
+   - Proved sentiment/OHLC rollup monoid laws and SQL `CHECK` invariants in `rollup.rs`, reconciled `SIMPLEX_TOLERANCE` (`5e-7`) against `schema-migrate/0006_analytical_constraints.sql` (`1e-6`), and added PostgreSQL boundary retention + `stock_metrics` finiteness integration tests.
 3. **Phase 3a — Finite-Sample Confidence Bounds *(Implemented)***:
-   - Added Kani-verified Hoeffding + Empirical Bernstein bounds in `crates/social-sentiment-math/src/bounds.rs` and exposed 95% confidence intervals on `/api/stats/leaderboard` and `/api/stats/correlation`.
+   - Added Kani-verified Hoeffding + Empirical Bernstein bounds in `crates/social-sentiment-math/src/bounds.rs`, exposed 95% confidence intervals on `/api/stats/leaderboard` and `/api/stats/correlation`, and surfaced them in `ui-service` (`TickerActivity` significance badges/tooltips + `CorrelationChart` toggleable 95% CI band & tooltip).
 4. **Phase 3b — Conformal Calibration & Debiasing *(Planned)***:
    - Calibrate split/adaptive conformal prediction sets and Horvitz–Thompson debiasing on human-audited samples from `raw_post_archive_staging` (`cohort = 'probability'`) keyed by `model_artifacts` SHA-256 hashes.
