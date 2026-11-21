@@ -1119,7 +1119,8 @@ async fn posts_handler(
 }
 
 use social_sentiment_math::{
-    scoring::compute_opportunity,
+    market::SectorRelativeScore,
+    scoring::{compute_opportunity, evaluate_signal_quality},
     timeseries::{compute_sentiment_macd, pearson, percentile},
 };
 
@@ -1719,7 +1720,8 @@ async fn correlation_handler(
     .fetch_optional(&state.pool)
     .await
     .map_err(internal_error)?
-    .flatten();
+    .flatten()
+    .and_then(SectorRelativeScore::from_stored);
 
     let vix_price_opt = sqlx::query_scalar::<_, Option<f64>>(
         "SELECT price FROM stock_quotes WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1",
@@ -1733,6 +1735,8 @@ async fn correlation_handler(
 
     for i in 0..buckets.len() {
         let bucket_price = buckets[i].raw_price;
+        let bucket_support = buckets[i].support_price.unwrap_or(support_price);
+        let bucket_resistance = buckets[i].resistance_price.unwrap_or(resistance_price);
         let mut prev_prices = Vec::new();
         let mut prev_sentiments = Vec::new();
         let start = i.saturating_sub(2);
@@ -1745,8 +1749,8 @@ async fn correlation_handler(
 
         let opp = compute_opportunity(
             bucket_price,
-            support_price,
-            resistance_price,
+            bucket_support,
+            bucket_resistance,
             buckets[i].sentiment_index,
             buckets[i].sentiment_sma,
             Some(vix_price),
@@ -1755,37 +1759,27 @@ async fn correlation_handler(
             &prev_sentiments,
         );
         buckets[i].buy_score = Some(opp.score);
-        buckets[i].buy_signal = Some(opp.score >= 50.0);
+        buckets[i].buy_signal = Some(opp.class.is_buy_signal());
         buckets[i].signal_quality = Some("pending".to_string());
     }
 
     // Forward returns for signals
     for i in 0..buckets.len() {
-        if buckets[i].buy_signal == Some(true) {
-            if let Some(curr_price) = buckets[i].raw_price {
-                let mut forward_prices = Vec::new();
-                let end = (i + 1 + 24).min(buckets.len());
-                for b in &buckets[(i + 1)..end] {
-                    if let Some(rp) = b.raw_price {
-                        forward_prices.push(rp);
-                        if forward_prices.len() >= 2 {
-                            break;
-                        }
-                    }
-                }
-                if !forward_prices.is_empty() {
-                    let max_forward = forward_prices
-                        .iter()
-                        .copied()
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    if max_forward > curr_price * 1.002 {
-                        buckets[i].signal_quality = Some("good".to_string());
-                    } else {
-                        buckets[i].signal_quality = Some("bad".to_string());
+        let is_buy = buckets[i].buy_signal == Some(true);
+        let mut forward_prices = Vec::new();
+        if is_buy {
+            let end = (i + 1 + 24).min(buckets.len());
+            for b in &buckets[(i + 1)..end] {
+                if let Some(rp) = b.raw_price {
+                    forward_prices.push(rp);
+                    if forward_prices.len() >= 2 {
+                        break;
                     }
                 }
             }
         }
+        let quality = evaluate_signal_quality(is_buy, buckets[i].raw_price, &forward_prices);
+        buckets[i].signal_quality = Some(quality.as_str().to_string());
     }
 
     // 10. Compute final current opportunity
@@ -1818,7 +1812,7 @@ async fn correlation_handler(
             color: opp.color.to_string(),
             strategy: opp.strategy.to_string(),
             description: opp.description.to_string(),
-            checklist: opp.checklist.into_iter().map(str::to_string).collect(),
+            checklist: opp.checklist_strings(),
         }
     });
 
@@ -2020,7 +2014,7 @@ async fn main() -> Result<()> {
 mod tests {
     use super::{
         compute_opportunity, compute_sentiment_macd, pearson, percentile, source_status,
-        validated_hours,
+        validated_hours, SectorRelativeScore,
     };
 
     #[test]
@@ -2063,7 +2057,7 @@ mod tests {
             0.5,
             0.2,
             Some(14.0),
-            Some(0.5),
+            SectorRelativeScore::from_stored(0.5),
             &[105.0, 103.0, 101.0],
             &[0.1, 0.3, 0.5],
         );
@@ -2071,7 +2065,8 @@ mod tests {
         assert_eq!(opp.classification, "STRONG BUY");
         assert_eq!(opp.color, "emerald");
         assert_eq!(opp.strategy, "Long Call Option (Buy Call)");
-        assert_eq!(opp.checklist.len(), 4);
+        assert_eq!(opp.items.len(), 4);
+        assert_eq!(opp.checklist_strings().len(), 4);
 
         // Overvalued (negative pe_relative_sector) must not get the undervalued bonus.
         let overvalued = compute_opportunity(
@@ -2081,12 +2076,13 @@ mod tests {
             0.5,
             0.2,
             Some(14.0),
-            Some(-0.5),
+            SectorRelativeScore::from_stored(-0.5),
             &[105.0, 103.0, 101.0],
             &[0.1, 0.3, 0.5],
         );
         assert_eq!(overvalued.score, 80.0);
-        assert_eq!(overvalued.checklist.len(), 3);
+        assert_eq!(overvalued.items.len(), 3);
+        assert_eq!(overvalued.checklist_strings().len(), 3);
     }
 
     #[test]

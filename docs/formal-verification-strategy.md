@@ -96,12 +96,14 @@ Two concrete Category 4 upgrades:
 
 1. **Phase 1 — Kani on Pure Rust Math *(Implemented)***:
    - Extracted the zero-dependency Trusted Computing Base crate `crates/social-sentiment-math` and wired `social-sentiment-core`, `market-producer`, `service-preprocessing`, `service-sentiment`, and `service-api` directly to it.
-   - Verified **17 Kani proof harnesses** (`cargo kani -p social-sentiment-math -Z stubbing --output-format terse`) in CI (`.github/workflows/tests.yml`, `kani` job).
-   - Fixed five real issues surfaced by formal specs and Kani:
+   - Verified **24 Kani proof harnesses** (`cargo kani -p social-sentiment-math -Z stubbing --output-format terse`) in CI (`.github/workflows/tests.yml`, `kani` job), including full `(OpportunityClass × VIX) → OpportunityStrategy` safety & `kani::cover!` reachability, exact `score ↔ checklist` accounting, bounded `±2.5%` support-band breakdown protection & above-support monotonicity, divergence monotonicity, `SectorRelativeScore` compile-time sign enforcement, and `evaluate_signal_quality` safety/monotonicity.
+   - Fixed seven real issues surfaced by formal specs and Kani:
      1. `topic_model` `exp()` overflow above `88.7f32` (fixed in both Rust and `shared/topics.py`).
      2. `normalize_fx_ohlc` `NaN`/non-finite bypass and subnormal inversion overflow guard.
      3. `sentiment_model` conservative `neutral`-first argmax tie-breaking and `f64` simplex stability.
-     4. `pe_relative_sector` sign inversion in `compute_opportunity` (aligned with `market-producer`, Postgres `stock_metrics`, and the UI scorecard).
+     4. `pe_relative_sector` sign inversion in `compute_opportunity` (now compile-time enforced via `SectorRelativeScore` and aligned with `market-producer`, Postgres `stock_metrics`, and the UI scorecard).
      5. Eager `.then_some(weighted / covered)` `0.0 / 0.0` `NaN` division caught directly by Kani in the synthetic NAV combiner (`synthetic_nav.rs`), plus panic-free clamping in `percentile` and zero-period guards in `sma`.
+     6. `score / 10.0 * 100.0` IEEE-754 rounding drift (`30.000000000000004` vs exact `30.0`) caught by Kani's exact checklist accounting proof, fixed via exact `score * 10.0`, alongside bounded `±2.5%` support bands (preventing falling-knife support signals).
+     7. Historical `correlation_handler` lookahead where global window `support_price` was fed into past `compute_opportunity` buckets instead of each bucket's trailing `local_support`.
 2. **Phase 2 — Rollup Contract & Error Budget (Lean 4 / Z3)**: Formalize the `hourly_sentiment_facts` and OHLC commutative monoids and reconcile the `ScoredPost::validate()` (`1e-4`) vs. `0006_analytical_constraints.sql` (`1e-6`) floating-point tolerances.
 3. **Phase 3 — Conformal Calibration & Finite-Sample Bounds**: Build calibration and uncertainty bounds on top of the `raw_post_archive_staging` `probability` cohort and immutable `model_artifacts` hashes.

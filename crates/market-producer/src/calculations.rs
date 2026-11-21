@@ -71,13 +71,24 @@ pub fn build_metrics(
         beta: Some(beta),
         avg_return_1y: Some(average_return),
         inflation_adj_return_1y: Some(average_return - 0.03),
-        pe_relative_sector: Some(calculate_relative(pe, baseline_pe, true)),
-        beta_relative_sector: Some(calculate_relative(Some(beta), Some(1.0), true)),
-        return_relative_sector: Some(calculate_relative(
-            Some(average_return),
-            baseline_return,
-            false,
-        )),
+        pe_relative_sector: Some(
+            social_sentiment_math::market::SectorRelativeScore::lower_is_better(pe, baseline_pe)
+                .value(),
+        ),
+        beta_relative_sector: Some(
+            social_sentiment_math::market::SectorRelativeScore::lower_is_better(
+                Some(beta),
+                Some(1.0),
+            )
+            .value(),
+        ),
+        return_relative_sector: Some(
+            social_sentiment_math::market::SectorRelativeScore::higher_is_better(
+                Some(average_return),
+                baseline_return,
+            )
+            .value(),
+        ),
     })
 }
 

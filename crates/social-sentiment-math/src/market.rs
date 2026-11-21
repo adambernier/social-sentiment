@@ -42,6 +42,37 @@ impl fmt::Display for MarketMathError {
 
 impl std::error::Error for MarketMathError {}
 
+/// Sector-relative score where **positive values always mean better than the sector benchmark**.
+///
+/// Constructing via [`Self::lower_is_better`] (for P/E and Beta) or
+/// [`Self::higher_is_better`] (for 1Y returns) enforces the sign convention
+/// at compile time across crate boundaries.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SectorRelativeScore(f64);
+
+impl SectorRelativeScore {
+    /// Construct for metrics where lower values are better (e.g., P/E, Beta).
+    pub fn lower_is_better(value: Option<f64>, baseline: Option<f64>) -> Self {
+        Self(calculate_relative(value, baseline, true))
+    }
+
+    /// Construct for metrics where higher values are better (e.g., 1Y return).
+    pub fn higher_is_better(value: Option<f64>, baseline: Option<f64>) -> Self {
+        Self(calculate_relative(value, baseline, false))
+    }
+
+    /// Reconstruct from persisted storage (e.g., Postgres `stock_metrics`),
+    /// rejecting non-finite (`NaN`/`inf`) values.
+    pub fn from_stored(score: f64) -> Option<Self> {
+        score.is_finite().then_some(Self(score))
+    }
+
+    /// Extract the underlying finite score (`> 0.0` = better than sector).
+    pub const fn value(self) -> f64 {
+        self.0
+    }
+}
+
 /// Compute relative metric versus a sector baseline.
 ///
 /// When `invert` is `true` (used for P/E and Beta where lower is better), a
@@ -164,6 +195,19 @@ mod tests {
         let est = weighted_proxy_return([Some(2.0), None, None, None, None, None]);
         assert_eq!(est, Some(2.0));
     }
+
+    #[test]
+    fn sector_relative_score_enforces_sign_and_finiteness() {
+        assert!(SectorRelativeScore::lower_is_better(Some(10.0), Some(20.0)).value() > 0.0);
+        assert!(SectorRelativeScore::lower_is_better(Some(30.0), Some(20.0)).value() < 0.0);
+        assert!(SectorRelativeScore::higher_is_better(Some(0.20), Some(0.10)).value() > 0.0);
+        assert!(SectorRelativeScore::from_stored(f64::NAN).is_none());
+        assert!(SectorRelativeScore::from_stored(f64::INFINITY).is_none());
+        assert_eq!(
+            SectorRelativeScore::from_stored(0.25).map(SectorRelativeScore::value),
+            Some(0.25)
+        );
+    }
 }
 
 #[cfg(kani)]
@@ -246,6 +290,28 @@ mod kani_proofs {
                 assert_eq!(rel, 0.0);
             } else {
                 assert!(rel <= 0.0);
+            }
+        }
+    }
+
+    #[kani::proof]
+    fn verify_sector_relative_score_constructors_finite() {
+        let val: f64 = kani::any();
+        let base: f64 = kani::any();
+        let stored: f64 = kani::any();
+
+        assert!(SectorRelativeScore::lower_is_better(Some(val), Some(base))
+            .value()
+            .is_finite());
+        assert!(SectorRelativeScore::higher_is_better(Some(val), Some(base))
+            .value()
+            .is_finite());
+        match SectorRelativeScore::from_stored(stored) {
+            Some(s) => {
+                assert!(s.value().is_finite());
+            }
+            None => {
+                assert!(!stored.is_finite());
             }
         }
     }
