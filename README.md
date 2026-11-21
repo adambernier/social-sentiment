@@ -373,7 +373,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Run the Kani formal proof suite on `crates/social-sentiment-math` (31 harnesses covering softmax/NLI post-processing, simplex validation, FX/NAV math, `SectorRelativeScore` & opportunity scoring monotonicity/reachability, signal quality evaluation, analytical rollup monoids & SQL `CHECK` error budgets, symbol matching precedence, and zero-lookahead alignment):
+Run the Kani formal proof suite on `crates/social-sentiment-math` (36 harnesses covering softmax/NLI post-processing, simplex validation, FX/NAV math, `SectorRelativeScore` & opportunity scoring monotonicity/reachability, signal quality evaluation, analytical rollup monoids & SQL `CHECK` error budgets, symbol matching precedence, Pearson/beta & zero-lookahead alignment, and finite-sample Hoeffding/Empirical Bernstein sentiment confidence bounds):
 
 ```bash
 # One-time local install
@@ -446,7 +446,7 @@ environment variable (defaults to the in-network `http://api-service:8000`).
 
 ## Recent changes
 
-- Extracted a zero-dependency **`crates/social-sentiment-math`** kernel formally verified with **Kani** (31 proof harnesses + path-filtered `.github/workflows/kani.yml`), enforcing compile-time `SectorRelativeScore` sign conventions, bounded `±2.5%` support bands, trailing local support in historical opportunity buckets, exact `score ↔ checklist` accounting, additive sentiment/OHLC rollup monoids with reconciled `5e-7` ingestion vs `1e-6` PostgreSQL `CHECK` tolerances, symbol-matching precedence invariants, overflow-safe topic NLI post-processing (Rust and `shared/topics.py`), FX `NaN`/overflow handling, conservative `neutral`-first sentiment argmax tie-breaking, and lazy synthetic NAV division; serialized shared BuildKit Cargo cache mounts in `Dockerfile.rust`.
+- Extracted a zero-dependency **`crates/social-sentiment-math`** kernel formally verified with **Kani** (36 proof harnesses + path-filtered `.github/workflows/kani.yml`), adding finite-sample 95% Hoeffding/Empirical Bernstein sentiment confidence intervals on `/api/stats/leaderboard` and `/api/stats/correlation`, compile-time `SectorRelativeScore` sign conventions, bounded `±2.5%` support bands, trailing local support in historical opportunity buckets, exact `score ↔ checklist` accounting, additive sentiment/OHLC rollup monoids with reconciled `5e-7` ingestion vs `1e-6` PostgreSQL `CHECK` tolerances, symbol-matching precedence invariants, overflow-safe topic NLI post-processing (Rust and `shared/topics.py`), FX `NaN`/overflow handling, conservative `neutral`-first sentiment argmax tie-breaking, and lazy synthetic NAV division; serialized shared BuildKit Cargo cache mounts in `Dockerfile.rust`.
 - Promoted the **Rust backend workspace (`crates/`)** to the default runtime in `docker-compose.yml` for all 11 backend services, isolated `schema-migrate/` as a standalone migration container, and removed the superseded Python service implementations.
 - Added **Rust quote backfill** (`producer-market backfill-quotes`) alongside global bar backfill in `crates/market-producer`.
 - Retained `schema-migrate/` and `archive-service/` as standalone Python containers with hashed lockfiles, plus unported one-off maintenance CLIs (`market-producer/sync_global_instruments.py`, `storage-service/rollup.py`, `preprocessing-service/backfill_topics.py`).

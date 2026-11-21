@@ -66,6 +66,11 @@ struct LeaderboardEntry {
     symbol: String,
     post_count_4h: i64,
     sentiment_index_4h: f64,
+    sentiment_ci_low_4h: Option<f64>,
+    sentiment_ci_high_4h: Option<f64>,
+    sentiment_half_width_4h: Option<f64>,
+    sentiment_significant_4h: bool,
+    sentiment_bound_method_4h: Option<String>,
     buzz_z: Option<f64>,
     baseline_hourly: f64,
     baseline_samples: i64,
@@ -172,6 +177,16 @@ struct CorrelationBucket {
     sentiment_signal: Option<f64>,
     #[serde(rename = "sentimentHist")]
     sentiment_hist: Option<f64>,
+    #[serde(rename = "sentimentCiLow")]
+    sentiment_ci_low: Option<f64>,
+    #[serde(rename = "sentimentCiHigh")]
+    sentiment_ci_high: Option<f64>,
+    #[serde(rename = "sentimentHalfWidth")]
+    sentiment_half_width: Option<f64>,
+    #[serde(rename = "sentimentSignificant")]
+    sentiment_significant: Option<bool>,
+    #[serde(rename = "sentimentBoundMethod")]
+    sentiment_bound_method: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -675,6 +690,8 @@ async fn leaderboard_handler(
         WITH current_stats AS (
             SELECT symbol,
                    COUNT(*) AS post_count_4h,
+                   COUNT(*) FILTER (WHERE sentiment = 'positive') AS positive_count_4h,
+                   COUNT(*) FILTER (WHERE sentiment = 'negative') AS negative_count_4h,
                    (COUNT(*) FILTER (WHERE sentiment = 'positive')
                     - COUNT(*) FILTER (WHERE sentiment = 'negative'))::DOUBLE PRECISION
                      / NULLIF(COUNT(*), 0) AS sentiment_index_4h
@@ -700,6 +717,8 @@ async fn leaderboard_handler(
         )
         SELECT universe.symbol,
                COALESCE(current_stats.post_count_4h, 0) AS post_count_4h,
+               COALESCE(current_stats.positive_count_4h, 0) AS positive_count_4h,
+               COALESCE(current_stats.negative_count_4h, 0) AS negative_count_4h,
                COALESCE(current_stats.sentiment_index_4h, 0.0) AS sentiment_index_4h,
                CASE
                    WHEN baseline.sample_count < 8 OR baseline.stddev_hourly IS NULL
@@ -722,13 +741,31 @@ async fn leaderboard_handler(
 
     let entries = rows
         .into_iter()
-        .map(|row| LeaderboardEntry {
-            symbol: row.get("symbol"),
-            post_count_4h: row.get("post_count_4h"),
-            sentiment_index_4h: row.get("sentiment_index_4h"),
-            buzz_z: row.get("buzz_z"),
-            baseline_hourly: row.get("baseline_hourly"),
-            baseline_samples: row.get("baseline_samples"),
+        .map(|row| {
+            let post_count_4h: i64 = row.get("post_count_4h");
+            let positive_count_4h: i64 = row.get("positive_count_4h");
+            let negative_count_4h: i64 = row.get("negative_count_4h");
+            let signal_sum = (positive_count_4h - negative_count_4h) as f64;
+            let signal_sq_sum = (positive_count_4h + negative_count_4h) as f64;
+            let ci = sentiment_confidence_interval(
+                post_count_4h.max(0) as u64,
+                signal_sum,
+                signal_sq_sum,
+                DEFAULT_ALPHA,
+            );
+            LeaderboardEntry {
+                symbol: row.get("symbol"),
+                post_count_4h,
+                sentiment_index_4h: row.get("sentiment_index_4h"),
+                sentiment_ci_low_4h: ci.map(|c| c.lower),
+                sentiment_ci_high_4h: ci.map(|c| c.upper),
+                sentiment_half_width_4h: ci.map(|c| c.half_width),
+                sentiment_significant_4h: ci.is_some_and(|c| c.significant_nonzero),
+                sentiment_bound_method_4h: ci.map(|c| c.method.as_str().to_string()),
+                buzz_z: row.get("buzz_z"),
+                baseline_hourly: row.get("baseline_hourly"),
+                baseline_samples: row.get("baseline_samples"),
+            }
         })
         .collect();
     Ok(Json(entries))
@@ -1119,6 +1156,7 @@ async fn posts_handler(
 }
 
 use social_sentiment_math::{
+    bounds::{sentiment_confidence_interval, DEFAULT_ALPHA},
     market::SectorRelativeScore,
     scoring::{compute_opportunity, evaluate_signal_quality},
     timeseries::{compute_sentiment_macd, pearson, percentile},
@@ -1205,6 +1243,8 @@ async fn correlation_handler(
         std::collections::HashMap::with_capacity(hours as usize + 1);
     let mut total_weighted: Vec<f64> = vec![0.0; hours as usize + 1];
     let mut weighted_signal: Vec<f64> = vec![0.0; hours as usize + 1];
+    let mut unweighted_signal_sum: Vec<f64> = vec![0.0; hours as usize + 1];
+    let mut unweighted_signal_sq_sum: Vec<f64> = vec![0.0; hours as usize + 1];
 
     for offset in (0..=hours).rev() {
         let bucket_time = current_hour - chrono::Duration::hours(offset);
@@ -1234,6 +1274,11 @@ async fn correlation_handler(
             sentiment_macd: None,
             sentiment_signal: None,
             sentiment_hist: None,
+            sentiment_ci_low: None,
+            sentiment_ci_high: None,
+            sentiment_half_width: None,
+            sentiment_significant: None,
+            sentiment_bound_method: None,
         });
     }
 
@@ -1384,7 +1429,9 @@ async fn correlation_handler(
                 COALESCE(SUM(negative_weight_sum), 0.0)::double precision AS negative_weighted,
                 COALESCE(SUM(neutral_weight_sum), 0.0)::double precision AS neutral_weighted,
                 COALESCE(SUM(weight_sum), 0.0)::double precision AS total_weighted,
-                COALESCE(SUM(weighted_signal_sum), 0.0)::double precision AS weighted_signal_sum
+                COALESCE(SUM(weighted_signal_sum), 0.0)::double precision AS weighted_signal_sum,
+                COALESCE(SUM(signal_sum), 0.0)::double precision AS signal_sum,
+                COALESCE(SUM(signal_sq_sum), 0.0)::double precision AS signal_sq_sum
             FROM hourly_sentiment_facts
             WHERE symbol = $1 AND bucket_hour >= $2
               AND ($3::TEXT IS NULL OR platform = $3)
@@ -1402,7 +1449,9 @@ async fn correlation_handler(
                 legacy.neutral_weighted::double precision AS neutral_weighted,
                 legacy.total_weighted::double precision AS total_weighted,
                 (legacy.positive_weighted - legacy.negative_weighted)::double precision
-                    AS weighted_signal_sum
+                    AS weighted_signal_sum,
+                (legacy.positive_count - legacy.negative_count)::double precision AS signal_sum,
+                (legacy.positive_count + legacy.negative_count)::double precision AS signal_sq_sum
             FROM hourly_sentiment_agg AS legacy
             WHERE legacy.symbol = $1
               AND legacy.bucket_hour >= $2
@@ -1423,6 +1472,8 @@ async fn correlation_handler(
             neutral_weighted,
             total_weighted,
             weighted_signal_sum,
+            signal_sum,
+            signal_sq_sum,
             (weighted_signal_sum / NULLIF(total_weighted, 0))::double precision AS sentiment_index
         FROM canonical
         UNION ALL
@@ -1436,6 +1487,8 @@ async fn correlation_handler(
             neutral_weighted,
             total_weighted,
             weighted_signal_sum,
+            signal_sum,
+            signal_sq_sum,
             (weighted_signal_sum / NULLIF(total_weighted, 0))::double precision AS sentiment_index
         FROM legacy
         ORDER BY bucket_hour
@@ -1465,6 +1518,8 @@ async fn correlation_handler(
             let ws: f64 = row.get("weighted_signal_sum");
             total_weighted[idx] = tw;
             weighted_signal[idx] = ws;
+            unweighted_signal_sum[idx] = row.get("signal_sum");
+            unweighted_signal_sq_sum[idx] = row.get("signal_sq_sum");
             buckets[idx].sentiment_index =
                 row.get::<Option<f64>, _>("sentiment_index").unwrap_or(0.0);
         }
@@ -1520,16 +1575,32 @@ async fn correlation_handler(
                 .and_then(|v| v.as_f64())
                 .unwrap_or(if sent == "negative" { 1.0 } else { 0.0 });
 
-            weighted_signal[idx] += weight * (pos_prob - neg_prob);
+            let signal = pos_prob - neg_prob;
+            weighted_signal[idx] += weight * signal;
+            unweighted_signal_sum[idx] += signal;
+            unweighted_signal_sq_sum[idx] += signal * signal;
         }
     }
 
-    // Post-process sentiment indices
+    // Post-process sentiment indices and finite-sample confidence intervals
     for i in 0..buckets.len() {
         if total_weighted[i] > 0.0 {
             buckets[i].sentiment_index = weighted_signal[i] / total_weighted[i];
         } else {
             buckets[i].sentiment_index = 0.0;
+        }
+        let n = (buckets[i].positive + buckets[i].neutral + buckets[i].negative).max(0) as u64;
+        if let Some(ci) = sentiment_confidence_interval(
+            n,
+            unweighted_signal_sum[i],
+            unweighted_signal_sq_sum[i],
+            DEFAULT_ALPHA,
+        ) {
+            buckets[i].sentiment_ci_low = Some(ci.lower);
+            buckets[i].sentiment_ci_high = Some(ci.upper);
+            buckets[i].sentiment_half_width = Some(ci.half_width);
+            buckets[i].sentiment_significant = Some(ci.significant_nonzero);
+            buckets[i].sentiment_bound_method = Some(ci.method.as_str().to_string());
         }
     }
 

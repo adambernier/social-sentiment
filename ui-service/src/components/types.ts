@@ -15,7 +15,19 @@ export interface SourceHealth {
   status: "active" | "quiet" | "stalled" | "silent";
 }
 export interface TopicStat { topic_label: string | null; count: number; }
-export interface LeaderboardEntry { symbol: string; post_count_4h: number; sentiment_index_4h: number; buzz_z: number | null; baseline_hourly: number; baseline_samples: number; }
+export interface LeaderboardEntry {
+  symbol: string;
+  post_count_4h: number;
+  sentiment_index_4h: number;
+  sentiment_ci_low_4h?: number | null;
+  sentiment_ci_high_4h?: number | null;
+  sentiment_half_width_4h?: number | null;
+  sentiment_significant_4h?: boolean;
+  sentiment_bound_method_4h?: "hoeffding" | "empirical_bernstein" | null;
+  buzz_z: number | null;
+  baseline_hourly: number;
+  baseline_samples: number;
+}
 export interface MarketQuote { timestamp: string; price: number; volume: number; market_session: string; }
 export interface DeltaData { reference_price: number; latest_price: number; pct_change: number; abs_change: number; }
 export interface MetricsData {
@@ -43,6 +55,9 @@ export interface CorrelationBucket {
   supportPrice?: number | null; supportPct?: number | null;
   resistancePrice?: number | null; resistancePct?: number | null;
   sentimentMACD?: number | null; sentimentSignal?: number | null; sentimentHist?: number | null;
+  sentimentCiLow?: number | null; sentimentCiHigh?: number | null;
+  sentimentHalfWidth?: number | null; sentimentSignificant?: boolean | null;
+  sentimentBoundMethod?: "hoeffding" | "empirical_bernstein" | null;
 }
 export interface ClosedRegion { start: string; end: string; }
 export interface LagSweepValue { lag: number; r: number; }

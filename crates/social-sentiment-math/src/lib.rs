@@ -9,6 +9,7 @@
 //! cargo kani -p social-sentiment-math
 //! ```
 
+pub mod bounds;
 pub mod market;
 pub mod postprocess;
 pub mod rollup;

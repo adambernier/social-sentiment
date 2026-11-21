@@ -146,6 +146,13 @@ pub fn compute_sentiment_macd(
     out
 }
 
+/// Square root restricted to finite non-negative inputs (`x >= 0.0`).
+#[inline]
+pub fn sqrt_nonneg(x: f64) -> f64 {
+    debug_assert!(x.is_finite() && x >= 0.0);
+    x.sqrt()
+}
+
 /// Compute Pearson correlation (clamped to `[-1.0, 1.0]`) and OLS beta (`cov / var_x`).
 pub fn pearson_and_beta(
     pairs: &[(f64, f64)],
@@ -185,10 +192,15 @@ pub fn pearson_and_beta(
         return (None, None);
     }
 
-    let denom = (factor_ss * stock_ss).sqrt();
-    let correlation = if denom.is_finite() && denom > f64::EPSILON {
-        let r = covariance / denom;
-        r.is_finite().then_some(r.clamp(-1.0, 1.0))
+    let prod = factor_ss * stock_ss;
+    let correlation = if prod.is_finite() && prod > 0.0 {
+        let denom = sqrt_nonneg(prod);
+        if denom.is_finite() && denom > f64::EPSILON {
+            let r = covariance / denom;
+            r.is_finite().then_some(r.clamp(-1.0, 1.0))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -247,6 +259,15 @@ mod tests {
         assert!(res
             .iter()
             .all(|p| p.macd.is_none() && p.signal.is_none() && p.hist.is_none()));
+    }
+
+    #[test]
+    fn sqrt_nonneg_satisfies_kani_stub_contract() {
+        assert_eq!(sqrt_nonneg(0.0), 0.0);
+        for x in [1e-12_f64, 0.25, 1.0, 4.0, 1e6, 1e100] {
+            let y = sqrt_nonneg(x);
+            assert!(y.is_finite() && y >= 0.0);
+        }
     }
 }
 
@@ -356,6 +377,56 @@ mod kani_proofs {
                 assert!(h.is_finite());
                 assert!(pt.macd.is_some() && pt.signal.is_some());
             }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn stub_sqrt_nonneg(x: f64) -> f64 {
+        assert!(
+            x.is_finite() && x >= 0.0,
+            "sqrt_nonneg requires finite non-negative input"
+        );
+        if x == 0.0 {
+            0.0
+        } else {
+            let y: f64 = kani::any();
+            kani::assume(y.is_finite() && y > 0.0);
+            y
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn verify_pearson_and_beta_rejects_short_or_non_finite() {
+        let pairs: [(f64, f64); 2] = [(kani::any(), kani::any()), (kani::any(), kani::any())];
+        // Fewer than minimum_samples (3) always returns (None, None).
+        assert_eq!(pearson_and_beta(&pairs, 3), (None, None));
+
+        // Any non-finite entry always returns (None, None).
+        let bad = [(f64::NAN, 1.0), (2.0, 3.0), (4.0, 5.0)];
+        assert_eq!(pearson_and_beta(&bad, 3), (None, None));
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::stub(sqrt_nonneg, stub_sqrt_nonneg)]
+    fn verify_pearson_and_beta_bounds_and_domain_safety() {
+        let x0: f32 = kani::any();
+        let y0: f32 = kani::any();
+        let x1: f32 = kani::any();
+        let y1: f32 = kani::any();
+        let pairs = [
+            (f64::from(x0), f64::from(y0)),
+            (f64::from(x1), f64::from(y1)),
+        ];
+
+        let (r_opt, beta_opt) = pearson_and_beta(&pairs, 2);
+        if let Some(r) = r_opt {
+            assert!(r.is_finite());
+            assert!((-1.0..=1.0).contains(&r));
+        }
+        if let Some(b) = beta_opt {
+            assert!(b.is_finite());
         }
     }
 }
