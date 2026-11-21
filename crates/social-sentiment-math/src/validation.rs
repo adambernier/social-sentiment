@@ -3,9 +3,13 @@
 use core::fmt;
 
 /// Absolute sum tolerance accepted by `ScoredPost::validate`.
-pub const SIMPLEX_TOLERANCE: f64 = 0.0001;
+///
+/// Tightened to half of PostgreSQL's `1e-6` per-post `hourly_sentiment_facts`
+/// probability CHECK tolerance so valid ingested posts leave `5e-7` per-post
+/// IEEE-754 summation headroom and can never abort the retention rollup.
+pub const SIMPLEX_TOLERANCE: f64 = 5e-7;
 
-/// Tighter tolerance matching PostgreSQL `hourly_sentiment_facts` checks.
+/// Tolerance matching PostgreSQL `hourly_sentiment_facts` CHECK constraints (`0006`).
 pub const STRICT_SIMPLEX_TOLERANCE: f64 = 1e-6;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +86,8 @@ mod tests {
     #[test]
     fn rejects_non_summing_and_non_finite() {
         assert!(validate_probability_simplex(0.8, 0.2, 0.3).is_err());
+        // Regression: 1e-5 drift previously passed ingestion (1e-4) and could abort 1e-6 SQL CHECK.
+        assert!(validate_probability_simplex(0.70001, 0.2, 0.1).is_err());
         assert!(validate_probability_simplex(f64::NAN, 0.5, 0.5).is_err());
         assert!(validate_probability_simplex(-0.1, 0.6, 0.5).is_err());
     }

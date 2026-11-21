@@ -19,18 +19,15 @@ pub fn default_tracked_tickers() -> Vec<&'static str> {
 }
 
 impl SymbolConfig {
-    /// Match the Python registry's precision rules exactly: block phrases win,
-    /// then cashtags/keywords, followed by a ticker match with configurable
-    /// case sensitivity.
+    /// Match the precision rules via the Kani-verified precedence policy:
+    /// block phrases win, then cashtags/keywords, followed by a bare ticker
+    /// match gated by `require_cashtag` and `require_uppercase`.
     pub fn matches(&self, text: &str) -> bool {
         let lowered = text.to_lowercase();
-        if self
+        let has_block_phrase = self
             .block_phrases
             .iter()
-            .any(|phrase| lowered.contains(&phrase.to_lowercase()))
-        {
-            return false;
-        }
+            .any(|phrase| lowered.contains(&phrase.to_lowercase()));
 
         let boundary_match = |needle: &str, case_insensitive: bool| {
             let flags = if case_insensitive { "(?i)" } else { "" };
@@ -41,18 +38,32 @@ impl SymbolConfig {
             Regex::new(&pattern).is_ok_and(|regex| regex.is_match(text))
         };
 
-        if boundary_match(&format!("${}", self.symbol), true)
-            || self
+        let has_cashtag = !has_block_phrase && boundary_match(&format!("${}", self.symbol), true);
+        let has_keyword = !has_block_phrase
+            && !has_cashtag
+            && self
                 .keywords
                 .iter()
-                .any(|keyword| boundary_match(keyword, true))
-        {
-            return true;
-        }
-        if self.require_cashtag {
-            return false;
-        }
-        boundary_match(&self.symbol, !self.require_uppercase)
+                .any(|keyword| boundary_match(keyword, true));
+        let need_bare = !has_block_phrase && !has_cashtag && !has_keyword && !self.require_cashtag;
+        let has_bare_ticker_upper =
+            need_bare && self.require_uppercase && boundary_match(&self.symbol, false);
+        let has_bare_ticker_ci =
+            need_bare && !self.require_uppercase && boundary_match(&self.symbol, true);
+
+        social_sentiment_math::symbols::evaluate_symbol_match(
+            social_sentiment_math::symbols::SymbolMatchPolicy {
+                require_cashtag: self.require_cashtag,
+                require_uppercase: self.require_uppercase,
+            },
+            social_sentiment_math::symbols::SymbolMatchSignals {
+                has_block_phrase,
+                has_cashtag,
+                has_keyword,
+                has_bare_ticker_ci,
+                has_bare_ticker_upper,
+            },
+        )
     }
 
     pub fn search_terms(&self) -> Vec<String> {

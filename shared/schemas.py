@@ -64,7 +64,9 @@ class ScoredPost(CleanPost):
             for probability in probabilities
         ):
             raise ValueError("sentiment probabilities must be finite and in [0, 1]")
-        if not math.isclose(sum(probabilities), 1.0, abs_tol=0.0001):
+        # Tightened to 5e-7 (half of Postgres 0006's 1e-6 per-post budget) so valid
+        # ingested posts can never violate hourly_sentiment_facts_probability_ck.
+        if not math.isclose(sum(probabilities), 1.0, abs_tol=5e-7):
             raise ValueError("sentiment probabilities must sum to one")
         return self
 

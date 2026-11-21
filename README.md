@@ -373,7 +373,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Run the Kani formal proof suite on `crates/social-sentiment-math` (24 harnesses covering softmax/NLI post-processing, simplex validation, FX/NAV math, `SectorRelativeScore` & opportunity scoring monotonicity/reachability, signal quality evaluation, and zero-lookahead alignment):
+Run the Kani formal proof suite on `crates/social-sentiment-math` (31 harnesses covering softmax/NLI post-processing, simplex validation, FX/NAV math, `SectorRelativeScore` & opportunity scoring monotonicity/reachability, signal quality evaluation, analytical rollup monoids & SQL `CHECK` error budgets, symbol matching precedence, and zero-lookahead alignment):
 
 ```bash
 # One-time local install
@@ -386,11 +386,11 @@ cargo kani -p social-sentiment-math -Z stubbing --output-format terse
 
 ### Continuous Integration (CI)
 
-GitHub Actions (`.github/workflows/tests.yml`) runs five jobs on every push and pull request:
+GitHub Actions runs `.github/workflows/tests.yml` on every push and pull request (`test`, `frontend`, `rust`, and `worker-qualification-smoke`), plus a path-filtered `.github/workflows/kani.yml` workflow whenever `crates/social-sentiment-math/**`, `Cargo.toml`, or `Cargo.lock` change (or via manual dispatch):
 - **`test`**: Python unit and Postgres-backed integration tests via `pytest`.
 - **`frontend`**: Next.js tests, TypeScript type-check, lint, audit, and build.
 - **`rust`**: `cargo fmt`, `cargo clippy --locked -D warnings`, `cargo test --workspace --locked`, provider fixture parity, and Compose validation.
-- **`kani`**: Formal verification of `crates/social-sentiment-math` using `kani-verifier 0.68.0`.
+- **`kani`** (`.github/workflows/kani.yml`): Formal verification of `crates/social-sentiment-math` using `kani-verifier 0.68.0`.
 - **`worker-qualification-smoke`**: Live Docker smoke qualification for the Rust pipeline workers.
 
 ### Worker Qualification & Fixture Harnesses
@@ -446,7 +446,7 @@ environment variable (defaults to the in-network `http://api-service:8000`).
 
 ## Recent changes
 
-- Extracted a zero-dependency **`crates/social-sentiment-math`** kernel formally verified with **Kani** (24 proof harnesses + CI `kani` job), enforcing compile-time `SectorRelativeScore` sign conventions, bounded `±2.5%` support bands (preventing falling-knife support signals), trailing local support in historical opportunity buckets, exact `score ↔ checklist` accounting, overflow-safe topic NLI post-processing (Rust and `shared/topics.py`), FX `NaN`/overflow handling, conservative `neutral`-first sentiment argmax tie-breaking, and lazy synthetic NAV division; serialized shared BuildKit Cargo cache mounts in `Dockerfile.rust`.
+- Extracted a zero-dependency **`crates/social-sentiment-math`** kernel formally verified with **Kani** (31 proof harnesses + path-filtered `.github/workflows/kani.yml`), enforcing compile-time `SectorRelativeScore` sign conventions, bounded `±2.5%` support bands, trailing local support in historical opportunity buckets, exact `score ↔ checklist` accounting, additive sentiment/OHLC rollup monoids with reconciled `5e-7` ingestion vs `1e-6` PostgreSQL `CHECK` tolerances, symbol-matching precedence invariants, overflow-safe topic NLI post-processing (Rust and `shared/topics.py`), FX `NaN`/overflow handling, conservative `neutral`-first sentiment argmax tie-breaking, and lazy synthetic NAV division; serialized shared BuildKit Cargo cache mounts in `Dockerfile.rust`.
 - Promoted the **Rust backend workspace (`crates/`)** to the default runtime in `docker-compose.yml` for all 11 backend services, isolated `schema-migrate/` as a standalone migration container, and removed the superseded Python service implementations.
 - Added **Rust quote backfill** (`producer-market backfill-quotes`) alongside global bar backfill in `crates/market-producer`.
 - Retained `schema-migrate/` and `archive-service/` as standalone Python containers with hashed lockfiles, plus unported one-off maintenance CLIs (`market-producer/sync_global_instruments.py`, `storage-service/rollup.py`, `preprocessing-service/backfill_topics.py`).

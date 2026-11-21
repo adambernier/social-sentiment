@@ -11,6 +11,8 @@
 
 pub mod market;
 pub mod postprocess;
+pub mod rollup;
 pub mod scoring;
+pub mod symbols;
 pub mod timeseries;
 pub mod validation;

@@ -135,27 +135,6 @@ jobs:
         docker compose config --quiet
         docker compose -f docker-compose.worker-qualification.yml config --quiet
 
-  kani:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v5
-
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: 1.94.0
-
-    - name: Install and configure Kani
-      run: |
-        cargo install --locked kani-verifier --version 0.68.0
-        cargo kani setup
-
-    - name: Run Kani proofs on social-sentiment-math
-      run: cargo kani -p social-sentiment-math -Z stubbing --output-format terse
-
   worker-qualification-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 60

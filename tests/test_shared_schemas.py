@@ -75,6 +75,10 @@ def test_scored_post_validation():
             {"positive": 0.5, "neutral": 0.5, "negative": 0.5},
             id="does-not-sum-to-one",
         ),
+        pytest.param(
+            {"positive": 0.70001, "neutral": 0.2, "negative": 0.1},
+            id="exceeds-sql-rollup-error-budget",
+        ),
     ],
 )
 def test_scored_post_rejects_invalid_probability_contract(scores):
