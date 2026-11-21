@@ -73,8 +73,10 @@ Two concrete Category 4 upgrades:
 1. **Finite-Sample Confidence Bounds on Aggregated Sentiment *(Implemented — Phase 3a)***:
    - Implemented Kani-verified Hoeffding + Maurer & Pontil (2009) Empirical Bernstein confidence intervals (using an exact union-bound hybrid at `alpha / 2` for `n >= 2` so coverage stays provably `>= 1 - alpha` without data-dependent selection bias) in `crates/social-sentiment-math/src/bounds.rs`.
    - Exposed 95% confidence bounds and directional significance flags on `/api/stats/leaderboard` and `/api/stats/correlation` using `(post_count, signal_sum, signal_sq_sum)` across live `posts`, `hourly_sentiment_facts`, and legacy `hourly_sentiment_agg`.
-2. **Conformal Prediction / Selective Abstention & Horvitz–Thompson Debiasing *(Remaining — Phase 3b)***:
-   - Once a small human-audited calibration slice is collected from `raw_post_archive_staging` (`cohort = 'probability'`, pinned by `model_hash`), replace the fixed `0.60` NLI entailment cutoff in `topic_model.rs` and single-label sentiment outputs with split or Adaptive Conformal Inference (ACI) prediction sets guaranteeing $\mathbb{P}(Y \in C(X)) \ge 1 - \alpha$, and apply Horvitz–Thompson debiasing to aggregate sentiment indices.
+2. **Conformal Prediction / Selective Abstention & Horvitz–Thompson Debiasing *(Implemented — Phase 3b)***:
+   - Added Kani-verified split-conformal quantile (`split_conformal_rank`, `split_conformal_quantile`), 3-class sentiment prediction sets (`sentiment_conformal_set`), calibrated topic threshold mapping (`conformal_topic_threshold`), Adaptive Conformal Inference online updates (`aci_update_alpha`), and Hájek Horvitz–Thompson debiasing (`horvitz_thompson_mean`) in `crates/social-sentiment-math/src/conformal.rs`.
+   - Wired `TOPIC_CONFORMAL_Q_HAT` / `TOPIC_ENTAILMENT_THRESHOLD` into `crates/preprocessing-service/src/topic_model.rs` and `shared/topics.py` (defaulting to `0.60` until a calibrated threshold is supplied).
+   - Added `scripts/conformal_calibrate.py` (`export` from `raw_post_archive_staging` `cohort = 'probability'` pinned by `model_hash`, and `fit` to compute calibrated quantiles and Horvitz–Thompson bias estimates from labeled JSONL).
 
 ---
 
@@ -82,10 +84,10 @@ Two concrete Category 4 upgrades:
 
 1. **Phase 1 — Kani on Pure Rust Math *(Implemented)***:
    - Extracted the zero-dependency Trusted Computing Base crate `crates/social-sentiment-math` and wired `social-sentiment-core`, `market-producer`, `service-preprocessing`, `service-sentiment`, and `service-api` directly to it.
-   - Verified **39 Kani proof harnesses** (`cargo kani -p social-sentiment-math -Z stubbing --output-format terse`) in a dedicated path-filtered CI workflow (`.github/workflows/kani.yml`), including operational session-partitioning and overflow-safe exponential backoff (`ops.rs`) plus `schema-migrate/0007_stock_metrics_constraints.sql`.
+   - Verified **43 Kani proof harnesses** (`cargo kani -p social-sentiment-math -Z stubbing --output-format terse`) in a dedicated path-filtered CI workflow (`.github/workflows/kani.yml`), including operational session-partitioning and overflow-safe exponential backoff (`ops.rs`) plus `schema-migrate/0007_stock_metrics_constraints.sql`.
 2. **Phase 2 — Rollup Contract & Error Budget *(Implemented)***:
    - Proved sentiment/OHLC rollup monoid laws and SQL `CHECK` invariants in `rollup.rs`, reconciled `SIMPLEX_TOLERANCE` (`5e-7`) against `schema-migrate/0006_analytical_constraints.sql` (`1e-6`), and added PostgreSQL boundary retention + `stock_metrics` finiteness integration tests.
 3. **Phase 3a — Finite-Sample Confidence Bounds *(Implemented)***:
    - Added Kani-verified Hoeffding + Empirical Bernstein bounds in `crates/social-sentiment-math/src/bounds.rs`, exposed 95% confidence intervals on `/api/stats/leaderboard` and `/api/stats/correlation`, and surfaced them in `ui-service` (`TickerActivity` significance badges/tooltips + `CorrelationChart` toggleable 95% CI band & tooltip).
-4. **Phase 3b — Conformal Calibration & Debiasing *(Planned)***:
-   - Calibrate split/adaptive conformal prediction sets and Horvitz–Thompson debiasing on human-audited samples from `raw_post_archive_staging` (`cohort = 'probability'`) keyed by `model_artifacts` SHA-256 hashes.
+4. **Phase 3b — Conformal Calibration & Debiasing *(Implemented)***:
+   - Added Kani-verified split conformal prediction, ACI online updates, and Horvitz–Thompson debiasing in `crates/social-sentiment-math/src/conformal.rs`, wired `TOPIC_CONFORMAL_Q_HAT` / `TOPIC_ENTAILMENT_THRESHOLD` into topic classification, and built `scripts/conformal_calibrate.py` (`export` + `fit`) for calibrating on labeled `raw_post_archive_staging` probability cohorts.

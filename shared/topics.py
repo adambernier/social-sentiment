@@ -70,7 +70,28 @@ class TopicModel:
         }
 
         self.hypothesis_template = "This text is about {}."
+        self.entailment_threshold = self._configured_entailment_threshold()
         print("Topic Classifier initialized.")
+
+    @staticmethod
+    def _configured_entailment_threshold() -> float:
+        raw_q = os.getenv("TOPIC_CONFORMAL_Q_HAT")
+        if raw_q is not None:
+            try:
+                q_hat = float(raw_q.strip())
+                if 0.0 <= q_hat <= 1.0:
+                    return max(0.0, min(1.0, 1.0 - q_hat))
+            except ValueError:
+                pass
+        raw_t = os.getenv("TOPIC_ENTAILMENT_THRESHOLD")
+        if raw_t is not None:
+            try:
+                threshold = float(raw_t.strip())
+                if 0.0 <= threshold <= 1.0:
+                    return threshold
+            except ValueError:
+                pass
+        return 0.60
 
     def predict_batch(self, texts: list[str]) -> list[tuple[int, str]]:
         results = []
@@ -129,8 +150,9 @@ class TopicModel:
             top_idx = np.argmax(entail_probs)
             top_prob = entail_probs[top_idx]
 
-            # If the highest entailment probability is low (e.g. < 0.60), classify as General / Outlier
-            if top_prob < 0.60:
+            # If the highest entailment probability is below the calibrated threshold,
+            # classify as General / Outlier.
+            if top_prob < self.entailment_threshold:
                 results.append((-1, "General / Outlier"))
             else:
                 desc_label = self.candidate_labels[top_idx]

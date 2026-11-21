@@ -12,8 +12,29 @@ pub struct TopicModel {
     session: Mutex<Session>,
     pub version: String,
     pub model_hash: String,
+    pub entailment_threshold: f32,
     candidate_labels: Vec<&'static str>,
     label_map: HashMap<&'static str, &'static str>,
+}
+
+fn configured_entailment_threshold() -> f32 {
+    if let Ok(raw) = std::env::var("TOPIC_CONFORMAL_Q_HAT") {
+        if let Ok(q_hat) = raw.trim().parse::<f64>() {
+            if let Some(threshold) =
+                social_sentiment_math::conformal::conformal_topic_threshold(q_hat)
+            {
+                return threshold;
+            }
+        }
+    }
+    if let Ok(raw) = std::env::var("TOPIC_ENTAILMENT_THRESHOLD") {
+        if let Ok(threshold) = raw.trim().parse::<f32>() {
+            if threshold.is_finite() && (0.0..=1.0).contains(&threshold) {
+                return threshold;
+            }
+        }
+    }
+    0.60
 }
 
 impl TopicModel {
@@ -82,6 +103,7 @@ impl TopicModel {
             session: Mutex::new(session),
             version,
             model_hash,
+            entailment_threshold: configured_entailment_threshold(),
             candidate_labels,
             label_map,
         })
@@ -183,7 +205,10 @@ impl TopicModel {
             entail_probs.push(entail_prob);
         }
 
-        match social_sentiment_math::postprocess::select_topic_index(&entail_probs, 0.60) {
+        match social_sentiment_math::postprocess::select_topic_index(
+            &entail_probs,
+            self.entailment_threshold,
+        ) {
             None => Ok((-1, "General / Outlier".to_string(), entail_probs)),
             Some(best_idx) => {
                 let desc_label = self.candidate_labels[best_idx];

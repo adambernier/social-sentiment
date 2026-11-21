@@ -10,6 +10,7 @@
 //! ```
 
 pub mod bounds;
+pub mod conformal;
 pub mod market;
 pub mod ops;
 pub mod postprocess;
