@@ -669,9 +669,9 @@ def test_storage_bulk_unnest_insert_handles_duplicates_and_null_topics(
         "p16": [1, 1, 1],
         "p17": ["abc123", "abc123", "abc123"],
         "p18": ["zero-shot-onnx-v1"] * 3,
-        "p19": ["topic-hash"] * 3,
+        "p19": ["a" * 64] * 3,
         "p20": ["fintwitbert-onnx-v1"] * 3,
-        "p21": ["sent-hash"] * 3,
+        "p21": ["b" * 64] * 3,
     }
 
     with _connect_to_retention_database(retention_database) as conn:
