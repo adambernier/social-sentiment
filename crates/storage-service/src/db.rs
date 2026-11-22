@@ -8,7 +8,7 @@ use uuid::Uuid;
 pub const POST_RETENTION_ADVISORY_LOCK_KEY: i64 = 4815162343;
 pub const QUOTE_RETENTION_ADVISORY_LOCK_KEY: i64 = 4815162344;
 
-pub const INSERT_POST_SQL: &str = r#"
+pub const INSERT_POSTS_BULK_SQL: &str = r#"
     INSERT INTO posts (
         id, symbol, platform, text, timestamp, sentiment, scores,
         topic_id, topic_label, engagement, ingested_at, cleaned_at,
@@ -16,12 +16,15 @@ pub const INSERT_POST_SQL: &str = r#"
         source_schema_version, pipeline_git_commit, topic_model_version,
         topic_model_hash, sentiment_model_version, sentiment_model_hash
     )
-    VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+    SELECT *
+    FROM UNNEST(
+        $1::TEXT[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::TIMESTAMPTZ[],
+        $6::TEXT[], $7::JSONB[], $8::INTEGER[], $9::TEXT[], $10::INTEGER[],
+        $11::TIMESTAMPTZ[], $12::TIMESTAMPTZ[], $13::TIMESTAMPTZ[],
+        $14::TIMESTAMPTZ[], $15::TIMESTAMPTZ[], $16::INTEGER[], $17::TEXT[],
+        $18::TEXT[], $19::TEXT[], $20::TEXT[], $21::TEXT[]
     )
     ON CONFLICT (platform, id, symbol) DO NOTHING
-    RETURNING id
 "#;
 
 pub const UPSERT_PIPELINE_QUALITY_SQL: &str = r#"
@@ -615,47 +618,85 @@ impl DatabaseService {
             return Ok(0);
         }
 
-        let mut tx = self.pool.begin().await?;
-        let mut inserted_count = 0u64;
+        let len = posts.len();
+        let mut ids = Vec::with_capacity(len);
+        let mut symbols = Vec::with_capacity(len);
+        let mut platforms = Vec::with_capacity(len);
+        let mut texts = Vec::with_capacity(len);
+        let mut timestamps = Vec::with_capacity(len);
+        let mut sentiments = Vec::with_capacity(len);
+        let mut scores = Vec::with_capacity(len);
+        let mut topic_ids = Vec::with_capacity(len);
+        let mut topic_labels = Vec::with_capacity(len);
+        let mut engagements = Vec::with_capacity(len);
+        let mut ingested_ats = Vec::with_capacity(len);
+        let mut cleaned_ats = Vec::with_capacity(len);
+        let mut topic_scored_ats = Vec::with_capacity(len);
+        let mut sentiment_scored_ats = Vec::with_capacity(len);
+        let mut engagement_observed_ats = Vec::with_capacity(len);
+        let mut source_schema_versions = Vec::with_capacity(len);
+        let mut pipeline_git_commits = Vec::with_capacity(len);
+        let mut topic_model_versions = Vec::with_capacity(len);
+        let mut topic_model_hashes = Vec::with_capacity(len);
+        let mut sentiment_model_versions = Vec::with_capacity(len);
+        let mut sentiment_model_hashes = Vec::with_capacity(len);
 
         for post in posts {
-            let text_clean = post.clean.text.replace('\x00', "");
-            let topic_label_clean = post
-                .clean
-                .topic_label
-                .as_ref()
-                .map(|l| l.replace('\x00', ""));
-            let topic_id = post.clean.topic_id.unwrap_or(-2);
-            let scores_json = serde_json::to_value(&post.scores)?;
-
-            let res = sqlx::query(INSERT_POST_SQL)
-                .bind(&post.clean.id)
-                .bind(&post.clean.symbol)
-                .bind(&post.clean.platform)
-                .bind(text_clean)
-                .bind(post.clean.timestamp)
-                .bind(&post.sentiment)
-                .bind(scores_json)
-                .bind(topic_id)
-                .bind(topic_label_clean)
-                .bind(post.clean.engagement)
-                .bind(post.clean.ingested_at)
-                .bind(post.clean.cleaned_at)
-                .bind(post.clean.topic_scored_at)
-                .bind(post.sentiment_scored_at)
-                .bind(post.clean.engagement_observed_at)
-                .bind(post.clean.source_schema_version)
-                .bind(&post.clean.pipeline_git_commit)
-                .bind(&post.clean.topic_model_version)
-                .bind(&post.clean.topic_model_hash)
-                .bind(&post.sentiment_model_version)
-                .bind(&post.sentiment_model_hash)
-                .execute(&mut *tx)
-                .await?;
-
-            inserted_count += res.rows_affected();
+            ids.push(post.clean.id.as_str());
+            symbols.push(post.clean.symbol.as_str());
+            platforms.push(post.clean.platform.as_str());
+            texts.push(post.clean.text.replace('\x00', ""));
+            timestamps.push(post.clean.timestamp);
+            sentiments.push(post.sentiment.as_str());
+            scores.push(serde_json::to_value(&post.scores)?);
+            topic_ids.push(post.clean.topic_id.unwrap_or(-2));
+            topic_labels.push(
+                post.clean
+                    .topic_label
+                    .as_ref()
+                    .map(|l| l.replace('\x00', "")),
+            );
+            engagements.push(post.clean.engagement);
+            ingested_ats.push(post.clean.ingested_at);
+            cleaned_ats.push(post.clean.cleaned_at);
+            topic_scored_ats.push(post.clean.topic_scored_at);
+            sentiment_scored_ats.push(post.sentiment_scored_at);
+            engagement_observed_ats.push(post.clean.engagement_observed_at);
+            source_schema_versions.push(post.clean.source_schema_version);
+            pipeline_git_commits.push(post.clean.pipeline_git_commit.as_str());
+            topic_model_versions.push(post.clean.topic_model_version.as_str());
+            topic_model_hashes.push(post.clean.topic_model_hash.as_str());
+            sentiment_model_versions.push(post.sentiment_model_version.as_str());
+            sentiment_model_hashes.push(post.sentiment_model_hash.as_str());
         }
 
+        let mut tx = self.pool.begin().await?;
+        let res = sqlx::query(INSERT_POSTS_BULK_SQL)
+            .bind(&ids)
+            .bind(&symbols)
+            .bind(&platforms)
+            .bind(&texts)
+            .bind(&timestamps)
+            .bind(&sentiments)
+            .bind(&scores)
+            .bind(&topic_ids)
+            .bind(&topic_labels)
+            .bind(&engagements)
+            .bind(&ingested_ats)
+            .bind(&cleaned_ats)
+            .bind(&topic_scored_ats)
+            .bind(&sentiment_scored_ats)
+            .bind(&engagement_observed_ats)
+            .bind(&source_schema_versions)
+            .bind(&pipeline_git_commits)
+            .bind(&topic_model_versions)
+            .bind(&topic_model_hashes)
+            .bind(&sentiment_model_versions)
+            .bind(&sentiment_model_hashes)
+            .execute(&mut *tx)
+            .await?;
+
+        let inserted_count = res.rows_affected();
         let duplicate_count = (posts.len() as u64).saturating_sub(inserted_count);
         if duplicate_count > 0 {
             let platform = Self::batch_platform(posts);

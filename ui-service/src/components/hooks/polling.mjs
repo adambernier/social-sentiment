@@ -89,17 +89,37 @@ export function createAbortableRequestGroup() {
 
 export function startCompletionScheduledPolling(
   task,
-  { intervalMs, onError, scheduler = defaultScheduler },
+  {
+    intervalMs,
+    onError,
+    scheduler = defaultScheduler,
+    visibilitySource = typeof document !== 'undefined' ? document : undefined,
+  },
 ) {
   let stopped = false;
   let activeController;
   let timeoutHandle;
+  let pendingWhenVisible = false;
+
+  const isHidden = () => visibilitySource?.visibilityState === 'hidden';
+
+  const clearScheduled = () => {
+    if (timeoutHandle !== undefined) {
+      scheduler.clearTimeout(timeoutHandle);
+      timeoutHandle = undefined;
+    }
+  };
 
   const run = async () => {
     if (stopped) {
       return;
     }
+    if (isHidden()) {
+      pendingWhenVisible = true;
+      return;
+    }
 
+    pendingWhenVisible = false;
     const controller = new AbortController();
     activeController = controller;
     try {
@@ -113,20 +133,127 @@ export function startCompletionScheduledPolling(
         activeController = undefined;
       }
       if (!stopped) {
-        timeoutHandle = scheduler.setTimeout(() => {
-          void run();
-        }, intervalMs);
+        if (isHidden()) {
+          pendingWhenVisible = true;
+        } else {
+          timeoutHandle = scheduler.setTimeout(() => {
+            timeoutHandle = undefined;
+            void run();
+          }, intervalMs);
+        }
       }
     }
   };
 
+  const handleVisibilityChange = () => {
+    if (stopped) {
+      return;
+    }
+    if (isHidden()) {
+      if (timeoutHandle !== undefined) {
+        clearScheduled();
+        pendingWhenVisible = true;
+      }
+      return;
+    }
+    if (pendingWhenVisible && !activeController) {
+      pendingWhenVisible = false;
+      clearScheduled();
+      void run();
+    }
+  };
+
+  visibilitySource?.addEventListener?.('visibilitychange', handleVisibilityChange);
   void run();
 
   return () => {
     stopped = true;
+    visibilitySource?.removeEventListener?.('visibilitychange', handleVisibilityChange);
     activeController?.abort();
-    if (timeoutHandle !== undefined) {
-      scheduler.clearTimeout(timeoutHandle);
+    clearScheduled();
+  };
+}
+
+export function startReconnectingWebSocket(
+  url,
+  {
+    onOpen,
+    onClose,
+    onMessage,
+    onError,
+    baseDelayMs = 1_000,
+    maxDelayMs = 30_000,
+    scheduler = defaultScheduler,
+    createSocket = (targetUrl) => new WebSocket(targetUrl),
+  },
+) {
+  let stopped = false;
+  let attempt = 0;
+  let socket;
+  let reconnectTimer;
+
+  const clearReconnect = () => {
+    if (reconnectTimer !== undefined) {
+      scheduler.clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
     }
+  };
+
+  const connect = () => {
+    if (stopped) {
+      return;
+    }
+
+    const current = createSocket(url);
+    socket = current;
+
+    current.onopen = () => {
+      if (stopped || socket !== current) {
+        return;
+      }
+      attempt = 0;
+      onOpen?.();
+    };
+
+    current.onmessage = (event) => {
+      if (stopped || socket !== current) {
+        return;
+      }
+      onMessage?.(event);
+    };
+
+    current.onerror = (event) => {
+      if (stopped || socket !== current) {
+        return;
+      }
+      onError?.(event);
+    };
+
+    current.onclose = () => {
+      if (socket === current) {
+        socket = undefined;
+      }
+      if (stopped) {
+        return;
+      }
+      onClose?.();
+      const delay = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
+      attempt += 1;
+      clearReconnect();
+      reconnectTimer = scheduler.setTimeout(() => {
+        reconnectTimer = undefined;
+        connect();
+      }, delay);
+    };
+  };
+
+  connect();
+
+  return () => {
+    stopped = true;
+    clearReconnect();
+    const current = socket;
+    socket = undefined;
+    current?.close?.();
   };
 }

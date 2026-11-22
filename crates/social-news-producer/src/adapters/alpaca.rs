@@ -26,6 +26,7 @@ pub fn parse(
         outcome.detail = Some("invalid Alpaca news array".into());
         return outcome;
     };
+    let matcher = symbol.matcher();
     let mut items = Vec::new();
     for article in articles {
         let Some(raw_id) = article.get("id") else {
@@ -60,7 +61,7 @@ pub fn parse(
         if text.trim().is_empty() {
             continue;
         }
-        let posts = if symbol.matches(&text) {
+        let posts = if matcher.matches(&text) {
             vec![raw_post(
                 post_id.clone(),
                 &symbol.symbol,

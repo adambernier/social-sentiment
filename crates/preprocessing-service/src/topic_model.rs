@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ort::session::Session;
 use ort::value::Value;
+use social_sentiment_core::config::OrtThreadConfig;
 use social_sentiment_core::model_identity::sha256_file;
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,6 +15,7 @@ pub struct TopicModel {
     pub model_hash: String,
     pub entailment_threshold: f32,
     candidate_labels: Vec<&'static str>,
+    hypotheses: Vec<String>,
     label_map: HashMap<&'static str, &'static str>,
 }
 
@@ -35,6 +37,28 @@ fn configured_entailment_threshold() -> f32 {
         }
     }
     0.60
+}
+
+fn is_substantive_text(text: &str) -> bool {
+    let mut non_spam_count = 0usize;
+    for w in text.split_whitespace() {
+        let w_clean = w.trim().to_lowercase();
+        if w_clean.starts_with('$')
+            || w_clean.starts_with('@')
+            || w_clean.contains("http")
+            || w_clean == "rt"
+            || w_clean == "via"
+        {
+            continue;
+        }
+        if w_clean.chars().any(char::is_alphanumeric) {
+            non_spam_count += 1;
+            if non_spam_count >= 3 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl TopicModel {
@@ -65,7 +89,13 @@ impl TopicModel {
             pad_token: "[PAD]".to_string(),
         }));
 
-        let session = Session::builder()?.commit_from_file(&model_path)?;
+        let threads = OrtThreadConfig::from_env();
+        let session = Session::builder()?
+            .with_intra_threads(threads.intra_threads)
+            .map_err(|e| anyhow::anyhow!("Failed to set ORT intra_threads: {e}"))?
+            .with_inter_threads(threads.inter_threads)
+            .map_err(|e| anyhow::anyhow!("Failed to set ORT inter_threads: {e}"))?
+            .commit_from_file(&model_path)?;
 
         let model_hash = sha256_file(&model_path)?;
         let version = std::env::var("TOPIC_MODEL_VERSION")
@@ -81,6 +111,11 @@ impl TopicModel {
             "business partnerships and corporate mergers",
             "options trading",
         ];
+
+        let hypotheses = candidate_labels
+            .iter()
+            .map(|label| format!("This text is about {label}."))
+            .collect();
 
         let mut label_map = HashMap::new();
         label_map.insert("financial earnings", "Earnings & Guidance");
@@ -105,6 +140,7 @@ impl TopicModel {
             model_hash,
             entailment_threshold: configured_entailment_threshold(),
             candidate_labels,
+            hypotheses,
             label_map,
         })
     }
@@ -115,53 +151,63 @@ impl TopicModel {
     }
 
     pub fn predict_with_scores(&self, text: &str) -> Result<(i32, String, Vec<f32>)> {
-        // Spam / outlier heuristic check
-        let words = text.split_whitespace();
-        let mut non_spam_count = 0;
-        for w in words {
-            let w_clean = w.trim().to_lowercase();
-            if w_clean.starts_with('$')
-                || w_clean.starts_with('@')
-                || w_clean.contains("http")
-                || w_clean == "rt"
-                || w_clean == "via"
-            {
-                continue;
-            }
-            let alnum: String = w_clean.chars().filter(|c| c.is_alphanumeric()).collect();
-            if !alnum.is_empty() {
-                non_spam_count += 1;
-            }
+        let mut results = self.predict_batch_with_scores(&[text.to_string()])?;
+        results
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("topic batch returned empty result for single input"))
+    }
+
+    pub fn predict_batch(&self, texts: &[String]) -> Result<Vec<(i32, String)>> {
+        let scored = self.predict_batch_with_scores(texts)?;
+        Ok(scored
+            .into_iter()
+            .map(|(topic_id, topic_label, _)| (topic_id, topic_label))
+            .collect())
+    }
+
+    pub fn predict_batch_with_scores(
+        &self,
+        texts: &[String],
+    ) -> Result<Vec<(i32, String, Vec<f32>)>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
         }
 
-        if non_spam_count < 3 {
-            return Ok((-1, "General / Outlier".to_string(), Vec::new()));
-        }
-
-        let hypothesis_template = "This text is about {}.";
-        let inputs: Vec<EncodeInput> = self
-            .candidate_labels
+        let mut results: Vec<(i32, String, Vec<f32>)> =
+            vec![(-1, "General / Outlier".to_string(), Vec::new()); texts.len()];
+        let active_indices: Vec<usize> = texts
             .iter()
-            .map(|label| {
-                let hypo = hypothesis_template.replace("{}", label);
-                EncodeInput::Dual(text.into(), hypo.into())
-            })
+            .enumerate()
+            .filter_map(|(idx, text)| is_substantive_text(text).then_some(idx))
             .collect();
+
+        if active_indices.is_empty() {
+            return Ok(results);
+        }
+
+        let num_labels = self.candidate_labels.len();
+        let total_pairs = active_indices.len() * num_labels;
+        let mut inputs = Vec::with_capacity(total_pairs);
+        for &idx in &active_indices {
+            let text = texts[idx].as_str();
+            for hypo in &self.hypotheses {
+                inputs.push(EncodeInput::Dual(text.into(), hypo.as_str().into()));
+            }
+        }
 
         let encodings = self
             .tokenizer
             .encode_batch(inputs, true)
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
-        let num_pairs = self.candidate_labels.len(); // 8
         let max_len = encodings
             .iter()
             .map(|e| e.get_ids().len())
             .max()
             .unwrap_or(0);
 
-        let mut input_ids_vec = vec![0i64; num_pairs * max_len];
-        let mut attention_mask_vec = vec![0i64; num_pairs * max_len];
+        let mut input_ids_vec = vec![0i64; total_pairs * max_len];
+        let mut attention_mask_vec = vec![0i64; total_pairs * max_len];
 
         for (i, encoding) in encodings.iter().enumerate() {
             for (j, &id) in encoding.get_ids().iter().enumerate() {
@@ -172,7 +218,7 @@ impl TopicModel {
             }
         }
 
-        let shape = vec![num_pairs as i64, max_len as i64];
+        let shape = vec![total_pairs as i64, max_len as i64];
         let input_ids_tensor = Value::from_array((shape.clone(), input_ids_vec))?;
         let attention_mask_tensor = Value::from_array((shape, attention_mask_vec))?;
 
@@ -187,60 +233,58 @@ impl TopicModel {
         ])?;
 
         let (out_shape, logits) = outputs[0].try_extract_tensor::<f32>()?;
-        if out_shape.len() < 2 || out_shape[0] != num_pairs as i64 || out_shape[1] < 3 {
+        if out_shape.len() < 2 || out_shape[0] != total_pairs as i64 || out_shape[1] < 3 {
             return Err(anyhow::anyhow!("Unexpected logits shape: {:?}", out_shape));
         }
+        let num_classes = out_shape[1] as usize;
 
-        let mut entail_probs = Vec::with_capacity(num_pairs);
+        for (active_pos, &orig_idx) in active_indices.iter().enumerate() {
+            let mut entail_probs = Vec::with_capacity(num_labels);
+            for label_idx in 0..num_labels {
+                let pair_idx = active_pos * num_labels + label_idx;
+                let offset = pair_idx * num_classes;
+                let entail = logits[offset];
+                let contra = logits[offset + 2];
 
-        for i in 0..num_pairs {
-            let entail = logits[i * 3];
-            let contra = logits[i * 3 + 2];
-
-            let entail_prob =
-                social_sentiment_math::postprocess::topic_entailment_prob(entail, contra)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Non-finite topic logits for candidate index {i}")
-                    })?;
-            entail_probs.push(entail_prob);
-        }
-
-        match social_sentiment_math::postprocess::select_topic_index(
-            &entail_probs,
-            self.entailment_threshold,
-        ) {
-            None => Ok((-1, "General / Outlier".to_string(), entail_probs)),
-            Some(best_idx) => {
-                let desc_label = self.candidate_labels[best_idx];
-                let mapped_label = self.label_map.get(desc_label).unwrap_or(&desc_label);
-                Ok((best_idx as i32, mapped_label.to_string(), entail_probs))
+                let entail_prob =
+                    social_sentiment_math::postprocess::topic_entailment_prob(entail, contra)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                        "Non-finite topic logits for item {orig_idx}, candidate index {label_idx}"
+                    )
+                        })?;
+                entail_probs.push(entail_prob);
             }
+
+            results[orig_idx] = match social_sentiment_math::postprocess::select_topic_index(
+                &entail_probs,
+                self.entailment_threshold,
+            ) {
+                None => (-1, "General / Outlier".to_string(), entail_probs),
+                Some(best_idx) => {
+                    let desc_label = self.candidate_labels[best_idx];
+                    let mapped_label = self.label_map.get(desc_label).unwrap_or(&desc_label);
+                    (best_idx as i32, mapped_label.to_string(), entail_probs)
+                }
+            };
         }
+
+        Ok(results)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::is_substantive_text;
+
     #[test]
     fn test_topic_model_spam_filter() {
-        let spam_text = "$AAPL @user http://example.com RT via";
-        let words = spam_text.split_whitespace();
-        let mut non_spam_count = 0;
-        for w in words {
-            let w_clean = w.trim().to_lowercase();
-            if w_clean.starts_with('$')
-                || w_clean.starts_with('@')
-                || w_clean.contains("http")
-                || w_clean == "rt"
-                || w_clean == "via"
-            {
-                continue;
-            }
-            let alnum: String = w_clean.chars().filter(|c| c.is_alphanumeric()).collect();
-            if !alnum.is_empty() {
-                non_spam_count += 1;
-            }
-        }
-        assert_eq!(non_spam_count, 0);
+        assert!(!is_substantive_text(
+            "$AAPL @user http://example.com RT via"
+        ));
+        assert!(!is_substantive_text("$NVDA moon!!"));
+        assert!(is_substantive_text(
+            "$NVDA quarterly earnings beat Wall Street guidance"
+        ));
     }
 }

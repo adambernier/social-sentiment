@@ -4,7 +4,11 @@ import {
   MarketQuote, DeltaData, MetricsData, CorrelationData, SourceHealth
 } from '../types';
 import { isNewsPlatform } from '../dashboard/constants';
-import { requestJson, startCompletionScheduledPolling } from './polling.mjs';
+import {
+  requestJson,
+  startCompletionScheduledPolling,
+  startReconnectingWebSocket,
+} from './polling.mjs';
 
 const API_BASE = '/api';
 const POLL_INTERVAL_MS = 60_000;
@@ -40,7 +44,17 @@ export function useDashboardData() {
   const [isDrillDownLoading, setIsDrillDownLoading] = useState(false);
   const [hasHydrated, setHasHydrated] = useState(false);
   const hasSetDefaultHoursRef = useRef(false);
+  const symbolRef = useRef(symbol);
+  const platformRef = useRef(platform);
   const [clockNow, setClockNow] = useState(0);
+
+  useEffect(() => {
+    symbolRef.current = symbol;
+  }, [symbol]);
+
+  useEffect(() => {
+    platformRef.current = platform;
+  }, [platform]);
   
   // Persist symbol across reloads
   useEffect(() => {
@@ -206,34 +220,46 @@ export function useDashboardData() {
   }, []);
 
   useEffect(() => {
-    const ws = new WebSocket(`${wsBase}/stats/stream`);
-    ws.onopen = () => setIsConnected(true);
-    ws.onclose = () => setIsConnected(false);
-    
-    ws.onmessage = (event) => {
-      try {
-        const newPost: Post = JSON.parse(event.data);
-        if (newPost.symbol === symbol && (platform === 'all' || newPost.platform === platform)) {
-          setPosts((prev) => [newPost, ...prev].slice(0, 500));
-          setSentimentStats((prev) => {
-            const exists = prev.find(s => s.sentiment === newPost.sentiment);
-            if (exists) return prev.map(s => s.sentiment === newPost.sentiment ? { ...s, count: s.count + 1 } : s);
-            return [...prev, { sentiment: newPost.sentiment, count: 1 }];
-          });
-          if (newPost.topic_label) {
-            setTopicStats((prev) => {
-              const exists = prev.find(t => t.topic_label === newPost.topic_label);
-              if (exists) return prev.map(t => t.topic_label === newPost.topic_label ? { ...t, count: t.count + 1 } : t);
-              return [...prev, { topic_label: newPost.topic_label, count: 1 }];
+    return startReconnectingWebSocket(`${wsBase}/stats/stream`, {
+      onOpen: () => setIsConnected(true),
+      onClose: () => setIsConnected(false),
+      onMessage: (event) => {
+        try {
+          const newPost: Post = JSON.parse(event.data);
+          const activeSymbol = symbolRef.current;
+          const activePlatform = platformRef.current;
+          if (
+            newPost.symbol === activeSymbol &&
+            (activePlatform === 'all' || newPost.platform === activePlatform)
+          ) {
+            setPosts((prev) => [newPost, ...prev].slice(0, 500));
+            setSentimentStats((prev) => {
+              const exists = prev.find((s) => s.sentiment === newPost.sentiment);
+              if (exists) {
+                return prev.map((s) =>
+                  s.sentiment === newPost.sentiment ? { ...s, count: s.count + 1 } : s,
+                );
+              }
+              return [...prev, { sentiment: newPost.sentiment, count: 1 }];
             });
+            if (newPost.topic_label) {
+              setTopicStats((prev) => {
+                const exists = prev.find((t) => t.topic_label === newPost.topic_label);
+                if (exists) {
+                  return prev.map((t) =>
+                    t.topic_label === newPost.topic_label ? { ...t, count: t.count + 1 } : t,
+                  );
+                }
+                return [...prev, { topic_label: newPost.topic_label, count: 1 }];
+              });
+            }
           }
+        } catch (error) {
+          console.error('Failed to process dashboard stream message', error);
         }
-      } catch (error) {
-        console.error('Failed to process dashboard stream message', error);
-      }
-    };
-    return () => ws.close();
-  }, [symbol, platform, wsBase]);
+      },
+    });
+  }, [wsBase]);
 
   useEffect(() => {
     if (!selectedHour) {

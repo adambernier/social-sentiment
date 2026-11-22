@@ -5,7 +5,8 @@ WORKDIR /usr/src/app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
-COPY . .
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
 
 # Build all worker executables in one shared layer. Each runtime target below
 # reuses this stage instead of compiling the full dependency graph separately.

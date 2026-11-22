@@ -6,6 +6,7 @@ import {
   createLatestRequestRunner,
   requestJson,
   startCompletionScheduledPolling,
+  startReconnectingWebSocket,
 } from './polling.mjs';
 
 function deferred() {
@@ -215,4 +216,158 @@ test('abortable request group preserves concurrency and cancels all active work'
   secondResult.resolve('second');
   assert.equal(await first, undefined);
   assert.equal(await second, undefined);
+});
+
+function fakeVisibilitySource(initialState = 'visible') {
+  const listeners = new Set();
+  return {
+    visibilityState: initialState,
+    addEventListener(type, listener) {
+      if (type === 'visibilitychange') {
+        listeners.add(listener);
+      }
+    },
+    removeEventListener(type, listener) {
+      if (type === 'visibilitychange') {
+        listeners.delete(listener);
+      }
+    },
+    setState(nextState) {
+      this.visibilityState = nextState;
+      for (const listener of listeners) {
+        listener();
+      }
+    },
+    get listenerCount() {
+      return listeners.size;
+    },
+  };
+}
+
+test('polling pauses while tab is hidden and refreshes immediately on becoming visible', async () => {
+  const clock = fakeScheduler();
+  const visibility = fakeVisibilitySource('visible');
+  let runs = 0;
+
+  const stop = startCompletionScheduledPolling(
+    async () => {
+      runs += 1;
+    },
+    {
+      intervalMs: 60_000,
+      onError: (error) => assert.fail(String(error)),
+      scheduler: clock.scheduler,
+      visibilitySource: visibility,
+    },
+  );
+
+  await flushPromises();
+  assert.equal(runs, 1);
+  assert.equal(clock.callbacks.size, 1);
+
+  visibility.setState('hidden');
+  assert.equal(clock.callbacks.size, 0);
+
+  visibility.setState('visible');
+  await flushPromises();
+  assert.equal(runs, 2);
+  assert.equal(clock.callbacks.size, 1);
+
+  stop();
+  assert.equal(visibility.listenerCount, 0);
+  assert.equal(clock.callbacks.size, 0);
+});
+
+test('polling started while hidden defers first cycle until tab becomes visible', async () => {
+  const clock = fakeScheduler();
+  const visibility = fakeVisibilitySource('hidden');
+  let runs = 0;
+
+  const stop = startCompletionScheduledPolling(
+    async () => {
+      runs += 1;
+    },
+    {
+      intervalMs: 60_000,
+      onError: (error) => assert.fail(String(error)),
+      scheduler: clock.scheduler,
+      visibilitySource: visibility,
+    },
+  );
+
+  await flushPromises();
+  assert.equal(runs, 0);
+  assert.equal(clock.callbacks.size, 0);
+
+  visibility.setState('visible');
+  await flushPromises();
+  assert.equal(runs, 1);
+  assert.equal(clock.callbacks.size, 1);
+
+  stop();
+});
+
+test('reconnecting WebSocket backs off exponentially, resets on open, and stops cleanly', () => {
+  const clock = fakeScheduler();
+  const sockets = [];
+  const events = [];
+
+  const createSocket = (url) => {
+    const socket = {
+      url,
+      closed: false,
+      close() {
+        this.closed = true;
+      },
+    };
+    sockets.push(socket);
+    return socket;
+  };
+
+  const stop = startReconnectingWebSocket('ws://localhost/api/stats/stream', {
+    onOpen: () => events.push('open'),
+    onClose: () => events.push('close'),
+    onMessage: (event) => events.push(`msg:${event.data}`),
+    baseDelayMs: 1_000,
+    maxDelayMs: 4_000,
+    scheduler: clock.scheduler,
+    createSocket,
+  });
+
+  assert.equal(sockets.length, 1);
+  sockets[0].onclose();
+  assert.deepEqual(clock.delays, [1_000]);
+
+  clock.runNext();
+  assert.equal(sockets.length, 2);
+  sockets[1].onclose();
+  assert.deepEqual(clock.delays, [1_000, 2_000]);
+
+  clock.runNext();
+  assert.equal(sockets.length, 3);
+  sockets[2].onclose();
+  assert.deepEqual(clock.delays, [1_000, 2_000, 4_000]);
+
+  clock.runNext();
+  assert.equal(sockets.length, 4);
+  sockets[3].onclose();
+  assert.deepEqual(clock.delays, [1_000, 2_000, 4_000, 4_000]);
+
+  // Successful open resets backoff back to baseDelayMs.
+  clock.runNext();
+  assert.equal(sockets.length, 5);
+  sockets[4].onopen();
+  sockets[4].onmessage({ data: 'hello' });
+  sockets[4].onclose();
+  assert.deepEqual(clock.delays, [1_000, 2_000, 4_000, 4_000, 1_000]);
+
+  // Stopping cancels pending reconnect and closes active socket.
+  clock.runNext();
+  assert.equal(sockets.length, 6);
+  stop();
+  assert.equal(sockets[5].closed, true);
+  sockets[5].onclose();
+  assert.equal(clock.callbacks.size, 0);
+  assert.ok(events.includes('open'));
+  assert.ok(events.includes('msg:hello'));
 });

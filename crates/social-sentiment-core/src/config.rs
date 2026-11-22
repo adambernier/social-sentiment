@@ -57,6 +57,43 @@ impl Config {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrtThreadConfig {
+    pub intra_threads: usize,
+    pub inter_threads: usize,
+}
+
+impl OrtThreadConfig {
+    /// Resolve ONNX Runtime thread pool sizes from `ORT_INTRA_THREADS` and
+    /// `ORT_INTER_THREADS`. Defaults cap intra-op threads to `min(available_cpus, 2)`
+    /// and inter-op threads to `1` so co-located inference containers do not
+    /// oversubscribe shared VM cores.
+    pub fn from_env() -> Self {
+        let available_cpus = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        let intra_raw = env::var("ORT_INTRA_THREADS").ok();
+        let inter_raw = env::var("ORT_INTER_THREADS").ok();
+        Self::resolve(intra_raw.as_deref(), inter_raw.as_deref(), available_cpus)
+    }
+
+    pub fn resolve(
+        intra_raw: Option<&str>,
+        inter_raw: Option<&str>,
+        available_cpus: usize,
+    ) -> Self {
+        let default_intra = available_cpus.clamp(1, 2);
+        let parse_positive = |raw: Option<&str>| {
+            raw.and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|&count| count > 0)
+        };
+        Self {
+            intra_threads: parse_positive(intra_raw).unwrap_or(default_intra),
+            inter_threads: parse_positive(inter_raw).unwrap_or(1),
+        }
+    }
+}
+
 fn get_env(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -115,5 +152,37 @@ mod tests {
         assert_eq!(config.queue_raw_posts, "raw-posts");
         assert_eq!(config.post_retention_days, 14);
         assert_eq!(config.rabbit_url(), "amqp://guest:guest@localhost:5672/%2f");
+    }
+
+    #[test]
+    fn test_ort_thread_config_resolution() {
+        assert_eq!(
+            OrtThreadConfig::resolve(None, None, 8),
+            OrtThreadConfig {
+                intra_threads: 2,
+                inter_threads: 1,
+            }
+        );
+        assert_eq!(
+            OrtThreadConfig::resolve(None, None, 1),
+            OrtThreadConfig {
+                intra_threads: 1,
+                inter_threads: 1,
+            }
+        );
+        assert_eq!(
+            OrtThreadConfig::resolve(Some("4"), Some("2"), 8),
+            OrtThreadConfig {
+                intra_threads: 4,
+                inter_threads: 2,
+            }
+        );
+        assert_eq!(
+            OrtThreadConfig::resolve(Some("0"), Some("invalid"), 4),
+            OrtThreadConfig {
+                intra_threads: 2,
+                inter_threads: 1,
+            }
+        );
     }
 }

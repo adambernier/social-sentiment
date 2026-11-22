@@ -21,9 +21,68 @@ use sqlx::{
     PgPool, Row,
 };
 use std::net::SocketAddr;
-use tokio::sync::broadcast;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{error, info, warn};
+
+const DEFAULT_STATS_CACHE_TTL_SECONDS: u64 = 15;
+
+#[derive(Clone)]
+pub(crate) struct TtlCache<T> {
+    ttl: Duration,
+    entry: Arc<RwLock<Option<(Instant, T)>>>,
+}
+
+impl<T: Clone> TtlCache<T> {
+    fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            entry: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    async fn get(&self) -> Option<T> {
+        self.get_at(Instant::now()).await
+    }
+
+    async fn get_at(&self, now: Instant) -> Option<T> {
+        if self.ttl.is_zero() {
+            return None;
+        }
+        let guard = self.entry.read().await;
+        guard
+            .as_ref()
+            .filter(|(inserted_at, _)| now.saturating_duration_since(*inserted_at) < self.ttl)
+            .map(|(_, value)| value.clone())
+    }
+
+    async fn set(&self, value: T) {
+        self.set_at(Instant::now(), value).await;
+    }
+
+    async fn set_at(&self, now: Instant, value: T) {
+        if self.ttl.is_zero() {
+            return;
+        }
+        let mut guard = self.entry.write().await;
+        *guard = Some((now, value));
+    }
+
+    pub(crate) async fn invalidate(&self) {
+        let mut guard = self.entry.write().await;
+        *guard = None;
+    }
+}
+
+fn stats_cache_ttl_from_env() -> Duration {
+    let seconds = std::env::var("API_STATS_CACHE_TTL_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_STATS_CACHE_TTL_SECONDS);
+    Duration::from_secs(seconds)
+}
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -32,6 +91,8 @@ pub(crate) struct AppState {
     vix_symbol: String,
     pub(crate) admin_api_key: String,
     pub(crate) global_context_enabled: bool,
+    pub(crate) leaderboard_cache: TtlCache<Vec<LeaderboardEntry>>,
+    sources_cache: TtlCache<Vec<SourceHealth>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -62,7 +123,7 @@ struct SentimentStats {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct LeaderboardEntry {
+pub(crate) struct LeaderboardEntry {
     symbol: String,
     post_count_4h: i64,
     sentiment_index_4h: f64,
@@ -518,6 +579,250 @@ async fn tracked_symbols_handler(
     Ok(Json(symbols))
 }
 
+const SENTIMENT_STATS_SQL: &str = r#"
+    WITH cutoff_hour AS (
+        SELECT date_trunc('hour', $1::TIMESTAMPTZ, 'UTC') AS start_hour
+    ),
+    canonical_by_bucket AS (
+        SELECT
+            symbol,
+            bucket_hour,
+            SUM(positive_count)::BIGINT AS positive_count,
+            SUM(neutral_count)::BIGINT AS neutral_count,
+            SUM(negative_count)::BIGINT AS negative_count
+        FROM hourly_sentiment_facts, cutoff_hour
+        WHERE bucket_hour >= cutoff_hour.start_hour
+          AND ($2::TEXT IS NULL OR symbol = $2)
+          AND ($3::TEXT IS NULL OR platform = $3)
+        GROUP BY symbol, bucket_hour
+    ),
+    legacy_by_bucket AS (
+        SELECT
+            l.positive_count::BIGINT AS positive_count,
+            l.neutral_count::BIGINT AS neutral_count,
+            l.negative_count::BIGINT AS negative_count
+        FROM hourly_sentiment_agg AS l, cutoff_hour
+        WHERE $3::TEXT IS NULL
+          AND l.bucket_hour >= cutoff_hour.start_hour
+          AND ($2::TEXT IS NULL OR l.symbol = $2)
+          AND NOT EXISTS (
+              SELECT 1
+              FROM canonical_by_bucket AS c
+              WHERE c.symbol = l.symbol
+                AND c.bucket_hour = l.bucket_hour
+          )
+    ),
+    cold_totals AS (
+        SELECT 'positive'::TEXT AS sentiment, COALESCE(SUM(positive_count), 0)::BIGINT AS count
+        FROM canonical_by_bucket
+        UNION ALL
+        SELECT 'neutral'::TEXT, COALESCE(SUM(neutral_count), 0)::BIGINT
+        FROM canonical_by_bucket
+        UNION ALL
+        SELECT 'negative'::TEXT, COALESCE(SUM(negative_count), 0)::BIGINT
+        FROM canonical_by_bucket
+        UNION ALL
+        SELECT 'positive'::TEXT, COALESCE(SUM(positive_count), 0)::BIGINT
+        FROM legacy_by_bucket
+        UNION ALL
+        SELECT 'neutral'::TEXT, COALESCE(SUM(neutral_count), 0)::BIGINT
+        FROM legacy_by_bucket
+        UNION ALL
+        SELECT 'negative'::TEXT, COALESCE(SUM(negative_count), 0)::BIGINT
+        FROM legacy_by_bucket
+    ),
+    hot_totals AS (
+        SELECT sentiment, COUNT(*)::BIGINT AS count
+        FROM posts
+        WHERE timestamp >= $1
+          AND ($2::TEXT IS NULL OR symbol = $2)
+          AND ($3::TEXT IS NULL OR platform = $3)
+        GROUP BY sentiment
+    )
+    SELECT sentiment, SUM(count)::BIGINT AS count
+    FROM (
+        SELECT sentiment, count FROM cold_totals
+        UNION ALL
+        SELECT sentiment, count FROM hot_totals
+    ) AS combined
+    GROUP BY sentiment
+    HAVING SUM(count) > 0
+"#;
+
+const TOPIC_STATS_SQL: &str = r#"
+    WITH cutoff_hour AS (
+        SELECT date_trunc('hour', $1::TIMESTAMPTZ, 'UTC') AS start_hour
+    ),
+    cold_topics AS (
+        SELECT
+            NULLIF(topic_label, 'Unassigned') AS topic_label,
+            SUM(post_count)::BIGINT AS count
+        FROM hourly_sentiment_facts, cutoff_hour
+        WHERE bucket_hour >= cutoff_hour.start_hour
+          AND ($2::TEXT IS NULL OR symbol = $2)
+          AND ($3::TEXT IS NULL OR platform = $3)
+        GROUP BY NULLIF(topic_label, 'Unassigned')
+    ),
+    hot_topics AS (
+        SELECT
+            topic_label,
+            COUNT(*)::BIGINT AS count
+        FROM posts
+        WHERE timestamp >= $1
+          AND ($2::TEXT IS NULL OR symbol = $2)
+          AND ($3::TEXT IS NULL OR platform = $3)
+        GROUP BY topic_label
+    )
+    SELECT topic_label, SUM(count)::BIGINT AS count
+    FROM (
+        SELECT topic_label, count FROM cold_topics
+        UNION ALL
+        SELECT topic_label, count FROM hot_topics
+    ) AS combined
+    GROUP BY topic_label
+    ORDER BY count DESC
+"#;
+
+const LEADERBOARD_SQL: &str = r#"
+    WITH bounds AS (
+        SELECT
+            NOW() - INTERVAL '28 days' AS baseline_start,
+            date_trunc('hour', NOW() - INTERVAL '28 days', 'UTC') AS baseline_start_hour,
+            NOW() - INTERVAL '4 hours' AS current_start,
+            date_trunc('hour', NOW() - INTERVAL '4 hours', 'UTC') AS current_start_hour
+    ),
+    current_stats AS (
+        SELECT p.symbol,
+               COUNT(*)::BIGINT AS post_count_4h,
+               COUNT(*) FILTER (WHERE p.sentiment = 'positive')::BIGINT AS positive_count_4h,
+               COUNT(*) FILTER (WHERE p.sentiment = 'negative')::BIGINT AS negative_count_4h,
+               (COUNT(*) FILTER (WHERE p.sentiment = 'positive')
+                - COUNT(*) FILTER (WHERE p.sentiment = 'negative'))::DOUBLE PRECISION
+                 / NULLIF(COUNT(*), 0) AS sentiment_index_4h
+        FROM posts AS p, bounds
+        WHERE p.timestamp >= bounds.current_start
+        GROUP BY p.symbol
+    ),
+    canonical_hourly AS (
+        SELECT
+            f.symbol,
+            f.bucket_hour,
+            SUM(f.post_count)::DOUBLE PRECISION AS post_count
+        FROM hourly_sentiment_facts AS f, bounds
+        WHERE f.bucket_hour >= bounds.baseline_start_hour
+          AND f.bucket_hour < bounds.current_start_hour
+        GROUP BY f.symbol, f.bucket_hour
+    ),
+    legacy_hourly AS (
+        SELECT
+            l.symbol,
+            l.bucket_hour,
+            (l.positive_count + l.neutral_count + l.negative_count)::DOUBLE PRECISION AS post_count
+        FROM hourly_sentiment_agg AS l, bounds
+        WHERE l.bucket_hour >= bounds.baseline_start_hour
+          AND l.bucket_hour < bounds.current_start_hour
+          AND NOT EXISTS (
+              SELECT 1
+              FROM canonical_hourly AS c
+              WHERE c.symbol = l.symbol
+                AND c.bucket_hour = l.bucket_hour
+          )
+    ),
+    hot_hourly AS (
+        SELECT
+            p.symbol,
+            date_trunc('hour', p.timestamp, 'UTC') AS bucket_hour,
+            COUNT(*)::DOUBLE PRECISION AS post_count
+        FROM posts AS p, bounds
+        WHERE p.timestamp >= bounds.baseline_start
+          AND p.timestamp < bounds.current_start
+        GROUP BY p.symbol, date_trunc('hour', p.timestamp, 'UTC')
+    ),
+    hourly_counts AS (
+        SELECT symbol, bucket_hour, SUM(post_count)::DOUBLE PRECISION AS post_count
+        FROM (
+            SELECT symbol, bucket_hour, post_count FROM canonical_hourly
+            UNION ALL
+            SELECT symbol, bucket_hour, post_count FROM legacy_hourly
+            UNION ALL
+            SELECT symbol, bucket_hour, post_count FROM hot_hourly
+        ) AS combined_hourly
+        GROUP BY symbol, bucket_hour
+    ),
+    baseline AS (
+        SELECT symbol,
+               AVG(post_count)::DOUBLE PRECISION AS mean_hourly,
+               STDDEV_SAMP(post_count)::DOUBLE PRECISION AS stddev_hourly,
+               COUNT(*)::BIGINT AS sample_count
+        FROM hourly_counts
+        GROUP BY symbol
+    )
+    SELECT universe.symbol,
+           COALESCE(current_stats.post_count_4h, 0)::BIGINT AS post_count_4h,
+           COALESCE(current_stats.positive_count_4h, 0)::BIGINT AS positive_count_4h,
+           COALESCE(current_stats.negative_count_4h, 0)::BIGINT AS negative_count_4h,
+           COALESCE(current_stats.sentiment_index_4h, 0.0)::DOUBLE PRECISION AS sentiment_index_4h,
+           CASE
+               WHEN baseline.sample_count < 8 OR baseline.stddev_hourly IS NULL
+                    OR baseline.stddev_hourly = 0 THEN NULL
+               ELSE (((COALESCE(current_stats.post_count_4h, 0) / 4.0)
+                     - baseline.mean_hourly) / baseline.stddev_hourly)::DOUBLE PRECISION
+           END AS buzz_z,
+           COALESCE(baseline.mean_hourly, 0.0)::DOUBLE PRECISION AS baseline_hourly,
+           COALESCE(baseline.sample_count, 0)::BIGINT AS baseline_samples
+    FROM tracked_symbols AS universe
+    LEFT JOIN current_stats USING (symbol)
+    LEFT JOIN baseline USING (symbol)
+    WHERE universe.is_active
+    ORDER BY buzz_z DESC NULLS LAST, post_count_4h DESC, universe.symbol
+"#;
+
+async fn fetch_sentiment_stats(
+    pool: &PgPool,
+    symbol: Option<&str>,
+    platform: Option<&str>,
+    cutoff: DateTime<Utc>,
+) -> Result<Vec<SentimentStats>, (StatusCode, String)> {
+    let rows = sqlx::query(SENTIMENT_STATS_SQL)
+        .bind(cutoff)
+        .bind(symbol)
+        .bind(platform)
+        .fetch_all(pool)
+        .await
+        .map_err(internal_error)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| SentimentStats {
+            sentiment: row.get("sentiment"),
+            count: row.get("count"),
+        })
+        .collect())
+}
+
+async fn fetch_topic_stats(
+    pool: &PgPool,
+    symbol: Option<&str>,
+    platform: Option<&str>,
+    cutoff: DateTime<Utc>,
+) -> Result<Vec<TopicStats>, (StatusCode, String)> {
+    let rows = sqlx::query(TOPIC_STATS_SQL)
+        .bind(cutoff)
+        .bind(symbol)
+        .bind(platform)
+        .fetch_all(pool)
+        .await
+        .map_err(internal_error)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| TopicStats {
+            topic_label: row.get("topic_label"),
+            count: row.get("count"),
+        })
+        .collect())
+}
+
 async fn dashboard_handler(
     State(state): State<AppState>,
     Query(params): Query<DashboardQueryParams>,
@@ -527,143 +832,143 @@ async fn dashboard_handler(
     let platform = params.platform.filter(|value| value != "all");
     let cutoff = Utc::now() - chrono::Duration::hours(hours);
 
-    // 1. Fetch sentiment stats
-    let sentiment_rows = sqlx::query(
-        r#"
-        SELECT sentiment, COUNT(*) as count 
-        FROM posts 
-        WHERE symbol = $1 AND timestamp >= $2
-          AND ($3::TEXT IS NULL OR platform = $3)
-        GROUP BY sentiment
-        "#,
-    )
-    .bind(&symbol)
-    .bind(cutoff)
-    .bind(platform.as_deref())
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal_error)?;
+    let sentiment_fut = fetch_sentiment_stats(
+        &state.pool,
+        Some(symbol.as_str()),
+        platform.as_deref(),
+        cutoff,
+    );
+    let topic_fut = fetch_topic_stats(
+        &state.pool,
+        Some(symbol.as_str()),
+        platform.as_deref(),
+        cutoff,
+    );
+    let posts_fut = async {
+        let post_rows = sqlx::query(
+            r#"
+            SELECT id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, scored_at, engagement
+            FROM posts
+            WHERE symbol = $1 AND timestamp >= $2
+              AND ($3::TEXT IS NULL OR platform = $3)
+            ORDER BY timestamp DESC
+            LIMIT 500
+            "#,
+        )
+        .bind(&symbol)
+        .bind(cutoff)
+        .bind(platform.as_deref())
+        .fetch_all(&state.pool)
+        .await
+        .map_err(internal_error)?;
 
-    let sentiment_stats: Vec<SentimentStats> = sentiment_rows
-        .into_iter()
-        .map(|r| SentimentStats {
-            sentiment: r.get("sentiment"),
-            count: r.get("count"),
-        })
-        .collect();
+        Ok::<Vec<PostResponse>, (StatusCode, String)>(
+            post_rows
+                .into_iter()
+                .map(|r| PostResponse {
+                    id: r.get("id"),
+                    symbol: r.get("symbol"),
+                    platform: r.get("platform"),
+                    text: r.get("text"),
+                    timestamp: r.get("timestamp"),
+                    sentiment: r.get("sentiment"),
+                    scores: r.get("scores"),
+                    topic_id: r.get("topic_id"),
+                    topic_label: r.get("topic_label"),
+                    scored_at: r.get("scored_at"),
+                    engagement: r.get("engagement"),
+                })
+                .collect(),
+        )
+    };
+    let market_series_fut = fetch_market_series(&state.pool, &symbol, cutoff);
+    let market_snapshot_fut = fetch_market_snapshot(&state.pool, &symbol);
+    let metrics_fut = async {
+        let metrics_row = sqlx::query(
+            r#"
+            SELECT symbol, pe_ratio, beta, avg_return_1y, inflation_adj_return_1y,
+                   pe_relative_sector, beta_relative_sector, return_relative_sector, updated_at
+            FROM stock_metrics
+            WHERE symbol = $1
+            "#,
+        )
+        .bind(&symbol)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(internal_error)?;
 
-    // 2. Fetch topic stats
-    let topic_rows = sqlx::query(
-        r#"
-        SELECT topic_label, COUNT(*) as count 
-        FROM posts 
-        WHERE symbol = $1 AND timestamp >= $2
-          AND ($3::TEXT IS NULL OR platform = $3)
-        GROUP BY topic_label
-        ORDER BY count DESC
-        "#,
-    )
-    .bind(&symbol)
-    .bind(cutoff)
-    .bind(platform.as_deref())
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal_error)?;
+        Ok::<Option<StockMetricsResponse>, (StatusCode, String)>(metrics_row.map(|r| {
+            StockMetricsResponse {
+                symbol: r.get("symbol"),
+                pe_ratio: r.get("pe_ratio"),
+                beta: r.get("beta"),
+                avg_return_1y: r.get("avg_return_1y"),
+                inflation_adj_return_1y: r.get("inflation_adj_return_1y"),
+                pe_relative_sector: r.get("pe_relative_sector"),
+                beta_relative_sector: r.get("beta_relative_sector"),
+                return_relative_sector: r.get("return_relative_sector"),
+                updated_at: r.get("updated_at"),
+            }
+        }))
+    };
+    let future_data_fut = async {
+        let primary_future_symbol = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT future FROM tracked_symbols WHERE symbol = $1 AND is_active",
+        )
+        .bind(&symbol)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(internal_error)?
+        .flatten();
 
-    let topic_stats: Vec<TopicStats> = topic_rows
-        .into_iter()
-        .map(|r| TopicStats {
-            topic_label: r.get("topic_label"),
-            count: r.get("count"),
-        })
-        .collect();
-
-    // 3. Fetch recent posts
-    let post_rows = sqlx::query(
-        r#"
-        SELECT id, symbol, platform, text, timestamp, sentiment, scores, topic_id, topic_label, scored_at, engagement
-        FROM posts
-        WHERE symbol = $1 AND timestamp >= $2
-          AND ($3::TEXT IS NULL OR platform = $3)
-        ORDER BY timestamp DESC
-        LIMIT 500
-        "#,
-    )
-    .bind(&symbol)
-    .bind(cutoff)
-    .bind(platform.as_deref())
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal_error)?;
-
-    let posts: Vec<PostResponse> = post_rows
-        .into_iter()
-        .map(|r| PostResponse {
-            id: r.get("id"),
-            symbol: r.get("symbol"),
-            platform: r.get("platform"),
-            text: r.get("text"),
-            timestamp: r.get("timestamp"),
-            sentiment: r.get("sentiment"),
-            scores: r.get("scores"),
-            topic_id: r.get("topic_id"),
-            topic_label: r.get("topic_label"),
-            scored_at: r.get("scored_at"),
-            engagement: r.get("engagement"),
-        })
-        .collect();
-
-    // 4. Fetch market quotes
-    let market_data = fetch_market_series(&state.pool, &symbol, cutoff).await?;
-    let (latest_quote, primary_delta) = fetch_market_snapshot(&state.pool, &symbol).await?.unzip();
-
-    // 5. Fetch stock metrics
-    let metrics_row = sqlx::query(
-        r#"
-        SELECT symbol, pe_ratio, beta, avg_return_1y, inflation_adj_return_1y,
-               pe_relative_sector, beta_relative_sector, return_relative_sector, updated_at
-        FROM stock_metrics
-        WHERE symbol = $1
-        "#,
-    )
-    .bind(&symbol)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal_error)?;
-
-    let metrics_data = metrics_row.map(|r| StockMetricsResponse {
-        symbol: r.get("symbol"),
-        pe_ratio: r.get("pe_ratio"),
-        beta: r.get("beta"),
-        avg_return_1y: r.get("avg_return_1y"),
-        inflation_adj_return_1y: r.get("inflation_adj_return_1y"),
-        pe_relative_sector: r.get("pe_relative_sector"),
-        beta_relative_sector: r.get("beta_relative_sector"),
-        return_relative_sector: r.get("return_relative_sector"),
-        updated_at: r.get("updated_at"),
-    });
-
-    let primary_future_symbol = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT future FROM tracked_symbols WHERE symbol = $1 AND is_active",
-    )
-    .bind(&symbol)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal_error)?
-    .flatten();
-    let (primary_future_quote, primary_future_delta, primary_future_market_data) =
         if let Some(future_symbol) = primary_future_symbol.as_deref() {
-            let data = fetch_market_series(&state.pool, future_symbol, cutoff).await?;
-            let (q, d) = fetch_market_snapshot(&state.pool, future_symbol)
-                .await?
-                .unzip();
-            (q, d, data)
+            let (data, snap) = tokio::try_join!(
+                fetch_market_series(&state.pool, future_symbol, cutoff),
+                fetch_market_snapshot(&state.pool, future_symbol),
+            )?;
+            let (q, d) = snap.unzip();
+            Ok::<
+                (
+                    Option<String>,
+                    Option<MarketQuote>,
+                    Option<MarketDelta>,
+                    Vec<MarketQuote>,
+                ),
+                (StatusCode, String),
+            >((primary_future_symbol, q, d, data))
         } else {
-            (None, None, Vec::new())
-        };
-    let (vix_quote, vix_delta) = fetch_market_snapshot(&state.pool, &state.vix_symbol)
-        .await?
-        .unzip();
+            Ok((None, None, None, Vec::new()))
+        }
+    };
+    let vix_snapshot_fut = fetch_market_snapshot(&state.pool, &state.vix_symbol);
+
+    let (
+        sentiment_stats,
+        topic_stats,
+        posts,
+        market_data,
+        primary_snap,
+        metrics_data,
+        (
+            primary_future_symbol,
+            primary_future_quote,
+            primary_future_delta,
+            primary_future_market_data,
+        ),
+        vix_snap,
+    ) = tokio::try_join!(
+        sentiment_fut,
+        topic_fut,
+        posts_fut,
+        market_series_fut,
+        market_snapshot_fut,
+        metrics_fut,
+        future_data_fut,
+        vix_snapshot_fut,
+    )?;
+
+    let (latest_quote, primary_delta) = primary_snap.unzip();
+    let (vix_quote, vix_delta) = vix_snap.unzip();
 
     Ok(Json(DashboardResponse {
         sentiment_stats,
@@ -685,61 +990,16 @@ async fn dashboard_handler(
 async fn leaderboard_handler(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<LeaderboardEntry>>, (StatusCode, String)> {
-    let rows = sqlx::query(
-        r#"
-        WITH current_stats AS (
-            SELECT symbol,
-                   COUNT(*) AS post_count_4h,
-                   COUNT(*) FILTER (WHERE sentiment = 'positive') AS positive_count_4h,
-                   COUNT(*) FILTER (WHERE sentiment = 'negative') AS negative_count_4h,
-                   (COUNT(*) FILTER (WHERE sentiment = 'positive')
-                    - COUNT(*) FILTER (WHERE sentiment = 'negative'))::DOUBLE PRECISION
-                     / NULLIF(COUNT(*), 0) AS sentiment_index_4h
-            FROM posts
-            WHERE timestamp >= NOW() - INTERVAL '4 hours'
-            GROUP BY symbol
-        ),
-        hourly_counts AS (
-            SELECT symbol, date_trunc('hour', timestamp) AS bucket_hour,
-                   COUNT(*)::DOUBLE PRECISION AS post_count
-            FROM posts
-            WHERE timestamp >= NOW() - INTERVAL '28 days'
-              AND timestamp < NOW() - INTERVAL '4 hours'
-            GROUP BY symbol, date_trunc('hour', timestamp)
-        ),
-        baseline AS (
-            SELECT symbol,
-                   AVG(post_count) AS mean_hourly,
-                   STDDEV_SAMP(post_count) AS stddev_hourly,
-                   COUNT(*) AS sample_count
-            FROM hourly_counts
-            GROUP BY symbol
-        )
-        SELECT universe.symbol,
-               COALESCE(current_stats.post_count_4h, 0) AS post_count_4h,
-               COALESCE(current_stats.positive_count_4h, 0) AS positive_count_4h,
-               COALESCE(current_stats.negative_count_4h, 0) AS negative_count_4h,
-               COALESCE(current_stats.sentiment_index_4h, 0.0) AS sentiment_index_4h,
-               CASE
-                   WHEN baseline.sample_count < 8 OR baseline.stddev_hourly IS NULL
-                        OR baseline.stddev_hourly = 0 THEN NULL
-                   ELSE ((COALESCE(current_stats.post_count_4h, 0) / 4.0)
-                         - baseline.mean_hourly) / baseline.stddev_hourly
-               END AS buzz_z,
-               COALESCE(baseline.mean_hourly, 0.0) AS baseline_hourly,
-               COALESCE(baseline.sample_count, 0) AS baseline_samples
-        FROM tracked_symbols AS universe
-        LEFT JOIN current_stats USING (symbol)
-        LEFT JOIN baseline USING (symbol)
-        WHERE universe.is_active
-        ORDER BY buzz_z DESC NULLS LAST, post_count_4h DESC, universe.symbol
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal_error)?;
+    if let Some(cached) = state.leaderboard_cache.get().await {
+        return Ok(Json(cached));
+    }
 
-    let entries = rows
+    let rows = sqlx::query(LEADERBOARD_SQL)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(internal_error)?;
+
+    let entries: Vec<LeaderboardEntry> = rows
         .into_iter()
         .map(|row| {
             let post_count_4h: i64 = row.get("post_count_4h");
@@ -768,6 +1028,7 @@ async fn leaderboard_handler(
             }
         })
         .collect();
+    state.leaderboard_cache.set(entries.clone()).await;
     Ok(Json(entries))
 }
 
@@ -788,22 +1049,44 @@ fn source_status(posts_1h: i64, posts_24h: i64, age_seconds: Option<f64>) -> Str
 async fn sources_handler(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<SourceHealth>>, (StatusCode, String)> {
+    if let Some(cached) = state.sources_cache.get().await {
+        return Ok(Json(cached));
+    }
+
     let platforms = vec!["bluesky", "stocktwits", "finnhub", "alpaca"];
-    let rows = sqlx::query(
-        r#"
-        SELECT platform,
-               COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 hour') AS posts_1h,
-               COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '24 hours') AS posts_24h,
-               MAX(timestamp) AS last_ingest
-        FROM posts
-        WHERE platform = ANY($1) AND timestamp > NOW() - INTERVAL '7 days'
-        GROUP BY platform
-        "#,
-    )
-    .bind(&platforms)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal_error)?;
+    let posts_fut = async {
+        sqlx::query(
+            r#"
+            SELECT platform,
+                   COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 hour') AS posts_1h,
+                   COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '24 hours') AS posts_24h,
+                   MAX(timestamp) AS last_ingest
+            FROM posts
+            WHERE platform = ANY($1) AND timestamp > NOW() - INTERVAL '7 days'
+            GROUP BY platform
+            "#,
+        )
+        .bind(&platforms)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(internal_error)
+    };
+    let market_fut = async {
+        sqlx::query(
+            r#"
+            SELECT COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 hour') AS posts_1h,
+                   COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '24 hours') AS posts_24h,
+                   MAX(timestamp) AS last_ingest,
+                   (array_agg(market_session ORDER BY timestamp DESC))[1] AS market_session
+            FROM stock_quotes
+            WHERE timestamp > NOW() - INTERVAL '7 days'
+            "#,
+        )
+        .fetch_one(&state.pool)
+        .await
+        .map_err(internal_error)
+    };
+    let (rows, market_row) = tokio::try_join!(posts_fut, market_fut)?;
 
     let mut by_platform = std::collections::HashMap::new();
     for row in rows {
@@ -837,19 +1120,6 @@ async fn sources_handler(
         })
         .collect::<Vec<_>>();
 
-    let market_row = sqlx::query(
-        r#"
-        SELECT COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 hour') AS posts_1h,
-               COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '24 hours') AS posts_24h,
-               MAX(timestamp) AS last_ingest,
-               (array_agg(market_session ORDER BY timestamp DESC))[1] AS market_session
-        FROM stock_quotes
-        WHERE timestamp > NOW() - INTERVAL '7 days'
-        "#,
-    )
-    .fetch_one(&state.pool)
-    .await
-    .map_err(internal_error)?;
     let posts_1h: i64 = market_row.get("posts_1h");
     let posts_24h: i64 = market_row.get("posts_24h");
     let last_ingest: Option<DateTime<Utc>> = market_row.get("last_ingest");
@@ -879,6 +1149,7 @@ async fn sources_handler(
         _ => 3,
     });
 
+    state.sources_cache.set(health.clone()).await;
     Ok(Json(health))
 }
 
@@ -888,30 +1159,14 @@ async fn sentiment_stats_handler(
 ) -> Result<Json<Vec<SentimentStats>>, (StatusCode, String)> {
     let cutoff = Utc::now() - chrono::Duration::hours(validated_hours(params.hours)?);
     let platform = params.platform.filter(|value| value != "all");
-    let rows = sqlx::query(
-        r#"
-        SELECT sentiment, COUNT(*) AS count
-        FROM posts
-        WHERE timestamp > $1
-          AND ($2::TEXT IS NULL OR symbol = $2)
-          AND ($3::TEXT IS NULL OR platform = $3)
-        GROUP BY sentiment
-        "#,
+    let stats = fetch_sentiment_stats(
+        &state.pool,
+        params.symbol.as_deref(),
+        platform.as_deref(),
+        cutoff,
     )
-    .bind(cutoff)
-    .bind(params.symbol.as_deref())
-    .bind(platform.as_deref())
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal_error)?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|row| SentimentStats {
-                sentiment: row.get("sentiment"),
-                count: row.get("count"),
-            })
-            .collect(),
-    ))
+    .await?;
+    Ok(Json(stats))
 }
 
 async fn topic_stats_handler(
@@ -920,31 +1175,14 @@ async fn topic_stats_handler(
 ) -> Result<Json<Vec<TopicStats>>, (StatusCode, String)> {
     let cutoff = Utc::now() - chrono::Duration::hours(validated_hours(params.hours)?);
     let platform = params.platform.filter(|value| value != "all");
-    let rows = sqlx::query(
-        r#"
-        SELECT topic_label, COUNT(*) AS count
-        FROM posts
-        WHERE timestamp > $1
-          AND ($2::TEXT IS NULL OR symbol = $2)
-          AND ($3::TEXT IS NULL OR platform = $3)
-        GROUP BY topic_label
-        ORDER BY count DESC
-        "#,
+    let stats = fetch_topic_stats(
+        &state.pool,
+        params.symbol.as_deref(),
+        platform.as_deref(),
+        cutoff,
     )
-    .bind(cutoff)
-    .bind(params.symbol.as_deref())
-    .bind(platform.as_deref())
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal_error)?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|row| TopicStats {
-                topic_label: row.get("topic_label"),
-                count: row.get("count"),
-            })
-            .collect(),
-    ))
+    .await?;
+    Ok(Json(stats))
 }
 
 async fn market_handler(
@@ -1197,6 +1435,37 @@ fn lagged_correlations(buckets: &[CorrelationBucket]) -> (f64, i32, Vec<LagSweep
     (max_r, best_lag, sweeps)
 }
 
+const HOT_POSTS_HOURLY_SQL: &str = r#"
+    SELECT
+        date_trunc('hour', p.timestamp, 'UTC') AS bucket_hour,
+        COUNT(*) FILTER (WHERE p.sentiment = 'positive')::BIGINT AS positive_count,
+        COUNT(*) FILTER (WHERE p.sentiment NOT IN ('positive', 'negative'))::BIGINT
+            AS neutral_count,
+        COUNT(*) FILTER (WHERE p.sentiment = 'negative')::BIGINT AS negative_count,
+        COALESCE(SUM(derived.weight), 0.0)::DOUBLE PRECISION AS total_weighted,
+        COALESCE(SUM(derived.weight * derived.signal), 0.0)::DOUBLE PRECISION
+            AS weighted_signal_sum,
+        COALESCE(SUM(derived.signal), 0.0)::DOUBLE PRECISION AS signal_sum,
+        COALESCE(SUM(derived.signal * derived.signal), 0.0)::DOUBLE PRECISION AS signal_sq_sum
+    FROM posts AS p
+    CROSS JOIN LATERAL (
+        SELECT
+            LN(GREATEST(COALESCE(p.engagement, 1), 0) + 1.0) AS weight,
+            COALESCE(
+                (p.scores ->> 'positive')::DOUBLE PRECISION,
+                CASE WHEN p.sentiment = 'positive' THEN 1.0 ELSE 0.0 END
+            ) - COALESCE(
+                (p.scores ->> 'negative')::DOUBLE PRECISION,
+                CASE WHEN p.sentiment = 'negative' THEN 1.0 ELSE 0.0 END
+            ) AS signal
+    ) AS derived
+    WHERE p.symbol = $1 AND p.timestamp >= $2
+      AND ($3::TEXT IS NULL OR p.platform = $3)
+      AND ($4::TEXT IS NULL OR p.topic_label = $4)
+    GROUP BY date_trunc('hour', p.timestamp, 'UTC')
+    ORDER BY bucket_hour
+"#;
+
 async fn correlation_handler(
     State(state): State<AppState>,
     Query(params): Query<CorrelationQueryParams>,
@@ -1218,15 +1487,6 @@ async fn correlation_handler(
             )
         })?;
 
-    let primary_future_symbol = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT future FROM tracked_symbols WHERE symbol = $1 AND is_active",
-    )
-    .bind(&symbol)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal_error)?
-    .flatten();
-
     let current_hour = now
         .with_minute(0)
         .and_then(|value| value.with_second(0))
@@ -1237,6 +1497,282 @@ async fn correlation_handler(
                 "failed to construct hourly timeline".to_string(),
             )
         })?;
+
+    let db_cutoff = cutoff - chrono::Duration::hours(1);
+
+    // Fetch all independent inputs concurrently.
+    let market_fut = async {
+        let primary_future_symbol = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT future FROM tracked_symbols WHERE symbol = $1 AND is_active",
+        )
+        .bind(&symbol)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(internal_error)?
+        .flatten();
+
+        let mut market_symbols = vec![symbol.clone()];
+        if let Some(ref fut) = primary_future_symbol {
+            if fut != &symbol {
+                market_symbols.push(fut.clone());
+            }
+        }
+
+        let hourly_market_rows = sqlx::query(
+            r#"
+            WITH hourly_sources AS (
+                SELECT
+                    symbol,
+                    bucket_hour,
+                    close_price,
+                    had_regular_session AS is_market_open,
+                    last_observed_at
+                FROM market_hourly_facts
+                WHERE symbol = ANY($1) AND bucket_hour >= $2
+
+                UNION ALL
+
+                SELECT
+                    symbol,
+                    date_trunc('hour', timestamp, 'UTC') AS bucket_hour,
+                    (array_agg(price ORDER BY timestamp DESC))[1] AS close_price,
+                    bool_or(market_session = 'regular') AS is_market_open,
+                    MAX(timestamp) AS last_observed_at
+                FROM stock_quotes
+                WHERE symbol = ANY($1) AND timestamp >= $2
+                GROUP BY symbol, date_trunc('hour', timestamp, 'UTC')
+            ),
+            hourly_closes AS (
+                SELECT
+                    symbol,
+                    bucket_hour,
+                    (array_agg(close_price ORDER BY last_observed_at DESC))[1]
+                        AS close_price,
+                    bool_or(is_market_open) AS is_market_open
+                FROM hourly_sources
+                GROUP BY symbol, bucket_hour
+            ),
+            hourly_with_previous AS (
+                SELECT
+                    symbol,
+                    bucket_hour,
+                    close_price,
+                    is_market_open,
+                    lag(bucket_hour) OVER (
+                        PARTITION BY symbol ORDER BY bucket_hour
+                    ) AS previous_hour,
+                    lag(close_price) OVER (
+                        PARTITION BY symbol ORDER BY bucket_hour
+                    ) AS previous_close
+                FROM hourly_closes
+            )
+            SELECT
+                symbol,
+                bucket_hour,
+                close_price AS price,
+                CASE
+                    WHEN previous_hour = bucket_hour - INTERVAL '1 hour'
+                         AND previous_close <> 0
+                    THEN ((close_price - previous_close) / previous_close) * 100.0
+                    ELSE NULL
+                END AS price_change,
+                is_market_open
+            FROM hourly_with_previous
+            ORDER BY symbol, bucket_hour
+            "#,
+        )
+        .bind(&market_symbols)
+        .bind(db_cutoff)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(internal_error)?;
+
+        Ok::<_, (StatusCode, String)>((primary_future_symbol, hourly_market_rows))
+    };
+
+    let agg_fut = async {
+        sqlx::query(
+            r#"
+            WITH canonical AS (
+                SELECT
+                    bucket_hour,
+                    SUM(positive_count)::bigint AS positive_count,
+                    SUM(neutral_count)::bigint AS neutral_count,
+                    SUM(negative_count)::bigint AS negative_count,
+                    COALESCE(SUM(positive_weight_sum), 0.0)::double precision AS positive_weighted,
+                    COALESCE(SUM(negative_weight_sum), 0.0)::double precision AS negative_weighted,
+                    COALESCE(SUM(neutral_weight_sum), 0.0)::double precision AS neutral_weighted,
+                    COALESCE(SUM(weight_sum), 0.0)::double precision AS total_weighted,
+                    COALESCE(SUM(weighted_signal_sum), 0.0)::double precision AS weighted_signal_sum,
+                    COALESCE(SUM(signal_sum), 0.0)::double precision AS signal_sum,
+                    COALESCE(SUM(signal_sq_sum), 0.0)::double precision AS signal_sq_sum
+                FROM hourly_sentiment_facts
+                WHERE symbol = $1 AND bucket_hour >= $2
+                  AND ($3::TEXT IS NULL OR platform = $3)
+                  AND ($4::TEXT IS NULL OR topic_label = $4)
+                GROUP BY bucket_hour
+            ),
+            legacy AS (
+                SELECT
+                    legacy.bucket_hour,
+                    legacy.positive_count::bigint AS positive_count,
+                    legacy.neutral_count::bigint AS neutral_count,
+                    legacy.negative_count::bigint AS negative_count,
+                    legacy.positive_weighted::double precision AS positive_weighted,
+                    legacy.negative_weighted::double precision AS negative_weighted,
+                    legacy.neutral_weighted::double precision AS neutral_weighted,
+                    legacy.total_weighted::double precision AS total_weighted,
+                    (legacy.positive_weighted - legacy.negative_weighted)::double precision
+                        AS weighted_signal_sum,
+                    (legacy.positive_count - legacy.negative_count)::double precision AS signal_sum,
+                    (legacy.positive_count + legacy.negative_count)::double precision AS signal_sq_sum
+                FROM hourly_sentiment_agg AS legacy
+                WHERE legacy.symbol = $1
+                  AND legacy.bucket_hour >= $2
+                  AND $5::BOOLEAN = FALSE
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM canonical
+                      WHERE canonical.bucket_hour = legacy.bucket_hour
+                  )
+            )
+            SELECT
+                bucket_hour,
+                positive_count,
+                neutral_count,
+                negative_count,
+                positive_weighted,
+                negative_weighted,
+                neutral_weighted,
+                total_weighted,
+                weighted_signal_sum,
+                signal_sum,
+                signal_sq_sum,
+                (weighted_signal_sum / NULLIF(total_weighted, 0))::double precision AS sentiment_index
+            FROM canonical
+            UNION ALL
+            SELECT
+                bucket_hour,
+                positive_count,
+                neutral_count,
+                negative_count,
+                positive_weighted,
+                negative_weighted,
+                neutral_weighted,
+                total_weighted,
+                weighted_signal_sum,
+                signal_sum,
+                signal_sq_sum,
+                (weighted_signal_sum / NULLIF(total_weighted, 0))::double precision AS sentiment_index
+            FROM legacy
+            ORDER BY bucket_hour
+            "#,
+        )
+        .bind(&symbol)
+        .bind(cutoff)
+        .bind(platform.as_deref())
+        .bind(topic.as_deref())
+        .bind(is_filtered)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(internal_error)
+    };
+
+    let hot_posts_fut = async {
+        sqlx::query(HOT_POSTS_HOURLY_SQL)
+            .bind(&symbol)
+            .bind(cutoff)
+            .bind(platform.as_deref())
+            .bind(topic.as_deref())
+            .fetch_all(&state.pool)
+            .await
+            .map_err(internal_error)
+    };
+
+    let latest_session_fut = async {
+        Ok::<_, (StatusCode, String)>(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT market_session FROM stock_quotes WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1",
+            )
+            .bind(&symbol)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(internal_error)?
+            .flatten(),
+        )
+    };
+
+    let pe_relative_fut = async {
+        Ok::<_, (StatusCode, String)>(
+            sqlx::query_scalar::<_, Option<f64>>(
+                "SELECT pe_relative_sector FROM stock_metrics WHERE symbol = $1 ORDER BY updated_at DESC LIMIT 1",
+            )
+            .bind(&symbol)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(internal_error)?
+            .flatten()
+            .and_then(SectorRelativeScore::from_stored),
+        )
+    };
+
+    let vix_fut = async {
+        Ok::<_, (StatusCode, String)>(
+            sqlx::query_scalar::<_, Option<f64>>(
+                "SELECT price FROM stock_quotes WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1",
+            )
+            .bind(&state.vix_symbol)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(internal_error)?
+            .flatten(),
+        )
+    };
+
+    let coverage_fut = async {
+        sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+            r#"
+            SELECT LEAST(
+                (SELECT MIN(timestamp) FROM posts
+                 WHERE symbol = $1
+                   AND ($2::TEXT IS NULL OR platform = $2)
+                   AND ($3::TEXT IS NULL OR topic_label = $3)),
+                (SELECT MIN(bucket_hour) FROM hourly_sentiment_facts
+                 WHERE symbol = $1
+                   AND ($2::TEXT IS NULL OR platform = $2)
+                   AND ($3::TEXT IS NULL OR topic_label = $3)),
+                CASE WHEN $4::BOOLEAN = FALSE THEN
+                    (SELECT MIN(bucket_hour) FROM hourly_sentiment_agg WHERE symbol = $1)
+                ELSE NULL END
+            ) AS coverage_start
+            "#,
+        )
+        .bind(&symbol)
+        .bind(platform.as_deref())
+        .bind(topic.as_deref())
+        .bind(is_filtered)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(internal_error)
+    };
+
+    let (
+        (primary_future_symbol, hourly_market_rows),
+        agg_rows,
+        hot_post_rows,
+        latest_market_session,
+        pe_relative,
+        vix_price_opt,
+        coverage_start,
+    ) = tokio::try_join!(
+        market_fut,
+        agg_fut,
+        hot_posts_fut,
+        latest_session_fut,
+        pe_relative_fut,
+        vix_fut,
+        coverage_fut,
+    )?;
 
     let mut buckets: Vec<CorrelationBucket> = Vec::with_capacity(hours as usize + 1);
     let mut bucket_indices: std::collections::HashMap<DateTime<Utc>, usize> =
@@ -1282,89 +1818,12 @@ async fn correlation_handler(
         });
     }
 
-    // 1. Resample target and future quotes to UTC-hour closes
-    let db_cutoff = cutoff - chrono::Duration::hours(1);
-    let mut market_symbols = vec![symbol.clone()];
-    if let Some(ref fut) = primary_future_symbol {
-        if fut != &symbol {
-            market_symbols.push(fut.clone());
-        }
-    }
-
+    // 1. Apply resampled target and future quotes to UTC-hour closes
     struct HourlyMarketRow {
         bucket_hour: DateTime<Utc>,
         price: f64,
         price_change: Option<f64>,
     }
-
-    let hourly_market_rows = sqlx::query(
-        r#"
-        WITH hourly_sources AS (
-            SELECT
-                symbol,
-                bucket_hour,
-                close_price,
-                had_regular_session AS is_market_open,
-                last_observed_at
-            FROM market_hourly_facts
-            WHERE symbol = ANY($1) AND bucket_hour >= $2
-
-            UNION ALL
-
-            SELECT
-                symbol,
-                date_trunc('hour', timestamp, 'UTC') AS bucket_hour,
-                (array_agg(price ORDER BY timestamp DESC))[1] AS close_price,
-                bool_or(market_session = 'regular') AS is_market_open,
-                MAX(timestamp) AS last_observed_at
-            FROM stock_quotes
-            WHERE symbol = ANY($1) AND timestamp >= $2
-            GROUP BY symbol, date_trunc('hour', timestamp, 'UTC')
-        ),
-        hourly_closes AS (
-            SELECT
-                symbol,
-                bucket_hour,
-                (array_agg(close_price ORDER BY last_observed_at DESC))[1]
-                    AS close_price,
-                bool_or(is_market_open) AS is_market_open
-            FROM hourly_sources
-            GROUP BY symbol, bucket_hour
-        ),
-        hourly_with_previous AS (
-            SELECT
-                symbol,
-                bucket_hour,
-                close_price,
-                is_market_open,
-                lag(bucket_hour) OVER (
-                    PARTITION BY symbol ORDER BY bucket_hour
-                ) AS previous_hour,
-                lag(close_price) OVER (
-                    PARTITION BY symbol ORDER BY bucket_hour
-                ) AS previous_close
-            FROM hourly_closes
-        )
-        SELECT
-            symbol,
-            bucket_hour,
-            close_price AS price,
-            CASE
-                WHEN previous_hour = bucket_hour - INTERVAL '1 hour'
-                     AND previous_close <> 0
-                THEN ((close_price - previous_close) / previous_close) * 100.0
-                ELSE NULL
-            END AS price_change,
-            is_market_open
-        FROM hourly_with_previous
-        ORDER BY symbol, bucket_hour
-        "#,
-    )
-    .bind(&market_symbols)
-    .bind(db_cutoff)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal_error)?;
 
     let mut target_market_data = Vec::new();
     let mut future_market_data = Vec::new();
@@ -1416,93 +1875,7 @@ async fn correlation_handler(
         }
     }
 
-    // 2. Canonical facts and legacy aggregates
-    let agg_rows = sqlx::query(
-        r#"
-        WITH canonical AS (
-            SELECT
-                bucket_hour,
-                SUM(positive_count)::bigint AS positive_count,
-                SUM(neutral_count)::bigint AS neutral_count,
-                SUM(negative_count)::bigint AS negative_count,
-                COALESCE(SUM(positive_weight_sum), 0.0)::double precision AS positive_weighted,
-                COALESCE(SUM(negative_weight_sum), 0.0)::double precision AS negative_weighted,
-                COALESCE(SUM(neutral_weight_sum), 0.0)::double precision AS neutral_weighted,
-                COALESCE(SUM(weight_sum), 0.0)::double precision AS total_weighted,
-                COALESCE(SUM(weighted_signal_sum), 0.0)::double precision AS weighted_signal_sum,
-                COALESCE(SUM(signal_sum), 0.0)::double precision AS signal_sum,
-                COALESCE(SUM(signal_sq_sum), 0.0)::double precision AS signal_sq_sum
-            FROM hourly_sentiment_facts
-            WHERE symbol = $1 AND bucket_hour >= $2
-              AND ($3::TEXT IS NULL OR platform = $3)
-              AND ($4::TEXT IS NULL OR topic_label = $4)
-            GROUP BY bucket_hour
-        ),
-        legacy AS (
-            SELECT
-                legacy.bucket_hour,
-                legacy.positive_count::bigint AS positive_count,
-                legacy.neutral_count::bigint AS neutral_count,
-                legacy.negative_count::bigint AS negative_count,
-                legacy.positive_weighted::double precision AS positive_weighted,
-                legacy.negative_weighted::double precision AS negative_weighted,
-                legacy.neutral_weighted::double precision AS neutral_weighted,
-                legacy.total_weighted::double precision AS total_weighted,
-                (legacy.positive_weighted - legacy.negative_weighted)::double precision
-                    AS weighted_signal_sum,
-                (legacy.positive_count - legacy.negative_count)::double precision AS signal_sum,
-                (legacy.positive_count + legacy.negative_count)::double precision AS signal_sq_sum
-            FROM hourly_sentiment_agg AS legacy
-            WHERE legacy.symbol = $1
-              AND legacy.bucket_hour >= $2
-              AND $5::BOOLEAN = FALSE
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM canonical
-                  WHERE canonical.bucket_hour = legacy.bucket_hour
-              )
-        )
-        SELECT
-            bucket_hour,
-            positive_count,
-            neutral_count,
-            negative_count,
-            positive_weighted,
-            negative_weighted,
-            neutral_weighted,
-            total_weighted,
-            weighted_signal_sum,
-            signal_sum,
-            signal_sq_sum,
-            (weighted_signal_sum / NULLIF(total_weighted, 0))::double precision AS sentiment_index
-        FROM canonical
-        UNION ALL
-        SELECT
-            bucket_hour,
-            positive_count,
-            neutral_count,
-            negative_count,
-            positive_weighted,
-            negative_weighted,
-            neutral_weighted,
-            total_weighted,
-            weighted_signal_sum,
-            signal_sum,
-            signal_sq_sum,
-            (weighted_signal_sum / NULLIF(total_weighted, 0))::double precision AS sentiment_index
-        FROM legacy
-        ORDER BY bucket_hour
-        "#,
-    )
-    .bind(&symbol)
-    .bind(cutoff)
-    .bind(platform.as_deref())
-    .bind(topic.as_deref())
-    .bind(is_filtered)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal_error)?;
-
+    // 2. Apply canonical facts and legacy aggregates
     for row in agg_rows {
         let b_hour: DateTime<Utc> = row.get("bucket_hour");
         let b_hour_aligned = b_hour
@@ -1525,60 +1898,22 @@ async fn correlation_handler(
         }
     }
 
-    // 3. Overlay with live posts data (hot tier)
-    let post_rows = sqlx::query(
-        r#"
-        SELECT sentiment, scores, timestamp, engagement
-        FROM posts
-        WHERE symbol = $1 AND timestamp >= $2
-          AND ($3::TEXT IS NULL OR platform = $3)
-          AND ($4::TEXT IS NULL OR topic_label = $4)
-        "#,
-    )
-    .bind(&symbol)
-    .bind(cutoff)
-    .bind(platform.as_deref())
-    .bind(topic.as_deref())
-    .fetch_all(&state.pool)
-    .await
-    .map_err(internal_error)?;
-
-    for p in post_rows {
-        let p_ts: DateTime<Utc> = p.get("timestamp");
-        let p_ts_aligned = p_ts
+    // 3. Overlay with SQL-aggregated hourly live posts (hot tier)
+    for row in hot_post_rows {
+        let b_hour: DateTime<Utc> = row.get("bucket_hour");
+        let b_hour_aligned = b_hour
             .with_minute(0)
             .and_then(|v| v.with_second(0))
             .and_then(|v| v.with_nanosecond(0))
-            .unwrap_or(p_ts);
-        if let Some(&idx) = bucket_indices.get(&p_ts_aligned) {
-            let engagement: i32 = p.get::<Option<i32>, _>("engagement").unwrap_or(1).max(0);
-            let weight = (engagement as f64).ln_1p();
-            let sent: String = p.get("sentiment");
-            if sent == "positive" {
-                buckets[idx].positive += 1;
-            } else if sent == "negative" {
-                buckets[idx].negative += 1;
-            } else {
-                buckets[idx].neutral += 1;
-            }
-            total_weighted[idx] += weight;
-
-            let scores: Option<serde_json::Value> = p.get("scores");
-            let pos_prob = scores
-                .as_ref()
-                .and_then(|s| s.get("positive"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(if sent == "positive" { 1.0 } else { 0.0 });
-            let neg_prob = scores
-                .as_ref()
-                .and_then(|s| s.get("negative"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(if sent == "negative" { 1.0 } else { 0.0 });
-
-            let signal = pos_prob - neg_prob;
-            weighted_signal[idx] += weight * signal;
-            unweighted_signal_sum[idx] += signal;
-            unweighted_signal_sq_sum[idx] += signal * signal;
+            .unwrap_or(b_hour);
+        if let Some(&idx) = bucket_indices.get(&b_hour_aligned) {
+            buckets[idx].positive += row.get::<i64, _>("positive_count");
+            buckets[idx].neutral += row.get::<i64, _>("neutral_count");
+            buckets[idx].negative += row.get::<i64, _>("negative_count");
+            total_weighted[idx] += row.get::<f64, _>("total_weighted");
+            weighted_signal[idx] += row.get::<f64, _>("weighted_signal_sum");
+            unweighted_signal_sum[idx] += row.get::<f64, _>("signal_sum");
+            unweighted_signal_sq_sum[idx] += row.get::<f64, _>("signal_sq_sum");
         }
     }
 
@@ -1679,15 +2014,6 @@ async fn correlation_handler(
     };
 
     // 7. Closed regions
-    let latest_market_session = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT market_session FROM stock_quotes WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1",
-    )
-    .bind(&symbol)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal_error)?
-    .flatten();
-
     let mut raw_closed_regions = Vec::new();
     let mut current_start = None::<String>;
     for idx in 0..buckets.len() {
@@ -1784,24 +2110,6 @@ async fn correlation_handler(
     }
 
     // 9. Opportunity inputs and signals
-    let pe_relative = sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT pe_relative_sector FROM stock_metrics WHERE symbol = $1 ORDER BY updated_at DESC LIMIT 1",
-    )
-    .bind(&symbol)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal_error)?
-    .flatten()
-    .and_then(SectorRelativeScore::from_stored);
-
-    let vix_price_opt = sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT price FROM stock_quotes WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1",
-    )
-    .bind(&state.vix_symbol)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal_error)?
-    .flatten();
     let vix_price = vix_price_opt.unwrap_or(15.0);
 
     for i in 0..buckets.len() {
@@ -1888,31 +2196,6 @@ async fn correlation_handler(
     });
 
     // 11. Coverage
-    let coverage_start = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
-        r#"
-        SELECT LEAST(
-            (SELECT MIN(timestamp) FROM posts
-             WHERE symbol = $1
-               AND ($2::TEXT IS NULL OR platform = $2)
-               AND ($3::TEXT IS NULL OR topic_label = $3)),
-            (SELECT MIN(bucket_hour) FROM hourly_sentiment_facts
-             WHERE symbol = $1
-               AND ($2::TEXT IS NULL OR platform = $2)
-               AND ($3::TEXT IS NULL OR topic_label = $3)),
-            CASE WHEN $4::BOOLEAN = FALSE THEN
-                (SELECT MIN(bucket_hour) FROM hourly_sentiment_agg WHERE symbol = $1)
-            ELSE NULL END
-        ) AS coverage_start
-        "#,
-    )
-    .bind(&symbol)
-    .bind(platform.as_deref())
-    .bind(topic.as_deref())
-    .bind(is_filtered)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(internal_error)?;
-
     let coverage_complete = coverage_start.is_some_and(|start| start <= cutoff);
     let coverage_start_text = coverage_start.map(|value| value.to_rfc3339().replace("+00:00", "Z"));
     let coverage_notice = (!coverage_complete).then(|| {
@@ -2028,12 +2311,15 @@ async fn main() -> Result<()> {
         config.database_dsn.clone(),
         post_events.clone(),
     ));
+    let cache_ttl = stats_cache_ttl_from_env();
     let state = AppState {
         pool,
         post_events,
         vix_symbol: config.vix_symbol,
         admin_api_key: std::env::var("ADMIN_API_KEY").unwrap_or_default(),
         global_context_enabled: config.global_context_enabled,
+        leaderboard_cache: TtlCache::new(cache_ttl),
+        sources_cache: TtlCache::new(cache_ttl),
     };
 
     let mut app = Router::new()
@@ -2085,8 +2371,51 @@ async fn main() -> Result<()> {
 mod tests {
     use super::{
         compute_opportunity, compute_sentiment_macd, pearson, percentile, source_status,
-        validated_hours, SectorRelativeScore,
+        validated_hours, SectorRelativeScore, TtlCache, HOT_POSTS_HOURLY_SQL, LEADERBOARD_SQL,
+        SENTIMENT_STATS_SQL, TOPIC_STATS_SQL,
     };
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn ttl_cache_hits_expires_invalidates_and_respects_zero_ttl() {
+        let cache = TtlCache::new(Duration::from_secs(15));
+        let start = Instant::now();
+        assert_eq!(cache.get_at(start).await, None);
+
+        cache.set_at(start, vec!["NVDA".to_string()]).await;
+        assert_eq!(
+            cache.get_at(start + Duration::from_secs(14)).await,
+            Some(vec!["NVDA".to_string()])
+        );
+        assert_eq!(cache.get_at(start + Duration::from_secs(15)).await, None);
+
+        cache.set_at(start, vec!["AMD".to_string()]).await;
+        cache.invalidate().await;
+        assert_eq!(cache.get_at(start).await, None);
+
+        let disabled = TtlCache::new(Duration::ZERO);
+        disabled.set_at(start, vec!["SMH".to_string()]).await;
+        assert_eq!(disabled.get_at(start).await, None);
+    }
+
+    #[test]
+    fn analytical_queries_union_cold_and_hot_tiers_and_aggregate_hot_posts() {
+        assert!(LEADERBOARD_SQL.contains("hourly_sentiment_facts"));
+        assert!(LEADERBOARD_SQL.contains("hourly_sentiment_agg"));
+        assert!(LEADERBOARD_SQL.contains("date_trunc('hour', p.timestamp, 'UTC')"));
+
+        assert!(SENTIMENT_STATS_SQL.contains("hourly_sentiment_facts"));
+        assert!(SENTIMENT_STATS_SQL.contains("hourly_sentiment_agg"));
+        assert!(SENTIMENT_STATS_SQL.contains("FROM posts"));
+
+        assert!(TOPIC_STATS_SQL.contains("hourly_sentiment_facts"));
+        assert!(TOPIC_STATS_SQL.contains("NULLIF(topic_label, 'Unassigned')"));
+        assert!(TOPIC_STATS_SQL.contains("FROM posts"));
+
+        assert!(HOT_POSTS_HOURLY_SQL.contains("GROUP BY date_trunc('hour', p.timestamp, 'UTC')"));
+        assert!(HOT_POSTS_HOURLY_SQL.contains("weighted_signal_sum"));
+        assert!(HOT_POSTS_HOURLY_SQL.contains("signal_sq_sum"));
+    }
 
     #[test]
     fn validates_query_window_bounds() {

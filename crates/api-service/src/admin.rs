@@ -216,7 +216,10 @@ async fn create_symbol(
     .execute(&state.pool)
     .await;
     match result {
-        Ok(_) => Ok(Json(json!({"status": "success"}))),
+        Ok(_) => {
+            state.leaderboard_cache.invalidate().await;
+            Ok(Json(json!({"status": "success"})))
+        }
         Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23505") => {
             Err(ApiError::bad_request("Symbol already exists"))
         }
@@ -254,6 +257,7 @@ async fn update_symbol(
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("Symbol not found"));
     }
+    state.leaderboard_cache.invalidate().await;
     Ok(Json(json!({"status": "success"})))
 }
 
@@ -273,6 +277,7 @@ async fn delete_symbol(
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("Symbol not found"));
     }
+    state.leaderboard_cache.invalidate().await;
     Ok(Json(json!({"status": "success"})))
 }
 

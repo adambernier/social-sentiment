@@ -1,5 +1,14 @@
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
 services:
   rabbitmq:
+    <<: *service-defaults
     image: rabbitmq:3-management
     ports:
     - 127.0.0.1:5672:5672
@@ -16,11 +25,11 @@ services:
       timeout: 5s
       retries: 5
   postgres:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: postgres/Dockerfile
     image: social-sentiment-postgres:15-walg-v3.0.8
-    restart: unless-stopped
     environment:
     - POSTGRES_DB=${POSTGRES_DB}
     - POSTGRES_USER=${POSTGRES_USER}
@@ -95,6 +104,7 @@ services:
         condition: service_healthy
     restart: "no"
   preprocessing-service:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: Dockerfile.rust
@@ -107,12 +117,16 @@ services:
     - RUST_LOG=${RUST_LOG:-info}
     - TOPIC_MODEL_VERSION=${TOPIC_MODEL_VERSION:-zero-shot-onnx-v1}
     - PIPELINE_GIT_COMMIT=${PIPELINE_GIT_COMMIT:-unknown}
+    - ORT_INTRA_THREADS=${ORT_INTRA_THREADS:-}
+    - ORT_INTER_THREADS=${ORT_INTER_THREADS:-1}
+    - PREPROCESSING_BATCH_SIZE=${PREPROCESSING_BATCH_SIZE:-8}
     depends_on:
       rabbitmq:
         condition: service_healthy
       postgres:
         condition: service_healthy
   sentiment-service:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: Dockerfile.rust
@@ -124,10 +138,13 @@ services:
     - RUST_LOG=${RUST_LOG:-info}
     - SENTIMENT_MODEL_VERSION=${SENTIMENT_MODEL_VERSION:-fintwitbert-onnx-v1}
     - PIPELINE_GIT_COMMIT=${PIPELINE_GIT_COMMIT:-unknown}
+    - ORT_INTRA_THREADS=${ORT_INTRA_THREADS:-}
+    - ORT_INTER_THREADS=${ORT_INTER_THREADS:-1}
     depends_on:
       rabbitmq:
         condition: service_healthy
   storage-service:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: Dockerfile.rust
@@ -153,6 +170,7 @@ services:
       schema-migrate:
         condition: service_completed_successfully
   bluesky-producer:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: Dockerfile.rust
@@ -172,6 +190,7 @@ services:
       schema-migrate:
         condition: service_completed_successfully
   stocktwits-producer:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: Dockerfile.rust
@@ -191,6 +210,7 @@ services:
       schema-migrate:
         condition: service_completed_successfully
   reddit-producer:
+    <<: *service-defaults
     # Disabled by default -- Reddit can 403-block unauthenticated .json 
     # Re-enable with `docker compose --profile reddit up -d`
     # if we can get OAuth (oauth.reddit.com) is wired up
@@ -220,6 +240,7 @@ services:
       schema-migrate:
         condition: service_completed_successfully
   finnhub-producer:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: Dockerfile.rust
@@ -240,6 +261,7 @@ services:
       schema-migrate:
         condition: service_completed_successfully
   alpaca-producer:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: Dockerfile.rust
@@ -262,6 +284,7 @@ services:
       schema-migrate:
         condition: service_completed_successfully
   market-producer:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: Dockerfile.rust
@@ -287,6 +310,7 @@ services:
       rabbitmq:
         condition: service_healthy
   global-events-producer:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: Dockerfile.rust
@@ -304,6 +328,7 @@ services:
       schema-migrate:
         condition: service_completed_successfully
   api-service:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: Dockerfile.rust
@@ -319,7 +344,18 @@ services:
         condition: service_healthy
       schema-migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test:
+      - CMD
+      - bash
+      - -c
+      - "exec 3<>/dev/tcp/127.0.0.1/8000 && printf 'GET /health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -n 1 <&3 | grep -q '200'"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
   ui-service:
+    <<: *service-defaults
     build:
       context: ui-service
       dockerfile: Dockerfile
@@ -327,10 +363,20 @@ services:
         NEXT_PUBLIC_GLOBAL_CONTEXT_ENABLED: ${GLOBAL_CONTEXT_ENABLED:-false}
     environment:
     - API_URL=http://api-service:8000
-    - WATCHPACK_POLLING=true
     depends_on:
     - api-service
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
   prometheus:
+    <<: *service-defaults
     image: prom/prometheus:v2.45.0
     ports:
     - 127.0.0.1:9090:9090
@@ -338,6 +384,7 @@ services:
     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     - ./prometheus-alerts.yml:/etc/prometheus/alerts.yml:ro
   grafana:
+    <<: *service-defaults
     image: grafana/grafana:10.0.3
     environment:
     - GF_AUTH_ANONYMOUS_ENABLED=true
@@ -354,8 +401,8 @@ services:
     depends_on:
     - prometheus
   caddy:
+    <<: *service-defaults
     image: caddy:2.11.4-alpine
-    restart: unless-stopped
     environment:
     - SITE_ADDRESS=${SITE_ADDRESS}
     - ACME_EMAIL=${ACME_EMAIL}
@@ -382,11 +429,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
 volumes:
   postgres_data: null
   caddy_data: null

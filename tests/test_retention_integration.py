@@ -1,5 +1,6 @@
 import math
 import os
+import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -47,6 +48,7 @@ def retention_database():
             "0005_provenance_and_quality.sql",
             "0006_analytical_constraints.sql",
             "0007_stock_metrics_constraints.sql",
+            "0008_index_optimization.sql",
         ):
             conn.execute((migrations_dir / migration_name).read_text())
 
@@ -474,3 +476,223 @@ def test_boundary_simplex_posts_roll_up_cleanly_and_stock_metrics_reject_non_fin
                 WHERE symbol = 'NVDA'
                 """
             )
+
+
+def _load_api_sql_constant(const_name: str) -> str:
+    api_main = (
+        Path(__file__).resolve().parent.parent
+        / "crates"
+        / "api-service"
+        / "src"
+        / "main.rs"
+    ).read_text()
+    match = re.search(
+        rf'const {re.escape(const_name)}: &str = r#"(.*?)"#;',
+        api_main,
+        flags=re.DOTALL,
+    )
+    assert match is not None, f"Could not locate {const_name} in api-service/src/main.rs"
+    return re.sub(r"\$(\d+)", r"%(p\1)s", match.group(1))
+
+
+def test_api_sql_cold_hot_tier_unions_and_hot_hourly_aggregation(retention_database):
+    now = datetime.now(timezone.utc).replace(minute=30, second=0, microsecond=0)
+    cold_hour = (now - timedelta(days=20)).replace(minute=0)
+    hot_hour = (now - timedelta(hours=2)).replace(minute=0)
+    retention_cutoff = (now - timedelta(days=14)).replace(minute=0)
+
+    leaderboard_sql = _load_api_sql_constant("LEADERBOARD_SQL")
+    sentiment_stats_sql = _load_api_sql_constant("SENTIMENT_STATS_SQL")
+    topic_stats_sql = _load_api_sql_constant("TOPIC_STATS_SQL")
+    hot_posts_hourly_sql = _load_api_sql_constant("HOT_POSTS_HOURLY_SQL")
+
+    with _connect_to_retention_database(retention_database) as conn:
+        conn.execute(
+            "INSERT INTO tracked_symbols (symbol, is_active) VALUES ('NVDA', TRUE)"
+        )
+
+        # Insert 8 distinct cold-tier hours (~20d ago) plus 1 unassigned-topic post,
+        # then roll them into hourly_sentiment_facts and prune from posts.
+        for offset in range(8):
+            ts = cold_hour + timedelta(hours=offset, minutes=10)
+            conn.execute(
+                """
+                INSERT INTO posts (
+                    id, symbol, platform, text, timestamp, sentiment, scores,
+                    topic_id, topic_label, engagement
+                )
+                VALUES (
+                    %s, 'NVDA', 'bluesky', 'Cold tier baseline post',
+                    %s, 'positive',
+                    '{"positive": 0.8, "neutral": 0.1, "negative": 0.1}'::jsonb,
+                    %s, %s, 4
+                )
+                """,
+                [
+                    f"cold-{offset}",
+                    ts,
+                    -2 if offset == 0 else 0,
+                    None if offset == 0 else "Earnings & Guidance",
+                ],
+            )
+        assert _run_retention(conn, retention_cutoff) == (8, 8)
+        assert conn.execute("SELECT COUNT(*) FROM posts").fetchone() == (0,)
+
+        # Insert 2 hot-tier posts in the same UTC hour (one with explicit scores,
+        # one falling back to sentiment label when scores lacks probabilities).
+        conn.execute(
+            """
+            INSERT INTO posts (
+                id, symbol, platform, text, timestamp, sentiment, scores,
+                topic_id, topic_label, engagement
+            )
+            VALUES
+                (
+                    'hot-1', 'NVDA', 'bluesky', 'Hot positive',
+                    %s, 'positive',
+                    '{"positive": 0.9, "neutral": 0.05, "negative": 0.05}'::jsonb,
+                    0, 'Earnings & Guidance', 9
+                ),
+                (
+                    'hot-2', 'NVDA', 'finnhub', 'Hot negative fallback',
+                    %s, 'negative',
+                    '{}'::jsonb,
+                    -2, NULL, 3
+                )
+            """,
+            [hot_hour + timedelta(minutes=5), hot_hour + timedelta(minutes=20)],
+        )
+
+        # 1. Leaderboard 28d baseline must retain the 8 pruned cold-tier hours
+        #    (and not double-count hourly_sentiment_agg).
+        lb_rows = conn.execute(leaderboard_sql).fetchall()
+        assert len(lb_rows) == 1
+        symbol, post_4h, pos_4h, neg_4h, _idx_4h, _buzz_z, mean_hr, samples = lb_rows[0]
+        assert symbol == "NVDA"
+        assert (post_4h, pos_4h, neg_4h) == (2, 1, 1)
+        assert samples == 8
+        assert mean_hr == pytest.approx(1.0)
+
+        # 2. Dashboard / stats sentiment & topic queries must union cold + hot tiers
+        #    and merge cold 'Unassigned' with hot NULL topic_label.
+        window_cutoff = now - timedelta(days=30)
+        sentiment_rows = dict(
+            conn.execute(
+                sentiment_stats_sql,
+                {"p1": window_cutoff, "p2": "NVDA", "p3": None},
+            ).fetchall()
+        )
+        assert sentiment_rows == {"positive": 9, "negative": 1}
+
+        filtered_sentiment = dict(
+            conn.execute(
+                sentiment_stats_sql,
+                {"p1": window_cutoff, "p2": "NVDA", "p3": "bluesky"},
+            ).fetchall()
+        )
+        assert filtered_sentiment == {"positive": 9}
+
+        topic_rows = dict(
+            conn.execute(
+                topic_stats_sql,
+                {"p1": window_cutoff, "p2": "NVDA", "p3": None},
+            ).fetchall()
+        )
+        assert topic_rows == {"Earnings & Guidance": 8, None: 2}
+
+        # 3. Correlation hot-tier SQL aggregation must match per-post math exactly.
+        hot_rows = conn.execute(
+            hot_posts_hourly_sql,
+            {"p1": "NVDA", "p2": window_cutoff, "p3": None, "p4": None},
+        ).fetchall()
+        assert len(hot_rows) == 1
+        (
+            b_hour,
+            pos_cnt,
+            neu_cnt,
+            neg_cnt,
+            total_w,
+            weighted_sig,
+            sig_sum,
+            sig_sq_sum,
+        ) = hot_rows[0]
+        assert b_hour == hot_hour
+        assert (pos_cnt, neu_cnt, neg_cnt) == (1, 0, 1)
+        w1, s1 = math.log1p(9), 0.9 - 0.05
+        w2, s2 = math.log1p(3), -1.0
+        assert total_w == pytest.approx(w1 + w2)
+        assert weighted_sig == pytest.approx(w1 * s1 + w2 * s2)
+        assert sig_sum == pytest.approx(s1 + s2)
+        assert sig_sq_sum == pytest.approx(s1 * s1 + s2 * s2)
+
+
+def test_storage_bulk_unnest_insert_handles_duplicates_and_null_topics(
+    retention_database,
+):
+    storage_db = (
+        Path(__file__).resolve().parent.parent
+        / "crates"
+        / "storage-service"
+        / "src"
+        / "db.rs"
+    ).read_text()
+    match = re.search(
+        r'pub const INSERT_POSTS_BULK_SQL: &str = r#"(.*?)"#;',
+        storage_db,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    bulk_sql = re.sub(r"\$(\d+)", r"%(p\1)s", match.group(1))
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    # 3 rows in one UNNEST batch where row 2 duplicates row 1's (platform, id, symbol)
+    params = {
+        "p1": ["bulk-1", "bulk-1", "bulk-2"],
+        "p2": ["NVDA", "NVDA", "NVDA"],
+        "p3": ["bluesky", "bluesky", "finnhub"],
+        "p4": ["First post", "Duplicate in batch", "Second post"],
+        "p5": [now, now, now + timedelta(seconds=10)],
+        "p6": ["positive", "positive", "neutral"],
+        "p7": [
+            '{"positive": 0.8, "neutral": 0.1, "negative": 0.1}',
+            '{"positive": 0.8, "neutral": 0.1, "negative": 0.1}',
+            '{"positive": 0.1, "neutral": 0.8, "negative": 0.1}',
+        ],
+        "p8": [0, 0, -2],
+        "p9": ["Earnings & Guidance", "Earnings & Guidance", None],
+        "p10": [5, 5, 1],
+        "p11": [now, now, now],
+        "p12": [now, now, now],
+        "p13": [now, now, now],
+        "p14": [now, now, now],
+        "p15": [now, now, now],
+        "p16": [1, 1, 1],
+        "p17": ["abc123", "abc123", "abc123"],
+        "p18": ["zero-shot-onnx-v1"] * 3,
+        "p19": ["topic-hash"] * 3,
+        "p20": ["fintwitbert-onnx-v1"] * 3,
+        "p21": ["sent-hash"] * 3,
+    }
+
+    with _connect_to_retention_database(retention_database) as conn:
+        cur = conn.execute(bulk_sql, params)
+        assert cur.rowcount == 2
+        rows = conn.execute(
+            "SELECT id, topic_label FROM posts ORDER BY id"
+        ).fetchall()
+        assert rows == [("bulk-1", "Earnings & Guidance"), ("bulk-2", None)]
+
+        # Migration 0008 drops redundant prefix indexes and adds platform+timestamp.
+        index_names = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                """
+            ).fetchall()
+        }
+        assert "posts_symbol_idx" not in index_names
+        assert "stock_quotes_symbol_idx" not in index_names
+        assert "posts_platform_timestamp_idx" in index_names

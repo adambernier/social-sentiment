@@ -47,11 +47,12 @@ pub fn parse(
             return outcome;
         }
     };
+    let matcher = symbol.matcher();
     let matched = response
         .posts
         .into_iter()
         .filter(|post| since.is_none_or(|cursor| post.record.created_at.as_str() > cursor))
-        .filter(|post| symbol.matches(&post.record.text))
+        .filter(|post| matcher.matches(&post.record.text))
         .map(|post| {
             let engagement = post.like_count + 2 * post.repost_count + 3 * post.reply_count;
             let cursor = post.record.created_at.clone();

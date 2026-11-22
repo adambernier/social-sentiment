@@ -126,9 +126,16 @@ async fn persist_scored_batch(
 ) -> Result<(u64, u64)> {
     match database.insert_scored_batch(posts).await {
         Ok(count) => {
-            for (delivery, _) in deliveries {
+            // Safe to use a cumulative multi-ACK here: this channel runs a single
+            // sequential consumer, invalid/malformed messages are dead-lettered and
+            // ACKed immediately on receipt, and `deliveries` preserves delivery-tag
+            // order for all remaining unacked messages up through `last`.
+            if let Some((last_delivery, _)) = deliveries.last() {
                 channel
-                    .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
+                    .basic_ack(
+                        last_delivery.delivery_tag,
+                        BasicAckOptions { multiple: true },
+                    )
                     .await?;
             }
             increment_processed(deliveries.len() as u64);
@@ -305,6 +312,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::db::INSERT_POSTS_BULK_SQL;
     use super::is_permanent_sqlstate;
 
     #[test]
@@ -313,5 +321,12 @@ mod tests {
         assert!(is_permanent_sqlstate("23505"));
         assert!(!is_permanent_sqlstate("08006"));
         assert!(!is_permanent_sqlstate("40001"));
+    }
+
+    #[test]
+    fn bulk_insert_uses_unnest_with_conflict_ignore() {
+        assert!(INSERT_POSTS_BULK_SQL.contains("FROM UNNEST("));
+        assert!(INSERT_POSTS_BULK_SQL.contains("$21::TEXT[]"));
+        assert!(INSERT_POSTS_BULK_SQL.contains("ON CONFLICT (platform, id, symbol) DO NOTHING"));
     }
 }

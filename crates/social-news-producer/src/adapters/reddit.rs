@@ -37,6 +37,10 @@ pub fn parse(
         return outcome;
     };
 
+    let matchers: Vec<_> = symbols
+        .iter()
+        .map(|symbol| (symbol, symbol.matcher()))
+        .collect();
     let mut items = Vec::new();
     for child in children {
         let Some(comment) = child.get("data").and_then(Value::as_object) else {
@@ -72,10 +76,10 @@ pub fn parse(
         let posts = if text.is_empty() {
             Vec::new()
         } else {
-            symbols
+            matchers
                 .iter()
-                .filter(|symbol| symbol.matches(body))
-                .map(|symbol| {
+                .filter(|(_, matcher)| matcher.matches(body))
+                .map(|(symbol, _)| {
                     raw_post(
                         format!("rd_{id}"),
                         &symbol.symbol,

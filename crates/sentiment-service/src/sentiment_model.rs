@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ort::session::Session;
 use ort::value::Value;
+use social_sentiment_core::config::OrtThreadConfig;
 use social_sentiment_core::model_identity::sha256_file;
 use std::collections::HashMap;
 use std::path::Path;
@@ -42,7 +43,13 @@ impl SentimentModel {
             pad_token: "[PAD]".to_string(),
         }));
 
-        let session = Session::builder()?.commit_from_file(&model_path)?;
+        let threads = OrtThreadConfig::from_env();
+        let session = Session::builder()?
+            .with_intra_threads(threads.intra_threads)
+            .map_err(|e| anyhow::anyhow!("Failed to set ORT intra_threads: {e}"))?
+            .with_inter_threads(threads.inter_threads)
+            .map_err(|e| anyhow::anyhow!("Failed to set ORT inter_threads: {e}"))?
+            .commit_from_file(&model_path)?;
 
         let model_hash = sha256_file(&model_path)?;
         let version = std::env::var("SENTIMENT_MODEL_VERSION")
@@ -143,23 +150,13 @@ impl SentimentModel {
 
 #[cfg(test)]
 mod tests {
+    use social_sentiment_math::postprocess::{sentiment_softmax_and_label, SentimentLabel};
 
     #[test]
     fn test_softmax_calculation() {
-        let l0 = 1.0f32;
-        let l1 = 2.0f32;
-        let l2 = 0.5f32;
-        let max_l = l0.max(l1).max(l2);
-        let e0 = (l0 - max_l).exp();
-        let e1 = (l1 - max_l).exp();
-        let e2 = (l2 - max_l).exp();
-        let sum_e = e0 + e1 + e2;
-
-        let p0 = (e0 / sum_e) as f64;
-        let p1 = (e1 / sum_e) as f64;
-        let p2 = (e2 / sum_e) as f64;
-
-        assert!((p0 + p1 + p2 - 1.0).abs() < 1e-5);
-        assert!(p1 > p0 && p1 > p2);
+        let pred = sentiment_softmax_and_label([1.0, 2.0, 0.5]).expect("finite logits");
+        assert!((pred.neutral + pred.positive + pred.negative - 1.0).abs() < 1e-12);
+        assert_eq!(pred.label, SentimentLabel::Positive);
+        assert!(pred.positive > pred.neutral && pred.positive > pred.negative);
     }
 }

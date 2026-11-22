@@ -8,6 +8,8 @@
 }
 
 {$SITE_ADDRESS} {
+	encode zstd gzip
+
 	# API traffic -> Rust Axum backend
 	@api {
 		path /api/*

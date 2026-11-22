@@ -21,6 +21,7 @@ pub fn parse(
             return outcome;
         }
     };
+    let matcher = symbol.matcher();
     let mut items = Vec::new();
     for article in articles {
         let Some(raw_id) = article.get("id") else {
@@ -55,7 +56,7 @@ pub fn parse(
         if text.trim().is_empty() {
             continue;
         }
-        let posts = if symbol.matches(&text) {
+        let posts = if matcher.matches(&text) {
             let timestamp = article
                 .get("datetime")
                 .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))

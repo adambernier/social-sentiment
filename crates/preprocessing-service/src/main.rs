@@ -118,6 +118,19 @@ async fn retry_or_dead_letter(
     Ok(())
 }
 
+const DEFAULT_BATCH_SIZE: usize = 8;
+const MAX_BATCH_SIZE: usize = 32;
+const BATCH_TIMEOUT: Duration = Duration::from_millis(500);
+
+fn configured_batch_size() -> usize {
+    std::env::var("PREPROCESSING_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&size| size > 0)
+        .unwrap_or(DEFAULT_BATCH_SIZE)
+        .clamp(1, MAX_BATCH_SIZE)
+}
+
 fn delivery_headers(delivery: &lapin::message::Delivery) -> FieldTable {
     delivery
         .properties
@@ -127,10 +140,132 @@ fn delivery_headers(delivery: &lapin::message::Delivery) -> FieldTable {
         .unwrap_or_default()
 }
 
+struct PendingPost {
+    raw: RawPost,
+    cleaned: String,
+    delivery: lapin::message::Delivery,
+    payload: Vec<u8>,
+}
+
+async fn process_batch(
+    batch: Vec<PendingPost>,
+    topic_model: Arc<TopicModel>,
+    channel: &Channel,
+    input_queue: &str,
+    output_queue: &str,
+) -> Result<()> {
+    let cleaned_texts: Vec<String> = batch.iter().map(|item| item.cleaned.clone()).collect();
+    let inference_model = Arc::clone(&topic_model);
+    let predictions =
+        match tokio::task::spawn_blocking(move || inference_model.predict_batch(&cleaned_texts))
+            .await
+        {
+            Ok(Ok(results)) if results.len() == batch.len() => results,
+            Ok(Ok(results)) => {
+                let error_message = format!(
+                    "topic model returned {} results for {} posts",
+                    results.len(),
+                    batch.len()
+                );
+                for item in batch {
+                    retry_or_dead_letter(
+                        channel,
+                        input_queue,
+                        &item.payload,
+                        &item.delivery,
+                        get_attempt_header(&item.delivery),
+                        &error_message,
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+            Ok(Err(err)) => {
+                let error_message = err.to_string();
+                for item in batch {
+                    retry_or_dead_letter(
+                        channel,
+                        input_queue,
+                        &item.payload,
+                        &item.delivery,
+                        get_attempt_header(&item.delivery),
+                        &error_message,
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+            Err(err) => {
+                let error_message = err.to_string();
+                for item in batch {
+                    retry_or_dead_letter(
+                        channel,
+                        input_queue,
+                        &item.payload,
+                        &item.delivery,
+                        get_attempt_header(&item.delivery),
+                        &error_message,
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+        };
+
+    for (item, (topic_id, topic_label)) in batch.into_iter().zip(predictions) {
+        let now = Utc::now();
+        let clean_post = CleanPost {
+            id: item.raw.id.clone(),
+            symbol: item.raw.symbol.clone(),
+            platform: item.raw.platform,
+            text: item.cleaned,
+            timestamp: item.raw.timestamp,
+            topic_id: Some(topic_id),
+            topic_label: Some(topic_label),
+            engagement: item.raw.engagement,
+            ingested_at: item.raw.ingested_at,
+            engagement_observed_at: item.raw.engagement_observed_at,
+            source_schema_version: item.raw.source_schema_version,
+            pipeline_git_commit: item.raw.pipeline_git_commit,
+            cleaned_at: now,
+            topic_scored_at: now,
+            topic_model_version: topic_model.version.clone(),
+            topic_model_hash: topic_model.model_hash.clone(),
+        };
+        let clean_payload = serde_json::to_vec(&clean_post)?;
+        let properties = BasicProperties::default()
+            .with_delivery_mode(2)
+            .with_content_type("application/json".into());
+
+        if let Err(err) = publish_confirmed(channel, output_queue, &clean_payload, properties).await
+        {
+            retry_or_dead_letter(
+                channel,
+                input_queue,
+                &item.payload,
+                &item.delivery,
+                get_attempt_header(&item.delivery),
+                &err.to_string(),
+            )
+            .await?;
+            continue;
+        }
+        channel
+            .basic_ack(item.delivery.delivery_tag, BasicAckOptions::default())
+            .await?;
+        increment_processed(1);
+        info!(post_id = %item.raw.id, symbol = %item.raw.symbol, "preprocessed post");
+    }
+
+    Ok(())
+}
+
 async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> Result<()> {
+    let batch_size = configured_batch_size();
     info!(
         host = %config.rabbit_host,
         port = config.rabbit_port,
+        batch_size,
         "connecting to RabbitMQ"
     );
     let connection =
@@ -139,7 +274,9 @@ async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> 
     channel
         .confirm_select(ConfirmSelectOptions::default())
         .await?;
-    channel.basic_qos(10, BasicQosOptions::default()).await?;
+    channel
+        .basic_qos((batch_size * 2) as u16, BasicQosOptions::default())
+        .await?;
 
     let input_queue = &config.queue_raw_posts;
     let output_queue = &config.queue_clean_posts;
@@ -171,107 +308,58 @@ async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> 
         .await?;
     info!(queue = %input_queue, "ready to consume raw posts");
 
-    while let Some(delivery_result) = consumer.next().await {
-        let delivery = delivery_result?;
-        let payload = delivery.data.as_slice();
-        let attempt = get_attempt_header(&delivery);
+    let mut batch = Vec::with_capacity(batch_size);
 
-        let raw: RawPost = match serde_json::from_slice(payload) {
-            Ok(post) => post,
-            Err(err) => {
-                error!(%err, "malformed raw post message");
-                dead_letter_message(&channel, input_queue, payload, &delivery, &err.to_string())
-                    .await?;
-                continue;
+    loop {
+        let timeout = tokio::time::sleep(BATCH_TIMEOUT);
+        tokio::pin!(timeout);
+        tokio::select! {
+            delivery_result = consumer.next() => {
+                let delivery = delivery_result.ok_or_else(|| anyhow!("RabbitMQ consumer stream ended"))??;
+                let payload = delivery.data.clone();
+                let raw: RawPost = match serde_json::from_slice(&payload) {
+                    Ok(post) => post,
+                    Err(err) => {
+                        error!(%err, "malformed raw post message");
+                        dead_letter_message(&channel, input_queue, &payload, &delivery, &err.to_string())
+                            .await?;
+                        continue;
+                    }
+                };
+
+                let cleaned = clean_text(&raw.text);
+                if !is_valid(&cleaned) {
+                    channel
+                        .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
+                        .await?;
+                    increment_processed(1);
+                    continue;
+                }
+
+                batch.push(PendingPost {
+                    raw,
+                    cleaned,
+                    delivery,
+                    payload,
+                });
+                if batch.len() < batch_size {
+                    continue;
+                }
             }
-        };
-
-        let cleaned = clean_text(&raw.text);
-        if !is_valid(&cleaned) {
-            channel
-                .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
-                .await?;
-            increment_processed(1);
-            continue;
+            () = &mut timeout => {}
         }
 
-        let model = Arc::clone(&topic_model);
-        let model_input = cleaned.clone();
-        let prediction = tokio::task::spawn_blocking(move || model.predict(&model_input)).await;
-        let (topic_id, topic_label) = match prediction {
-            Ok(Ok(result)) => result,
-            Ok(Err(err)) => {
-                retry_or_dead_letter(
-                    &channel,
-                    input_queue,
-                    payload,
-                    &delivery,
-                    attempt,
-                    &err.to_string(),
-                )
-                .await?;
-                continue;
-            }
-            Err(err) => {
-                retry_or_dead_letter(
-                    &channel,
-                    input_queue,
-                    payload,
-                    &delivery,
-                    attempt,
-                    &err.to_string(),
-                )
-                .await?;
-                continue;
-            }
-        };
-
-        let now = Utc::now();
-        let clean_post = CleanPost {
-            id: raw.id.clone(),
-            symbol: raw.symbol.clone(),
-            platform: raw.platform,
-            text: cleaned,
-            timestamp: raw.timestamp,
-            topic_id: Some(topic_id),
-            topic_label: Some(topic_label),
-            engagement: raw.engagement,
-            ingested_at: raw.ingested_at,
-            engagement_observed_at: raw.engagement_observed_at,
-            source_schema_version: raw.source_schema_version,
-            pipeline_git_commit: raw.pipeline_git_commit,
-            cleaned_at: now,
-            topic_scored_at: now,
-            topic_model_version: topic_model.version.clone(),
-            topic_model_hash: topic_model.model_hash.clone(),
-        };
-        let clean_payload = serde_json::to_vec(&clean_post)?;
-        let properties = BasicProperties::default()
-            .with_delivery_mode(2)
-            .with_content_type("application/json".into());
-
-        if let Err(err) =
-            publish_confirmed(&channel, output_queue, &clean_payload, properties).await
-        {
-            retry_or_dead_letter(
+        if !batch.is_empty() {
+            process_batch(
+                std::mem::take(&mut batch),
+                Arc::clone(&topic_model),
                 &channel,
                 input_queue,
-                payload,
-                &delivery,
-                attempt,
-                &err.to_string(),
+                output_queue,
             )
             .await?;
-            continue;
         }
-        channel
-            .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
-            .await?;
-        increment_processed(1);
-        info!(post_id = %raw.id, symbol = %raw.symbol, "preprocessed post");
     }
-
-    Err(anyhow!("RabbitMQ consumer stream ended"))
 }
 
 #[tokio::main]
