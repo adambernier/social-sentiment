@@ -66,6 +66,17 @@ fn default_true() -> bool {
     true
 }
 
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0_u8;
+    for (&a, &b) in left.iter().zip(right.iter()) {
+        diff |= std::hint::black_box(a ^ b);
+    }
+    std::hint::black_box(diff) == 0
+}
+
 fn authorize(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
     if state.admin_api_key.is_empty() {
         return Err(ApiError::forbidden(
@@ -75,7 +86,8 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
     let supplied = headers
         .get("x-api-key")
         .and_then(|value| value.to_str().ok());
-    if supplied != Some(state.admin_api_key.as_str()) {
+    if !supplied.is_some_and(|key| constant_time_eq(key.as_bytes(), state.admin_api_key.as_bytes()))
+    {
         return Err(ApiError::forbidden("Invalid API Key"));
     }
     Ok(())
@@ -440,5 +452,13 @@ mod tests {
             }],
         };
         assert!(validate_rules(&replacement).is_err());
+    }
+
+    #[test]
+    fn constant_time_eq_compares_exact_bytes() {
+        assert!(constant_time_eq(b"secret-key", b"secret-key"));
+        assert!(!constant_time_eq(b"secret-key", b"secret-kez"));
+        assert!(!constant_time_eq(b"secret-key", b"secret-key-extra"));
+        assert!(constant_time_eq(b"", b""));
     }
 }

@@ -391,8 +391,14 @@ fn cors_layer_from_env() -> Option<CorsLayer> {
     })
 }
 
-async fn prometheus_handler() -> String {
-    metrics_body("api")
+async fn prometheus_handler() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        metrics_body("api"),
+    )
 }
 
 fn internal_error(error: sqlx::Error) -> (StatusCode, String) {
