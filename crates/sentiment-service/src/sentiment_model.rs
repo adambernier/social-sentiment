@@ -8,6 +8,34 @@ use std::path::Path;
 use std::sync::Mutex;
 use tokenizers::{EncodeInput, Tokenizer};
 
+const MAX_PADDED_TOKENS_PER_FORWARD: usize = 4_096;
+
+/// Group sequence indices into length-sorted sub-batches whose padded tensor area
+/// (`chunk.len() * chunk_max_len`) stays within `max_padded_tokens` so one long
+/// news article never forces 31 short social posts to pad out to 512 tokens.
+fn plan_token_budget_chunks(lengths: &[usize], max_padded_tokens: usize) -> Vec<Vec<usize>> {
+    if lengths.is_empty() {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..lengths.len()).collect();
+    order.sort_by_key(|&idx| lengths[idx]);
+
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+
+    for idx in order {
+        let projected_tokens = (current.len() + 1).saturating_mul(lengths[idx]);
+        if !current.is_empty() && projected_tokens > max_padded_tokens {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push(idx);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 pub struct SentimentModel {
     tokenizer: Tokenizer,
     session: Mutex<Session>,
@@ -34,14 +62,9 @@ impl SentimentModel {
             }))
             .map_err(|e| anyhow::anyhow!("Failed to set truncation: {}", e))?;
 
-        tokenizer.with_padding(Some(tokenizers::PaddingParams {
-            strategy: tokenizers::PaddingStrategy::BatchLongest,
-            direction: tokenizers::PaddingDirection::Right,
-            pad_to_multiple_of: None,
-            pad_id: 0,
-            pad_type_id: 0,
-            pad_token: "[PAD]".to_string(),
-        }));
+        // Keep encodings unpadded so we can pack length-sorted sub-batches and
+        // pad (id=0, mask=0, type_id=0) per chunk.
+        tokenizer.with_padding(None);
 
         let threads = OrtThreadConfig::from_env();
         let session = Session::builder()?
@@ -78,78 +101,89 @@ impl SentimentModel {
             .encode_batch(inputs, true)
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
-        let batch_size = texts.len();
-        let max_len = encodings
-            .iter()
-            .map(|e| e.get_ids().len())
-            .max()
-            .unwrap_or(0);
-
-        let mut input_ids_vec = vec![0i64; batch_size * max_len];
-        let mut attention_mask_vec = vec![0i64; batch_size * max_len];
-        let mut token_type_ids_vec = vec![0i64; batch_size * max_len];
-
-        for (i, encoding) in encodings.iter().enumerate() {
-            for (j, &id) in encoding.get_ids().iter().enumerate() {
-                input_ids_vec[i * max_len + j] = id as i64;
-            }
-            for (j, &mask) in encoding.get_attention_mask().iter().enumerate() {
-                attention_mask_vec[i * max_len + j] = mask as i64;
-            }
-            for (j, &type_id) in encoding.get_type_ids().iter().enumerate() {
-                token_type_ids_vec[i * max_len + j] = type_id as i64;
-            }
-        }
-
-        let shape = vec![batch_size as i64, max_len as i64];
-        let input_ids_tensor = Value::from_array((shape.clone(), input_ids_vec))?;
-        let attention_mask_tensor = Value::from_array((shape.clone(), attention_mask_vec))?;
-        let token_type_ids_tensor = Value::from_array((shape, token_type_ids_vec))?;
+        let lengths: Vec<usize> = encodings.iter().map(|e| e.get_ids().len()).collect();
+        let chunks = plan_token_budget_chunks(&lengths, MAX_PADDED_TOKENS_PER_FORWARD);
 
         let mut session_guard = self
             .session
             .lock()
             .map_err(|_| anyhow::anyhow!("ONNX session lock poisoned"))?;
 
-        let outputs = session_guard.run(ort::inputs![
-            "input_ids" => input_ids_tensor,
-            "attention_mask" => attention_mask_tensor,
-            "token_type_ids" => token_type_ids_tensor
-        ])?;
+        let mut results: Vec<Option<(String, HashMap<String, f64>)>> = vec![None; texts.len()];
 
-        let (out_shape, logits) = outputs[0].try_extract_tensor::<f32>()?;
-        if out_shape.len() < 2 || out_shape[0] as usize != batch_size || out_shape[1] < 3 {
-            return Err(anyhow::anyhow!("Unexpected logits shape: {:?}", out_shape));
-        }
+        for chunk in chunks {
+            let chunk_size = chunk.len();
+            let max_len = chunk.iter().map(|&idx| lengths[idx]).max().unwrap_or(0);
 
-        let mut results = Vec::with_capacity(batch_size);
+            let mut input_ids_vec = vec![0i64; chunk_size * max_len];
+            let mut attention_mask_vec = vec![0i64; chunk_size * max_len];
+            let mut token_type_ids_vec = vec![0i64; chunk_size * max_len];
 
-        for i in 0..batch_size {
-            let offset = i * 3;
-            let l0 = logits[offset]; // neutral
-            let l1 = logits[offset + 1]; // positive
-            let l2 = logits[offset + 2]; // negative
+            for (row_idx, &orig_idx) in chunk.iter().enumerate() {
+                let encoding = &encodings[orig_idx];
+                let row_offset = row_idx * max_len;
+                for (j, &id) in encoding.get_ids().iter().enumerate() {
+                    input_ids_vec[row_offset + j] = id as i64;
+                }
+                for (j, &mask) in encoding.get_attention_mask().iter().enumerate() {
+                    attention_mask_vec[row_offset + j] = mask as i64;
+                }
+                for (j, &type_id) in encoding.get_type_ids().iter().enumerate() {
+                    token_type_ids_vec[row_offset + j] = type_id as i64;
+                }
+            }
 
-            let pred =
-                social_sentiment_math::postprocess::sentiment_softmax_and_label([l0, l1, l2])
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Non-finite sentiment logits for batch item {i}")
+            let shape = vec![chunk_size as i64, max_len as i64];
+            let input_ids_tensor = Value::from_array((shape.clone(), input_ids_vec))?;
+            let attention_mask_tensor = Value::from_array((shape.clone(), attention_mask_vec))?;
+            let token_type_ids_tensor = Value::from_array((shape, token_type_ids_vec))?;
+
+            let outputs = session_guard.run(ort::inputs![
+                "input_ids" => input_ids_tensor,
+                "attention_mask" => attention_mask_tensor,
+                "token_type_ids" => token_type_ids_tensor
+            ])?;
+
+            let (out_shape, logits) = outputs[0].try_extract_tensor::<f32>()?;
+            if out_shape.len() < 2 || out_shape[0] as usize != chunk_size || out_shape[1] < 3 {
+                return Err(anyhow::anyhow!("Unexpected logits shape: {:?}", out_shape));
+            }
+            let num_classes = out_shape[1] as usize;
+
+            for (row_idx, &orig_idx) in chunk.iter().enumerate() {
+                let offset = row_idx * num_classes;
+                let l0 = logits[offset]; // neutral
+                let l1 = logits[offset + 1]; // positive
+                let l2 = logits[offset + 2]; // negative
+
+                let pred =
+                    social_sentiment_math::postprocess::sentiment_softmax_and_label([l0, l1, l2])
+                        .ok_or_else(|| {
+                        anyhow::anyhow!("Non-finite sentiment logits for batch item {orig_idx}")
                     })?;
 
-            let mut scores = HashMap::new();
-            scores.insert("neutral".to_string(), pred.neutral);
-            scores.insert("positive".to_string(), pred.positive);
-            scores.insert("negative".to_string(), pred.negative);
+                let mut scores = HashMap::new();
+                scores.insert("neutral".to_string(), pred.neutral);
+                scores.insert("positive".to_string(), pred.positive);
+                scores.insert("negative".to_string(), pred.negative);
 
-            results.push((pred.label.as_str().to_string(), scores));
+                results[orig_idx] = Some((pred.label.as_str().to_string(), scores));
+            }
         }
 
-        Ok(results)
+        results
+            .into_iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                item.ok_or_else(|| anyhow::anyhow!("Missing sentiment prediction for item {idx}"))
+            })
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::plan_token_budget_chunks;
     use social_sentiment_math::postprocess::{sentiment_softmax_and_label, SentimentLabel};
 
     #[test]
@@ -158,5 +192,17 @@ mod tests {
         assert!((pred.neutral + pred.positive + pred.negative - 1.0).abs() < 1e-12);
         assert_eq!(pred.label, SentimentLabel::Positive);
         assert!(pred.positive > pred.neutral && pred.positive > pred.negative);
+    }
+
+    #[test]
+    fn token_budget_prevents_single_long_post_from_padding_entire_batch() {
+        let mut lengths = vec![30; 31];
+        lengths.push(512);
+        // 31 * 30 = 930 <= 4096 (chunk 1); adding the 512-token item would jump to
+        // 32 * 512 = 16384 > 4096, so it splits cleanly into its own chunk.
+        let chunks = plan_token_budget_chunks(&lengths, 4_096);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 31);
+        assert_eq!(chunks[1], vec![31]);
     }
 }

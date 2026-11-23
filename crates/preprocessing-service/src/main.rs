@@ -118,7 +118,7 @@ async fn retry_or_dead_letter(
     Ok(())
 }
 
-const DEFAULT_BATCH_SIZE: usize = 8;
+const DEFAULT_BATCH_SIZE: usize = 1;
 const MAX_BATCH_SIZE: usize = 32;
 const BATCH_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -275,7 +275,7 @@ async fn run_consumer_session(config: &Config, topic_model: Arc<TopicModel>) -> 
         .confirm_select(ConfirmSelectOptions::default())
         .await?;
     channel
-        .basic_qos((batch_size * 2) as u16, BasicQosOptions::default())
+        .basic_qos((batch_size * 2).max(4) as u16, BasicQosOptions::default())
         .await?;
 
     let input_queue = &config.queue_raw_posts;
